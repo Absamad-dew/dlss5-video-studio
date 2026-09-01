@@ -14,7 +14,8 @@ $runtimeFiles = @(
     'engine/ReShade.log',
     'engine/ReShade.log.previous',
     'engine/dlss5-video-host.log',
-    'engine/dlss5-video-host.log.previous'
+    'engine/dlss5-video-host.log.previous',
+    'engine/sl.log'
 )
 
 function Get-Sha256Hex {
