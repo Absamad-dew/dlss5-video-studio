@@ -146,17 +146,18 @@ function Resolve-HardwareProfile([string] $Requested) {
     return 'Laptop8GB'
 }
 
-function Resolve-RealtimeRenderScale([string] $Preset, [string] $ResolvedHardware, [int] $TargetHeight) {
+function Resolve-RealtimeRenderScale([string] $Preset, [string] $ResolvedHardware, [int] $TargetWidth, [int] $TargetHeight) {
     if ($Preset -eq 'Native') { return 1.0 }
     if ($Preset -eq 'Quality') { return 0.75 }
     if ($Preset -eq 'Balanced') { return 2.0 / 3.0 }
     if ($Preset -eq 'Performance') { return 0.5 }
 
-    # Auto targets the actual machines this package is built for. The laptop
-    # reconstructs 720p -> 1080p and 900p -> 1440p; the RTX 5080 reconstructs
-    # 1440p -> 4K. These are DLSS inputs, not an extra post-resize filter.
+    # Auto targets the actual machines this package is built for. Detect 4K by
+    # width as well as height so 3840x1600/1640 ultrawide sources do not fall
+    # into the much heavier 1440p profile merely because they are letterboxed.
+    # These are DLSS inputs, not an extra post-resize filter.
     if ($ResolvedHardware -eq 'RTX5080') {
-        if ($TargetHeight -ge 2000) { return 2.0 / 3.0 }
+        if ($TargetWidth -ge 3600 -or $TargetHeight -ge 2000) { return 2.0 / 3.0 }
         return 0.75
     }
     if ($TargetHeight -ge 2000) { return 0.5 }
@@ -345,7 +346,7 @@ if ($UseExternalUpscaler) {
     $RenderWidth = $OutputWidth
     $RenderHeight = $OutputHeight
 } elseif ($IsPreviewOnly) {
-    $ResolvedRealtimeRenderScale = Resolve-RealtimeRenderScale $RealtimeRenderPreset $ResolvedHardwareProfile $OutputHeight
+    $ResolvedRealtimeRenderScale = Resolve-RealtimeRenderScale $RealtimeRenderPreset $ResolvedHardwareProfile $OutputWidth $OutputHeight
     $RenderWidth = MultipleOfFour ($OutputWidth * $ResolvedRealtimeRenderScale)
     $RenderHeight = MultipleOfFour ($OutputHeight * $ResolvedRealtimeRenderScale)
 } elseif ($RenderScale -lt 1.0) {
