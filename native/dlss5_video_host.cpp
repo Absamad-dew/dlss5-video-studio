@@ -2183,6 +2183,11 @@ static int RunBatch(const BatchOptions &o)
         uint32_t current_chunk_frames = 0;
         uint32_t chunk_frames_left = 0;
         double stream_wait_ms = 0.0;
+        double stream_wait_max_ms = 0.0;
+        double stream_underrun_max_ms = 0.0;
+        uint32_t stream_wait_events = 0;
+        uint32_t stream_underruns = 0;
+        uint32_t stream_chunks_opened = 0;
         double chunk_encode_ms = 0.0;
         auto open_chunk = [&](uint32_t id, uint32_t frames, const fs::path &rgb_path,
                               const fs::path &motion_path, const fs::path &depth_path)
@@ -2224,7 +2229,19 @@ static int RunBatch(const BatchOptions &o)
             std::string line;
             if (!std::getline(std::cin, line))
                 throw std::runtime_error("stream command pipe closed early");
-            stream_wait_ms += ElapsedMs(stream_wait_begin);
+            const double waited_ms = ElapsedMs(stream_wait_begin);
+            stream_wait_ms += waited_ms;
+            stream_wait_max_ms = std::max(stream_wait_max_ms, waited_ms);
+            ++stream_wait_events;
+            // Waiting for the very first chunk is intentional startup
+            // buffering.  Any later wait longer than one scheduler quantum is
+            // a visible buffer underrun and must be reported separately.
+            if (o.preview_only && stream_chunks_opened > 0 && waited_ms > 8.0)
+            {
+                ++stream_underruns;
+                stream_underrun_max_ms = std::max(stream_underrun_max_ms, waited_ms);
+                Log("[host] REALTIME_BUFFER_UNDERRUN chunk=%u wait_ms=%.3f", stream_chunks_opened, waited_ms);
+            }
             const size_t command_start = line.find("CHUNK");
             if (command_start != std::string::npos && command_start > 0)
                 line.erase(0, command_start); // tolerate a UTF-8 BOM on redirected stdin
@@ -2242,6 +2259,7 @@ static int RunBatch(const BatchOptions &o)
             open_chunk(static_cast<uint32_t>(strtoul(id_text.c_str(), nullptr, 10)),
                        static_cast<uint32_t>(strtoul(frames_text.c_str(), nullptr, 10)),
                        fs::u8path(rgb_text), fs::u8path(motion_text), fs::u8path(depth_text));
+            ++stream_chunks_opened;
         };
         if (!o.stream) open_chunk(0, o.frames, o.input, o.motion, o.depth);
 
@@ -2681,8 +2699,8 @@ static int RunBatch(const BatchOptions &o)
         if (o.timings)
         {
             const double frames = static_cast<double>(o.frames);
-            Log("[host] DLSS5_BATCH_TIMING frames=%u pipeline=%d prefetch=%d async_write=%d total_ms=%.3f wall_total_ms=%.3f warmup_ms=%.3f startup_warmup_ms=%.3f stream_wait_ms=%.3f chunk_encode_ms=%.3f preview_pacing_ms=%.3f preview_present_fps=%.3f per_frame_ms=%.3f input_ms=%.3f guides_ms=%.3f prefetch_wait_ms=%.3f writer_wait_ms=%.3f upload_ms=%.3f submit_ms=%.3f readback_ms=%.3f readback_wait_ms=%.3f readback_pack_ms=%.3f write_ms=%.3f",
-                o.frames, kPipeline, o.prefetch ? 1 : 0, o.async_write ? 1 : 0, total_ms, wall_total_ms, warmup_ms, startup_warmup_ms, stream_wait_ms, chunk_encode_ms, preview_pacing_ms, preview_present_fps, total_ms / frames,
+            Log("[host] DLSS5_BATCH_TIMING frames=%u pipeline=%d prefetch=%d async_write=%d total_ms=%.3f wall_total_ms=%.3f warmup_ms=%.3f startup_warmup_ms=%.3f stream_wait_ms=%.3f stream_wait_max_ms=%.3f stream_wait_events=%u buffer_underruns=%u buffer_underrun_max_ms=%.3f chunk_encode_ms=%.3f preview_pacing_ms=%.3f preview_present_fps=%.3f per_frame_ms=%.3f input_ms=%.3f guides_ms=%.3f prefetch_wait_ms=%.3f writer_wait_ms=%.3f upload_ms=%.3f submit_ms=%.3f readback_ms=%.3f readback_wait_ms=%.3f readback_pack_ms=%.3f write_ms=%.3f",
+                o.frames, kPipeline, o.prefetch ? 1 : 0, o.async_write ? 1 : 0, total_ms, wall_total_ms, warmup_ms, startup_warmup_ms, stream_wait_ms, stream_wait_max_ms, stream_wait_events, stream_underruns, stream_underrun_max_ms, chunk_encode_ms, preview_pacing_ms, preview_present_fps, total_ms / frames,
                 input_ms / frames, guides_ms / frames, prefetch_wait_ms / frames,
                 writer_wait_ms / frames, upload_ms / frames,
                 evaluate_submit_ms / frames, readback_ms / frames,

@@ -66,9 +66,16 @@ def main() -> int:
     parser.add_argument("--height", required=True, type=int)
     parser.add_argument("--frames", required=True, type=int)
     parser.add_argument("--fps", required=True, type=float)
-    parser.add_argument("--layout", choices=["half-sbs", "full-sbs"], default="half-sbs")
+    parser.add_argument(
+        "--layout", choices=["half-sbs", "full-sbs", "half-ou", "full-ou"], default="half-sbs"
+    )
     parser.add_argument("--eye-separation", type=float, default=1.0)
     parser.add_argument("--convergence", type=float, default=0.48)
+    parser.add_argument("--depth-gamma", type=float, default=1.0)
+    parser.add_argument("--occlusion-fill", type=float, default=0.65)
+    parser.add_argument("--edge-feather", type=float, default=2.0)
+    parser.add_argument("--temporal-smoothing", type=float, default=0.55)
+    parser.add_argument("--eye-swap", action="store_true")
     parser.add_argument("--codec", choices=["h264", "h265"], default="h265")
     parser.add_argument("--quality", type=int, default=18)
     args = parser.parse_args()
@@ -81,7 +88,7 @@ def main() -> int:
 
     width, height = args.width, args.height
     output_width = width * 2 if args.layout == "full-sbs" else width
-    output_height = height
+    output_height = height * 2 if args.layout == "full-ou" else height
     decoder_command = [
         str(args.ffmpeg), "-nostdin", "-v", "error", "-i", str(args.input_video),
         "-vf", f"scale={width}:{height}:flags=lanczos,format=rgb24",
@@ -119,6 +126,7 @@ def main() -> int:
     extent = width * height * 3
     started = time.perf_counter()
     processed = 0
+    previous_depth: torch.Tensor | None = None
     try:
         for index, (depth_np, _, _) in enumerate(depth_frames(depth_paths)):
             if index >= args.frames:
@@ -134,7 +142,16 @@ def main() -> int:
             depth = F.interpolate(
                 depth[None, None], size=(height, width), mode="bilinear", align_corners=False
             ).to(dtype=dtype)
-            depth = F.avg_pool2d(depth, kernel_size=7, stride=1, padding=3)
+            depth = depth.clamp_(0.0, 1.0).pow_(max(0.25, args.depth_gamma))
+            temporal = max(0.0, min(0.95, args.temporal_smoothing))
+            if previous_depth is not None and temporal > 0:
+                depth = depth.mul(1.0 - temporal).add_(previous_depth, alpha=temporal)
+            previous_depth = depth.detach().clone()
+            feather_kernel = max(1, int(round(args.edge_feather)) * 2 + 1)
+            if feather_kernel > 1:
+                depth = F.avg_pool2d(
+                    depth, kernel_size=feather_kernel, stride=1, padding=feather_kernel // 2
+                )
             # About 1.2% screen-width maximum disparity at strength 1.0.  The
             # convergence plane stays fixed, while foreground/background move
             # in opposite directions for genuine binocular parallax.
@@ -144,10 +161,28 @@ def main() -> int:
             right_grid = torch.stack((grid_x + disparity_norm, grid_y), dim=-1).unsqueeze(0)
             left = F.grid_sample(frame, left_grid, mode="bilinear", padding_mode="border", align_corners=True)
             right = F.grid_sample(frame, right_grid, mode="bilinear", padding_mode="border", align_corners=True)
+            # Outside-grid samples are disocclusions.  Let the user trade a
+            # hard stretched border for a stable mono fill at those edges.
+            fill_strength = max(0.0, min(1.0, args.occlusion_fill))
+            if fill_strength > 0:
+                left_outside = (left_grid[..., 0].abs() > 1.0).to(dtype).unsqueeze(1)
+                right_outside = (right_grid[..., 0].abs() > 1.0).to(dtype).unsqueeze(1)
+                left = left * (1.0 - left_outside * fill_strength) + frame * left_outside * fill_strength
+                right = right * (1.0 - right_outside * fill_strength) + frame * right_outside * fill_strength
+            if args.eye_swap:
+                left, right = right, left
             if args.layout == "half-sbs":
                 left = F.interpolate(left, size=(height, width // 2), mode="bilinear", align_corners=False)
                 right = F.interpolate(right, size=(height, width // 2), mode="bilinear", align_corners=False)
-            stereo = torch.cat((left, right), dim=3)
+                stereo = torch.cat((left, right), dim=3)
+            elif args.layout == "full-sbs":
+                stereo = torch.cat((left, right), dim=3)
+            elif args.layout == "half-ou":
+                left = F.interpolate(left, size=(height // 2, width), mode="bilinear", align_corners=False)
+                right = F.interpolate(right, size=(height // 2, width), mode="bilinear", align_corners=False)
+                stereo = torch.cat((left, right), dim=2)
+            else:
+                stereo = torch.cat((left, right), dim=2)
             stereo = stereo[0].permute(1, 2, 0).mul_(255.0).clamp_(0, 255).byte().cpu().numpy()
             encoder_process.stdin.write(stereo.tobytes())
             processed += 1

@@ -14,7 +14,7 @@ $Invariant = [Globalization.CultureInfo]::InvariantCulture
 $Xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DLSS5 Video Studio · Realtime Player Portable 10" Width="1440" Height="940"
+        Title="DLSS5 Video Studio 12 · Realtime / Recording / VR" Width="1440" Height="940"
         MinWidth="1120" MinHeight="720" WindowStartupLocation="CenterScreen"
         Background="#090D14" Foreground="#DCE7F5" FontFamily="Segoe UI">
   <Window.Resources>
@@ -61,7 +61,13 @@ $Xaml = @'
             </StackPanel>
           </GroupBox>
 
-          <GroupBox Header="БЫСТРЫЙ ЗАПУСК">
+          <TabControl x:Name="WorkspaceTabs" Height="112" Margin="0,0,0,12" Background="#0A1019" BorderBrush="#334B6D">
+            <TabItem Header="▶  REALTIME" Tag="Realtime"><Border Background="#0D1822" Padding="14"><StackPanel><TextBlock Text="Живой GPU-вывод" FontSize="18" FontWeight="SemiBold" Foreground="#61D9FF"/><TextBlock Text="Буфер, перемотка, полноэкранный плеер, DLSS-G и отдельные настройки задержки." Foreground="#93A8C2" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
+            <TabItem Header="●  ЗАПИСЬ" Tag="Recording"><Border Background="#14170F" Padding="14"><StackPanel><TextBlock Text="Файл H.264 / H.265" FontSize="18" FontWeight="SemiBold" Foreground="#B7E36E"/><TextBlock Text="Локальное видео или ссылка; детальные motion/depth-параметры и автоматическое имя результата." Foreground="#A8B696" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
+            <TabItem Header="◉  VR / 3D" Tag="VR"><Border Background="#151224" Padding="14"><StackPanel><TextBlock Text="Отдельный VR-конвейер" FontSize="18" FontWeight="SemiBold" Foreground="#B59CFF"/><TextBlock Text="SBS/Over-Under, настоящие depth-ракурсы, параллакс, окклюзии и временная стабилизация." Foreground="#AEA3CE" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
+          </TabControl>
+
+          <GroupBox x:Name="QuickGroup" Header="БЫСТРЫЙ ЗАПУСК">
             <StackPanel>
               <TextBlock Text="Сценарий"/><ComboBox x:Name="QuickScenarioCombo"><ComboBoxItem Content="Ноутбук · realtime 1080p · ~50 FPS" Tag="Laptop1080"/><ComboBoxItem Content="Ноутбук · realtime 1440p" Tag="Laptop1440"/><ComboBoxItem Content="RTX 5080 · realtime 4K" Tag="RTX5080_4K"/><ComboBoxItem Content="Качественная запись" Tag="QualityRecord"/><ComboBoxItem Content="Настоящий 3D VR · depth SBS" Tag="DepthVR"/></ComboBox>
               <CheckBox x:Name="ExpertCheck" Content="Показать экспертные настройки" IsChecked="False" Margin="0,7,0,0"/>
@@ -73,8 +79,17 @@ $Xaml = @'
             <StackPanel>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                 <StackPanel><TextBlock Text="Режим просмотра"/><ComboBox x:Name="VrModeCombo"><ComboBoxItem Content="Обычное видео" Tag="Off"/><ComboBoxItem Content="3D VR · разные ракурсы из depth" Tag="DepthSBS"/><ComboBoxItem Content="VR-кинотеатр · плоский SBS" Tag="CinemaSBS"/><ComboBoxItem Content="Панорама 360° · equirectangular" Tag="Equirect360"/></ComboBox></StackPanel>
-                <StackPanel Grid.Column="2"><TextBlock Text="SBS-компоновка"/><ComboBox x:Name="VrLayoutCombo"><ComboBoxItem Content="Half-SBS · та же ширина" Tag="HalfSBS"/><ComboBoxItem Content="Full-SBS · двойная ширина" Tag="FullSBS"/></ComboBox></StackPanel>
+                <StackPanel Grid.Column="2"><TextBlock Text="Компоновка для шлема"/><ComboBox x:Name="VrLayoutCombo"><ComboBoxItem Content="Half-SBS · та же ширина" Tag="HalfSBS"/><ComboBoxItem Content="Full-SBS · двойная ширина" Tag="FullSBS"/><ComboBoxItem Content="Half-OU · верх/низ" Tag="HalfOU"/><ComboBoxItem Content="Full-OU · двойная высота" Tag="FullOU"/></ComboBox></StackPanel>
               </Grid>
+              <Expander Header="ТОНКАЯ НАСТРОЙКА DEPTH-СТЕРЕО" Foreground="#C1B4EE" Margin="2,4,2,9">
+                <Border BorderBrush="#3A315B" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Гамма глубины"/><TextBlock x:Name="VRDepthGammaValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRDepthGammaSlider" Minimum="0.25" Maximum="3" Value="1" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Заполнение раскрытых краёв"/><TextBlock x:Name="VROcclusionValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VROcclusionSlider" Minimum="0" Maximum="1" Value="0.65" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Смягчение границ depth"/><TextBlock x:Name="VREdgeValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VREdgeSlider" Minimum="0" Maximum="12" Value="2" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Временная стабилизация depth"/><TextBlock x:Name="VRTemporalValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRTemporalSlider" Minimum="0" Maximum="0.95" Value="0.55" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <CheckBox x:Name="VREyeSwapCheck" Content="Поменять левый и правый глаз"/>
+                </StackPanel></Border>
+              </Expander>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                 <StackPanel><TextBlock Text="Модель глубины"/><ComboBox x:Name="DepthModelCombo"><ComboBoxItem Content="DA2 Small · realtime" Tag="DA2Small"/><ComboBoxItem Content="Video Depth Anything · стабильное видео" Tag="VideoDepthSmall"/><ComboBoxItem Content="Depth Anything 3 Small · качество" Tag="DA3Small"/><ComboBoxItem Content="Depth Anything 3 Base · максимум" Tag="DA3Base"/></ComboBox></StackPanel>
                 <StackPanel Grid.Column="2"><Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="52"/></Grid.ColumnDefinitions><TextBlock Text="Сила 3D"/><TextBlock x:Name="VREyeValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#9C8CFF"/></Grid><Slider x:Name="VREyeSlider" Minimum="0.1" Maximum="3" Value="1" TickFrequency="0.1" IsSnapToTickEnabled="True"/><Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="52"/></Grid.ColumnDefinitions><TextBlock Text="Плоскость фокуса"/><TextBlock x:Name="VRConvergenceValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#9C8CFF"/></Grid><Slider x:Name="VRConvergenceSlider" Minimum="0.1" Maximum="0.9" Value="0.48" TickFrequency="0.02" IsSnapToTickEnabled="True"/></StackPanel>
@@ -87,7 +102,7 @@ $Xaml = @'
             </StackPanel>
           </GroupBox>
 
-          <GroupBox Header="ВЫХОД">
+          <GroupBox x:Name="OutputGroup" Header="ВЫХОД">
             <StackPanel>
             <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
               <StackPanel><TextBlock Text="Разрешение обработки и вывода"/><ComboBox x:Name="ModeCombo"><ComboBoxItem Content="Как в оригинале" Tag="Source"/><ComboBoxItem Content="2160p / до 4K" Tag="2160p"/><ComboBoxItem Content="1440p" Tag="1440p"/><ComboBoxItem Content="1080p" Tag="1080p"/><ComboBoxItem Content="720p" Tag="720p"/><ComboBoxItem Content="540p · минимальная нагрузка" Tag="540p"/></ComboBox></StackPanel>
@@ -121,6 +136,8 @@ $Xaml = @'
               <TextBlock Text="Cookies для закрытых/возрастных ссылок"/><ComboBox x:Name="NetworkCookiesCombo"><ComboBoxItem Content="Не использовать · публичные видео" Tag="None"/><ComboBoxItem Content="Google Chrome" Tag="chrome"/><ComboBoxItem Content="Microsoft Edge" Tag="edge"/><ComboBoxItem Content="Mozilla Firefox" Tag="firefox"/></ComboBox>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="76"/></Grid.ColumnDefinitions><TextBlock Text="Предварительная буферизация"/><TextBlock x:Name="RealtimeBufferValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#60D7FF"/></Grid>
               <Slider x:Name="RealtimeBufferSlider" Minimum="3" Maximum="30" Value="5" TickFrequency="1" IsSnapToTickEnabled="True"/>
+              <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="76"/></Grid.ColumnDefinitions><TextBlock Text="Размер чанка (0 = авто под GPU)"/><TextBlock x:Name="RealtimeChunkValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#60D7FF"/></Grid>
+              <Slider x:Name="RealtimeChunkSlider" Minimum="0" Maximum="192" Value="0" TickFrequency="8" IsSnapToTickEnabled="True"/>
               <Border Background="#0B1722" BorderBrush="#28435D" BorderThickness="1" CornerRadius="8" Padding="9" Margin="0,0,0,7"><TextBlock x:Name="RealtimeQualityInfo" Foreground="#78D9FF" TextWrapping="Wrap"/></Border>
               <Expander Header="ТОНКАЯ НАСТРОЙКА REALTIME" Foreground="#B6C5D8" Margin="2,1,2,9">
                 <Border BorderBrush="#27384F" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
@@ -139,6 +156,35 @@ $Xaml = @'
                 </StackPanel></Border>
               </Expander>
               <Border Background="#0C1622" BorderBrush="#263A51" BorderThickness="1" CornerRadius="8" Padding="9"><TextBlock Text="Управление в окне видео: Space — пауза; ←/→ — 10 с; Ctrl+←/→ — 60 с; Shift+←/→ или PageUp/PageDown — 5 мин; F11 или двойной клик — весь экран; F1/Tab — показать панель." Foreground="#9DB0C8" TextWrapping="Wrap"/></Border>
+            </StackPanel>
+          </GroupBox>
+
+          <GroupBox x:Name="RecordingPanel" Header="ЗАПИСЬ И ТОЧНЫЕ MOTION / DEPTH-КАРТЫ">
+            <StackPanel>
+              <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                <StackPanel><TextBlock Text="Качество видео по ссылке"/><ComboBox x:Name="RecordNetworkHeightCombo"><ComboBoxItem Content="До 720p" Tag="720"/><ComboBoxItem Content="До 1080p" Tag="1080"/><ComboBoxItem Content="До 1440p" Tag="1440"/><ComboBoxItem Content="До 2160p / 4K" Tag="2160"/></ComboBox></StackPanel>
+                <StackPanel Grid.Column="2"><TextBlock Text="Cookies браузера"/><ComboBox x:Name="RecordNetworkCookiesCombo"><ComboBoxItem Content="Не использовать" Tag="None"/><ComboBoxItem Content="Chrome" Tag="chrome"/><ComboBoxItem Content="Edge" Tag="edge"/><ComboBoxItem Content="Firefox" Tag="firefox"/></ComboBox></StackPanel>
+              </Grid>
+              <CheckBox x:Name="RecordFineGuideCheck" Content="Переопределить профиль и настроить карты вручную" IsChecked="False"/>
+              <Expander x:Name="RecordFineGuideExpander" Header="ТОНКАЯ НАСТРОЙКА ЗАПИСИ / VR" Foreground="#B6C5D8" IsExpanded="False">
+                <Border BorderBrush="#33452C" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Разрешение guide-карты"/><TextBlock x:Name="RecordGuideWidthValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordGuideWidthSlider" Minimum="256" Maximum="1024" Value="480" TickFrequency="64" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Полная нейроглубина: каждые N кадров"/><TextBlock x:Name="RecordDepthIntervalValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordDepthIntervalSlider" Minimum="1" Maximum="48" Value="2" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Минимальный адаптивный интервал"/><TextBlock x:Name="RecordDepthMinValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordDepthMinSlider" Minimum="1" Maximum="48" Value="2" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Порог уверенности"/><TextBlock x:Name="RecordConfidenceValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordConfidenceSlider" Minimum="0" Maximum="1" Value="0.45" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Порог движения"/><TextBlock x:Name="RecordMotionValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordMotionSlider" Minimum="0" Maximum="40" Value="10" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Временное смешивание depth"/><TextBlock x:Name="RecordTemporalValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordTemporalSlider" Minimum="0" Maximum="0.95" Value="0.35" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Порог смены сцены"/><TextBlock x:Name="RecordSceneValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordSceneSlider" Minimum="0.03" Maximum="0.35" Value="0.12" TickFrequency="0.01" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                    <StackPanel><TextBlock Text="Motion preset"/><ComboBox x:Name="RecordMotionPresetCombo"><ComboBoxItem Content="Quality" Tag="quality"/><ComboBoxItem Content="Balanced" Tag="balanced"/><ComboBoxItem Content="Realtime" Tag="realtime"/></ComboBox></StackPanel>
+                    <StackPanel Grid.Column="2"><TextBlock Text="Motion backend"/><ComboBox x:Name="RecordMotionBackendCombo"><ComboBoxItem Content="DIS · быстрее" Tag="dis"/><ComboBoxItem Content="RAFT-small · CUDA" Tag="raft"/></ComboBox></StackPanel>
+                  </Grid>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                    <StackPanel><Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="52"/></Grid.ColumnDefinitions><TextBlock Text="Итерации RAFT"/><TextBlock x:Name="RecordRaftValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordRaftSlider" Minimum="2" Maximum="10" Value="4" TickFrequency="1" IsSnapToTickEnabled="True"/></StackPanel>
+                    <StackPanel Grid.Column="2"><Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="52"/></Grid.ColumnDefinitions><TextBlock Text="Кадров в чанке (0 = авто)"/><TextBlock x:Name="RecordChunkValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordChunkSlider" Minimum="0" Maximum="192" Value="0" TickFrequency="8" IsSnapToTickEnabled="True"/></StackPanel>
+                  </Grid>
+                </StackPanel></Border>
+              </Expander>
             </StackPanel>
           </GroupBox>
 
@@ -195,7 +241,7 @@ $Xaml = @'
             </StackPanel></Border>
           </Expander>
 
-          <GroupBox Header="ДИАПАЗОН">
+          <GroupBox x:Name="RangeGroup" Header="ДИАПАЗОН">
             <StackPanel>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="Старт, секунд"/><TextBox x:Name="StartBox" Text="0"/></StackPanel><StackPanel Grid.Column="2"><TextBlock Text="Количество кадров"/><TextBox x:Name="FramesBox" Text="8"/></StackPanel></Grid>
               <CheckBox x:Name="FullVideoCheck" Content="Обработать всё видео от указанного старта"/>
@@ -223,6 +269,17 @@ $Reader = New-Object System.Xml.XmlNodeReader ([xml]$Xaml)
 $Window = [Windows.Markup.XamlReader]::Load($Reader)
 $Names = @('RuntimeStatus','InputBox','BrowseInput','PasteInput','SourceResolutionText','VideoInfo','ExpectedTimeText','RecordingPathPanel','OutputBox','BrowseOutput','QuickScenarioCombo','ExpertCheck','QuickScenarioInfo','VrGroup','StageGroup','UpscalerGroup','NeuralGroup','AdvancedParams','HardwareCombo','RenderPresetCombo','DepthModelCombo','VREyeSlider','VREyeValue','VRConvergenceSlider','VRConvergenceValue','FrameGenerationCombo','ModeCombo','CodecCombo','PerformanceCombo','LivePreviewCheck','QualitySlider','QualityValue','ComparisonCheck','KeepTempCheck','VrModeCombo','VrLayoutCombo','VrInfo','RealtimePanel','RealtimeFullscreenCheck','RealtimeQualityCombo','RealtimeQualityInfo','NetworkHeightCombo','NetworkCookiesCombo','RealtimeFpsCombo','RealtimeAudioCheck','RealtimeVolumeSlider','RealtimeVolumeValue','RealtimeBufferSlider','RealtimeBufferValue','GuideWidthSlider','GuideWidthValue','DepthIntervalSlider','DepthIntervalValue','DepthMinIntervalSlider','DepthMinIntervalValue','AdaptiveConfidenceSlider','AdaptiveConfidenceValue','AdaptiveMotionSlider','AdaptiveMotionValue','TemporalDepthSlider','TemporalDepthValue','SceneCutSlider','SceneCutValue','GuideMotionPresetCombo','GuideMotionBackendCombo','RaftUpdatesSlider','RaftUpdatesValue','UpscalerCombo','UpscalerVariantCombo','UpscalerStrengthSlider','UpscalerStrengthValue','UpscalerInfo','StageList','StageUp','StageDown','StageOrderInfo','PresetBox','SavePreset','DeletePreset','IntensitySlider','IntensityValue','ToneSlider','ToneValue','StructureSlider','StructureValue','SkinSlider','SkinValue','NrPresetCombo','StyleCombo','AutoMaskCheck','UpliftCheck','UICorrectionCheck','AggressionText','MotionXSlider','MotionXValue','MotionYSlider','MotionYValue','DepthCombo','TransferSlider','TransferValue','ColorSlider','ColorValue','PaperSlider','PaperValue','StartBox','FramesBox','FullVideoCheck','RangeHint','StatusText','DetailText','EtaText','ElapsedText','SpeedText','Preview','Placeholder','LogBox','Progress','ProgressHint','PlayButton','OpenVideo','OpenFolder','CancelButton','RunButton')
 foreach ($Name in $Names) { Set-Variable -Name $Name -Value $Window.FindName($Name) -Scope Script }
+$AdditionalNames = @(
+    'WorkspaceTabs','QuickGroup','OutputGroup','RecordingPanel','RangeGroup','RealtimeChunkSlider','RealtimeChunkValue',
+    'RecordNetworkHeightCombo','RecordNetworkCookiesCombo','RecordFineGuideCheck','RecordFineGuideExpander',
+    'RecordGuideWidthSlider','RecordGuideWidthValue','RecordDepthIntervalSlider','RecordDepthIntervalValue',
+    'RecordDepthMinSlider','RecordDepthMinValue','RecordConfidenceSlider','RecordConfidenceValue',
+    'RecordMotionSlider','RecordMotionValue','RecordTemporalSlider','RecordTemporalValue','RecordSceneSlider','RecordSceneValue',
+    'RecordMotionPresetCombo','RecordMotionBackendCombo','RecordRaftSlider','RecordRaftValue','RecordChunkSlider','RecordChunkValue',
+    'VRDepthGammaSlider','VRDepthGammaValue','VROcclusionSlider','VROcclusionValue','VREdgeSlider','VREdgeValue',
+    'VRTemporalSlider','VRTemporalValue','VREyeSwapCheck'
+)
+foreach ($Name in $AdditionalNames) { Set-Variable -Name $Name -Value $Window.FindName($Name) -Scope Script }
 
 $BuiltIn = [ordered]@{
     'Balanced · рекомендовано' = [ordered]@{ intensity=1.35; tone=1.15; structure=1.75; skin=1.25; preset=1; style=1; automask=$true; uplift=$true; ui=$false; motionx=1.0; motiony=1.0; depth=0; transfer=1.0; color=1.0; paper=1.0 }
@@ -282,42 +339,74 @@ function Refresh-Labels {
     $IntensityValue.Text=F $IntensitySlider.Value; $ToneValue.Text=F $ToneSlider.Value; $StructureValue.Text=F $StructureSlider.Value; $SkinValue.Text=F $SkinSlider.Value
     $MotionXValue.Text=F $MotionXSlider.Value; $MotionYValue.Text=F $MotionYSlider.Value; $TransferValue.Text=F $TransferSlider.Value; $ColorValue.Text=F $ColorSlider.Value; $PaperValue.Text=F $PaperSlider.Value
     $QualityValue.Text=[string][int]$QualitySlider.Value; $UpscalerStrengthValue.Text=F $UpscalerStrengthSlider.Value; $RealtimeBufferValue.Text=([string][int]$RealtimeBufferSlider.Value)+' сек'
+    $RealtimeChunkValue.Text=if([int]$RealtimeChunkSlider.Value-eq 0){'Авто'}else{[string][int]$RealtimeChunkSlider.Value}
     $RealtimeVolumeValue.Text=([string][int]$RealtimeVolumeSlider.Value)+'%';$RaftUpdatesValue.Text=[string][int]$RaftUpdatesSlider.Value
     $VREyeValue.Text=F $VREyeSlider.Value; $VRConvergenceValue.Text=F $VRConvergenceSlider.Value
     $GuideWidthValue.Text=([string][int]$GuideWidthSlider.Value)+' px'; $DepthIntervalValue.Text=[string][int]$DepthIntervalSlider.Value; $DepthMinIntervalValue.Text=[string][int]$DepthMinIntervalSlider.Value
     $AdaptiveConfidenceValue.Text=F $AdaptiveConfidenceSlider.Value; $AdaptiveMotionValue.Text=F $AdaptiveMotionSlider.Value; $TemporalDepthValue.Text=F $TemporalDepthSlider.Value; $SceneCutValue.Text=F $SceneCutSlider.Value
+    $RecordGuideWidthValue.Text=([string][int]$RecordGuideWidthSlider.Value)+' px';$RecordDepthIntervalValue.Text=[string][int]$RecordDepthIntervalSlider.Value;$RecordDepthMinValue.Text=[string][int]$RecordDepthMinSlider.Value
+    $RecordConfidenceValue.Text=F $RecordConfidenceSlider.Value;$RecordMotionValue.Text=F $RecordMotionSlider.Value;$RecordTemporalValue.Text=F $RecordTemporalSlider.Value;$RecordSceneValue.Text=F $RecordSceneSlider.Value
+    $RecordRaftValue.Text=[string][int]$RecordRaftSlider.Value;$RecordChunkValue.Text=if([int]$RecordChunkSlider.Value-eq 0){'Авто'}else{[string][int]$RecordChunkSlider.Value}
+    $VRDepthGammaValue.Text=F $VRDepthGammaSlider.Value;$VROcclusionValue.Text=F $VROcclusionSlider.Value;$VREdgeValue.Text=[string][int]$VREdgeSlider.Value;$VRTemporalValue.Text=F $VRTemporalSlider.Value
     if($IntensitySlider.Value -ge 1.8 -or $StructureSlider.Value -ge 1.9){$AggressionText.Text='Сильное влияние: возможна лишняя дорисовка и изменение лица.';$AggressionText.Foreground='#FF9A9A'}elseif($IntensitySlider.Value -le 1.1){$AggressionText.Text='Мягкое влияние: минимальный риск перерисовки.';$AggressionText.Foreground='#8DD8C5'}else{$AggressionText.Text='Выраженная детализация без максимального общего веса.';$AggressionText.Foreground='#A9BAD0'}
+}
+function Get-WorkspaceMode {
+    if ($WorkspaceTabs -and $WorkspaceTabs.SelectedItem) { return [string]$WorkspaceTabs.SelectedItem.Tag }
+    return 'Realtime'
 }
 function Update-ExpertUi {
     $Expert=[bool]$ExpertCheck.IsChecked
-    $DepthVr=(Combo-Tag $QuickScenarioCombo)-eq'DepthVR'
-    $VrGroup.Visibility=if($Expert-or$DepthVr){'Visible'}else{'Collapsed'}
     foreach($Panel in @($StageGroup,$UpscalerGroup,$NeuralGroup,$AdvancedParams)){$Panel.Visibility=if($Expert){'Visible'}else{'Collapsed'}}
+}
+function Update-WorkspaceUi {
+    $Workspace=Get-WorkspaceMode
+    $Realtime=$Workspace-eq'Realtime'
+    $Vr=$Workspace-eq'VR'
+    $RealtimePanel.Visibility=if($Realtime){'Visible'}else{'Collapsed'}
+    $RecordingPanel.Visibility=if($Realtime){'Collapsed'}else{'Visible'}
+    $VrGroup.Visibility=if($Vr){'Visible'}else{'Collapsed'}
+    $QuickGroup.Visibility=if($Realtime){'Visible'}else{'Collapsed'}
+    $RecordingPathPanel.Visibility=if($Realtime){'Collapsed'}else{'Visible'}
+    if($Realtime){
+        Select-StringTag $PerformanceCombo 'Realtime'
+        Select-StringTag $VrModeCombo 'Off'
+    }else{
+        if((Combo-Tag $PerformanceCombo)-eq'Realtime'){Select-StringTag $PerformanceCombo $(if($Vr){'Quality'}else{'Turbo'})}
+        if($Vr -and (Combo-Tag $VrModeCombo)-eq'Off'){Select-StringTag $VrModeCombo 'DepthSBS'}
+        if(-not $Vr){Select-StringTag $VrModeCombo 'Off'}
+    }
+    Update-ExpertUi;Update-ProfileUi;Update-VrUi;Update-Estimate
+    $RuntimeStatus.Text=if($Realtime){'● REALTIME · GPU-direct'}elseif($Vr){'● VR / 3D · запись'}else{'● ЗАПИСЬ · H.264 / H.265'}
 }
 function Apply-QuickScenario {
     $Scenario=Combo-Tag $QuickScenarioCombo
     switch($Scenario){
         'Laptop1080' {
+            $WorkspaceTabs.SelectedIndex=0
             Select-StringTag $HardwareCombo 'Laptop8GB';Select-StringTag $ModeCombo '1080p';Select-StringTag $RenderPresetCombo 'Auto'
             Select-StringTag $PerformanceCombo 'Realtime';Select-StringTag $UpscalerCombo 'None';Select-StringTag $FrameGenerationCombo 'MotionGPU';Select-StringTag $RealtimeFpsCombo 'Double';Select-StringTag $DepthModelCombo 'DA2Small';Apply-RealtimeProfile 'Fast'
             $QuickScenarioInfo.Text='1280×720 → DLSS 1080p; GPU motion x2 после DLSS. Цель на RTX 4060: около 50 FPS без записи.'
         }
         'Laptop1440' {
+            $WorkspaceTabs.SelectedIndex=0
             Select-StringTag $HardwareCombo 'Laptop8GB';Select-StringTag $ModeCombo '1440p';Select-StringTag $RenderPresetCombo 'Auto'
             Select-StringTag $PerformanceCombo 'Realtime';Select-StringTag $UpscalerCombo 'None';Select-StringTag $FrameGenerationCombo 'MotionGPU';Select-StringTag $RealtimeFpsCombo 'Double';Select-StringTag $DepthModelCombo 'DA2Small';Apply-RealtimeProfile 'Fast'
             $QuickScenarioInfo.Text='1600×900 → DLSS 1440p; motion-generation x2. Качество выше, запас FPS ниже, чем у 1080p.'
         }
         'RTX5080_4K' {
+            $WorkspaceTabs.SelectedIndex=0
             Select-StringTag $HardwareCombo 'RTX5080';Select-StringTag $ModeCombo '2160p';Select-StringTag $RenderPresetCombo 'Auto'
             Select-StringTag $PerformanceCombo 'Realtime';Select-StringTag $UpscalerCombo 'None';Select-StringTag $FrameGenerationCombo 'NvidiaDLSSG';Select-StringTag $RealtimeFpsCombo 'Source';Select-StringTag $DepthModelCombo 'DA2Small';Apply-RealtimeProfile 'Balanced'
             $QuickScenarioInfo.Text='2560×1440 → DLSS 4K; официальный NVIDIA DLSS-G x2 и Reflex через Streamline. Для RTX 5080.'
         }
         'QualityRecord' {
+            $WorkspaceTabs.SelectedIndex=1
             Select-StringTag $HardwareCombo 'Auto';Select-StringTag $ModeCombo '2160p';Select-StringTag $RenderPresetCombo 'Native'
             Select-StringTag $PerformanceCombo 'Quality';Select-StringTag $FrameGenerationCombo 'Off';Select-StringTag $DepthModelCombo 'VideoDepthSmall';Select-StringTag $VrModeCombo 'Off'
             $QuickScenarioInfo.Text='Качественная запись H.265 с временно согласованной Video Depth Anything. Генерация кадров realtime не применяется.'
         }
         'DepthVR' {
+            $WorkspaceTabs.SelectedIndex=2
             Select-StringTag $HardwareCombo 'Auto';Select-StringTag $ModeCombo '1440p';Select-StringTag $PerformanceCombo 'Quality';Select-StringTag $DepthModelCombo 'DA3Small';Select-StringTag $VrModeCombo 'DepthSBS';Select-StringTag $VrLayoutCombo 'FullSBS';Select-StringTag $FrameGenerationCombo 'Off'
             $QuickScenarioInfo.Text='Отдельные left/right ракурсы создаются CUDA depth-warp из DA3, затем добавляются VR stereo metadata. Это не дублирование плоского кадра.'
         }
@@ -500,9 +589,10 @@ function Update-VrUi {
     if (-not $VrModeCombo.SelectedItem) { return }
     $VrMode=Combo-Tag $VrModeCombo
     $VrLayoutCombo.IsEnabled = $VrMode -in @('CinemaSBS','DepthSBS') -and (Combo-Tag $PerformanceCombo) -ne 'Realtime'
-    $VREyeSlider.IsEnabled=$VrMode-eq'DepthSBS';$VRConvergenceSlider.IsEnabled=$VrMode-eq'DepthSBS'
+    $DepthStereo=$VrMode-eq'DepthSBS'
+    foreach($Control in @($VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VREyeSwapCheck)){$Control.IsEnabled=$DepthStereo}
     switch($VrMode){
-        'DepthSBS' { $VrInfo.Text='Настоящий стереорежим: Video Depth/DA3 создаёт устойчивую карту, затем CUDA формирует отличающиеся left/right ракурсы с настраиваемой силой параллакса и плоскостью фокуса.' }
+        'DepthSBS' { $VrInfo.Text='Настоящий стереорежим: Video Depth/DA3 создаёт устойчивую карту, CUDA формирует разные ракурсы. Доступны SBS и Over-Under, перестановка глаз, гамма depth, заполнение раскрытых краёв и отдельная временная стабилизация.' }
         'CinemaSBS' { $VrInfo.Text='Два одинаковых ракурса left/right для VR-кинотеатра. Это комфортный просмотр плоского видео, а не выдуманная стереоглубина. Full-SBS сохраняет полное разрешение каждого глаза.' }
         'Equirect360' { $VrInfo.Text='Для уже снятого/сшитого панорамного исходника 2:1. Программа проверит геометрию и добавит стандартные spherical-video v2 метаданные.' }
         default { $VrInfo.Text='Обычный плоский файл без VR-компоновки и пространственных метаданных.' }
@@ -531,7 +621,9 @@ function Update-Estimate {
     $Seconds=$Startup+$Frames/[math]::Max(0.01,$Effective)
     if((Get-PipelineOrder)-eq 'DLSSThenVSR'){$Seconds*=1.12}
     if((Combo-Tag $VrModeCombo)-ne 'Off'){$Seconds*=1.18}
-    $VrSuffix=if((Combo-Tag $VrModeCombo)-in @('CinemaSBS','DepthSBS') -and (Combo-Tag $VrLayoutCombo)-eq 'FullSBS'){' · VR-контейнер: '+($Geometry[0]*2)+'×'+$Geometry[1]}else{''}
+    $VrSuffix=if((Combo-Tag $VrModeCombo)-in @('CinemaSBS','DepthSBS')){
+        switch(Combo-Tag $VrLayoutCombo){'FullSBS'{' · VR-контейнер: '+($Geometry[0]*2)+'×'+$Geometry[1]}'FullOU'{' · VR-контейнер: '+$Geometry[0]+'×'+($Geometry[1]*2)}default{''}}
+    }else{''}
     $ExpectedTimeText.Text=if($Realtime){"Realtime: $($Geometry[0])×$($Geometry[1]) · стартовый буфер $([int]$RealtimeBufferSlider.Value) сек · воспроизведение до конца файла."}else{"Ожидаемый выход: $($Geometry[0])×$($Geometry[1])$VrSuffix · оценка: ~$(Format-Time $Seconds); после первых чанков ETA уточнится."}
 }
 function Update-InputInfo {
@@ -539,7 +631,7 @@ function Update-InputInfo {
         $script:SourceInfo=$null
         $SourceResolutionText.Text='Сетевой источник: параметры будут прочитаны при запуске'
         $VideoInfo.Text='VK Video и другие сайты через встроенный resolver · выбранный поток можно перематывать.'
-        $ExpectedTimeText.Text='В режиме realtime ссылка будет проверена автоматически; запись по ссылке пока отключена.'
+        $ExpectedTimeText.Text='Ссылка будет проверена при запуске. Её можно смотреть в realtime или сразу записывать в H.264/H.265.'
         return
     }
     if(-not(Test-Path -LiteralPath $InputBox.Text -PathType Leaf)){
@@ -563,7 +655,14 @@ function Update-InputInfo {
 function Get-AutomaticOutputPath {
     $Directory = if ([string]::IsNullOrWhiteSpace($OutputBox.Text)) { Join-Path $Root 'output' } else { [IO.Path]::GetFullPath($OutputBox.Text) }
     New-Item -ItemType Directory -Force -Path $Directory | Out-Null
-    $Base = [IO.Path]::GetFileNameWithoutExtension($InputBox.Text)
+    if($InputBox.Text -match '^https?://'){
+        $Uri=[Uri]$InputBox.Text
+        $Tail=($Uri.AbsolutePath.TrimEnd('/') -split '/')[-1]
+        if([string]::IsNullOrWhiteSpace($Tail)){$Tail='online-video'}
+        $Base=($Uri.DnsSafeHost+'_'+$Tail)
+    }else{$Base=[IO.Path]::GetFileNameWithoutExtension($InputBox.Text)}
+    $Base=[regex]::Replace($Base,'[^\p{L}\p{Nd}._-]+','_').Trim('_','.')
+    if([string]::IsNullOrWhiteSpace($Base)){$Base='video'}
     if ($Base.Length -gt 80) { $Base = $Base.Substring(0,80).TrimEnd() }
     $Mode = [string]$ModeCombo.SelectedItem.Tag
     $Profile = [string]$PerformanceCombo.SelectedItem.Tag
@@ -659,8 +758,17 @@ function Update-ProfileUi {
     Update-Estimate
 }
 
-foreach($S in @($IntensitySlider,$ToneSlider,$StructureSlider,$SkinSlider,$MotionXSlider,$MotionYSlider,$TransferSlider,$ColorSlider,$PaperSlider,$QualitySlider,$UpscalerStrengthSlider,$VREyeSlider,$VRConvergenceSlider)){$S.Add_ValueChanged({Refresh-Labels})}
+function Update-RecordFineUi {
+    $Enabled=[bool]$RecordFineGuideCheck.IsChecked
+    $RecordFineGuideExpander.IsEnabled=$Enabled
+    $RecordFineGuideExpander.Opacity=if($Enabled){1.0}else{0.48}
+    if($Enabled){$RecordFineGuideExpander.IsExpanded=$true}
+    $RecordRaftSlider.IsEnabled=$Enabled -and (Combo-Tag $RecordMotionBackendCombo)-eq'raft'
+}
+
+foreach($S in @($IntensitySlider,$ToneSlider,$StructureSlider,$SkinSlider,$MotionXSlider,$MotionYSlider,$TransferSlider,$ColorSlider,$PaperSlider,$QualitySlider,$UpscalerStrengthSlider,$VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$RecordGuideWidthSlider,$RecordDepthIntervalSlider,$RecordDepthMinSlider,$RecordConfidenceSlider,$RecordMotionSlider,$RecordTemporalSlider,$RecordSceneSlider,$RecordRaftSlider,$RecordChunkSlider)){$S.Add_ValueChanged({Refresh-Labels})}
 $RealtimeBufferSlider.Add_ValueChanged({Refresh-Labels;Update-Estimate})
+$RealtimeChunkSlider.Add_ValueChanged({Refresh-Labels})
 $RealtimeQualityCombo.Add_SelectionChanged({$Tag=Combo-Tag $RealtimeQualityCombo;if($Tag-ne'Custom'){Apply-RealtimeProfile $Tag}else{Update-RealtimeQualityInfo}})
 foreach($S in @($GuideWidthSlider,$DepthIntervalSlider,$DepthMinIntervalSlider,$AdaptiveConfidenceSlider,$AdaptiveMotionSlider,$TemporalDepthSlider,$SceneCutSlider,$RaftUpdatesSlider)){$S.Add_ValueChanged({Mark-RealtimeCustom})}
 $GuideMotionPresetCombo.Add_SelectionChanged({Mark-RealtimeCustom})
@@ -671,6 +779,9 @@ $DepthModelCombo.Add_SelectionChanged({Update-Estimate})
 $RenderPresetCombo.Add_SelectionChanged({Update-Estimate})
 $HardwareCombo.Add_SelectionChanged({Update-Estimate})
 $ExpertCheck.Add_Click({Update-ExpertUi})
+$WorkspaceTabs.Add_SelectionChanged({Update-WorkspaceUi})
+$RecordFineGuideCheck.Add_Click({Update-RecordFineUi;Update-Estimate})
+$RecordMotionBackendCombo.Add_SelectionChanged({Update-RecordFineUi})
 $QuickScenarioCombo.Add_SelectionChanged({if($QuickScenarioCombo.SelectedItem){Apply-QuickScenario}})
 $RealtimeVolumeSlider.Add_ValueChanged({Refresh-Labels})
 $PresetBox.Add_SelectionChanged({$N=[string]$PresetBox.SelectedItem;if($BuiltIn.Contains($N)){Apply-Settings $BuiltIn[$N]}elseif($script:UserPresets.Contains($N)){Apply-Settings $script:UserPresets[$N]};Refresh-Labels})
@@ -687,6 +798,7 @@ $CodecCombo.Add_SelectionChanged({Update-Estimate})
 $UpscalerVariantCombo.Add_SelectionChanged({Update-Estimate})
 $VrModeCombo.Add_SelectionChanged({Update-VrUi})
 $VrLayoutCombo.Add_SelectionChanged({Update-Estimate})
+$VREyeSwapCheck.Add_Click({Update-Estimate})
 $StageUp.Add_Click({Move-Stage -1})
 $StageDown.Add_Click({Move-Stage 1})
 $FullVideoCheck.Add_Checked({$FramesBox.IsEnabled=$false;Update-Estimate})
@@ -884,10 +996,10 @@ $RunButton.Add_Click({
     $Config = $null
     try {
         if ($script:Process) { throw 'Обработка уже выполняется.' }
-        $Realtime = [string]$PerformanceCombo.SelectedItem.Tag -eq 'Realtime'
+        $WorkspaceMode=Get-WorkspaceMode
+        $Realtime = $WorkspaceMode -eq 'Realtime'
         $IsOnlineSource = $InputBox.Text -match '^https?://'
         if ([string]::IsNullOrWhiteSpace($InputBox.Text)) { throw 'Выберите видеофайл или вставьте ссылку.' }
-        if ($IsOnlineSource -and -not $Realtime) { throw 'Просмотр по ссылке сейчас доступен в профиле «Реальное время». Для записи сначала скачайте видео.' }
         if (-not $IsOnlineSource -and -not (Test-Path -LiteralPath $InputBox.Text -PathType Leaf)) { throw 'Выберите существующий входной видеофайл.' }
         if ([string]$UpscalerCombo.SelectedItem.Tag -eq 'DLoRAL' -and -not (Test-Path -LiteralPath $DLoRALCheckpoint -PathType Leaf)) {
             throw 'DLoRAL checkpoint ещё не скачан: Google Drive превысил квоту. Запустите INSTALL_MODELS.cmd позже; NanoVSR, AnimeSR v2 и FlashVSR уже готовы.'
@@ -933,6 +1045,7 @@ $RunButton.Add_Click({
                 '-UpscalerStrength',([string]::Format($Invariant,'{0:0.###}',[double]$UpscalerStrengthSlider.Value)),
                 '-PipelineOrder',$PipelineOrder,
                 '-BufferSeconds',[int]$RealtimeBufferSlider.Value,
+                '-ChunkFrames',[int]$RealtimeChunkSlider.Value,
                 '-StartSeconds',([string]::Format($Invariant,'{0:0.######}',$Start)),
                 '-NetworkMaxHeight',[int](Combo-Tag $NetworkHeightCombo),
                 '-CookiesBrowser',(Combo-Tag $NetworkCookiesCombo),
@@ -966,9 +1079,29 @@ $RunButton.Add_Click({
                 '-VRMode',(Combo-Tag $VrModeCombo),'-VRSbsLayout',(Combo-Tag $VrLayoutCombo),
                 '-VREyeSeparation',([string]::Format($Invariant,'{0:0.###}',[double]$VREyeSlider.Value)),
                 '-VRConvergence',([string]::Format($Invariant,'{0:0.###}',[double]$VRConvergenceSlider.Value)),
+                '-VRDepthGamma',([string]::Format($Invariant,'{0:0.###}',[double]$VRDepthGammaSlider.Value)),
+                '-VROcclusionFill',([string]::Format($Invariant,'{0:0.###}',[double]$VROcclusionSlider.Value)),
+                '-VREdgeFeather',([string]::Format($Invariant,'{0:0.###}',[double]$VREdgeSlider.Value)),
+                '-VRTemporalSmoothing',([string]::Format($Invariant,'{0:0.###}',[double]$VRTemporalSlider.Value)),
+                '-NetworkMaxHeight',[int](Combo-Tag $RecordNetworkHeightCombo),
+                '-NetworkCookiesBrowser',(Combo-Tag $RecordNetworkCookiesCombo),
                 '-StartSeconds',([string]::Format($Invariant,'{0:0.######}',$Start)),'-FrameCount',$Frames,
                 '-OutputVideo',('"'+$Output+'"')
             )
+            if ($RecordFineGuideCheck.IsChecked) {
+                $Args += @(
+                    '-FineGuideSettings','-GuideWidthOverride',[int]$RecordGuideWidthSlider.Value,
+                    '-DepthIntervalOverride',[int]$RecordDepthIntervalSlider.Value,
+                    '-DepthMinIntervalOverride',[math]::Min([int]$RecordDepthMinSlider.Value,[int]$RecordDepthIntervalSlider.Value),
+                    '-AdaptiveConfidenceOverride',([string]::Format($Invariant,'{0:0.###}',[double]$RecordConfidenceSlider.Value)),
+                    '-AdaptiveMotionOverride',([string]::Format($Invariant,'{0:0.###}',[double]$RecordMotionSlider.Value)),
+                    '-TemporalDepthOverride',([string]::Format($Invariant,'{0:0.###}',[double]$RecordTemporalSlider.Value)),
+                    '-SceneCutThresholdOverride',([string]::Format($Invariant,'{0:0.###}',[double]$RecordSceneSlider.Value)),
+                    '-MotionPresetOverride',(Combo-Tag $RecordMotionPresetCombo),'-MotionBackendOverride',(Combo-Tag $RecordMotionBackendCombo),
+                    '-RaftUpdatesOverride',[int]$RecordRaftSlider.Value,'-ChunkFramesOverride',[int]$RecordChunkSlider.Value
+                )
+            }
+            if ($VREyeSwapCheck.IsChecked) { $Args += '-VREyeSwap' }
             if ($LivePreviewCheck.IsChecked) { $Args += '-LivePreview' }
             if ($ComparisonCheck.IsChecked) { $Args += '-CreateComparison' }
             if ($KeepTempCheck.IsChecked) { $Args += '-KeepTemporaryFiles' }
@@ -1053,5 +1186,5 @@ $Preview.Add_MediaEnded({$Preview.Position=[TimeSpan]::Zero;$Preview.Play()})
 $Window.Add_PreviewKeyDown({param($S,$E);if($E.Key -eq [Windows.Input.Key]::Escape -and $script:Process -and -not $script:Process.HasExited){Stop-ActiveRun;$E.Handled=$true}})
 $Window.Add_Closing({param($S,$E);if($script:Process-and-not$script:Process.HasExited){$A=[Windows.MessageBox]::Show('Обработка выполняется. Остановить её и закрыть окно?','DLSS5 Video Studio','YesNo','Warning');if($A-ne'Yes'){$E.Cancel=$true;return};Stop-ActiveRun}})
 
-$ModeCombo.SelectedIndex=0;$CodecCombo.SelectedIndex=0;$PerformanceCombo.SelectedIndex=2;$VrModeCombo.SelectedIndex=0;$VrLayoutCombo.SelectedIndex=0;$HardwareCombo.SelectedIndex=0;$RenderPresetCombo.SelectedIndex=0;$DepthModelCombo.SelectedIndex=0;$FrameGenerationCombo.SelectedIndex=0;$QuickScenarioCombo.SelectedIndex=0;$UpscalerCombo.SelectedIndex=0;$UpscalerVariantCombo.SelectedIndex=0;$UpscalerStrengthSlider.Value=1.0;$NrPresetCombo.SelectedIndex=1;$StyleCombo.SelectedIndex=1;$DepthCombo.SelectedIndex=0;$QualitySlider.Value=18;$GuideMotionPresetCombo.SelectedIndex=0;$GuideMotionBackendCombo.SelectedIndex=0;$RealtimeFpsCombo.SelectedIndex=1;$NetworkHeightCombo.SelectedIndex=1;$NetworkCookiesCombo.SelectedIndex=0;$RealtimeQualityCombo.SelectedIndex=1;$OutputBox.Text=Join-Path $Root 'output';Load-Presets;Apply-Settings $BuiltIn['Balanced · рекомендовано'];Apply-RealtimeProfile 'Balanced';Apply-QuickScenario;Refresh-Labels;Update-RealtimeQualityInfo;Update-UpscalerUi;Update-ProfileUi;Update-VrUi;Update-ExpertUi;Refresh-StageList
+$WorkspaceTabs.SelectedIndex=0;$ModeCombo.SelectedIndex=0;$CodecCombo.SelectedIndex=0;$PerformanceCombo.SelectedIndex=2;$VrModeCombo.SelectedIndex=0;$VrLayoutCombo.SelectedIndex=0;$HardwareCombo.SelectedIndex=0;$RenderPresetCombo.SelectedIndex=0;$DepthModelCombo.SelectedIndex=0;$FrameGenerationCombo.SelectedIndex=0;$QuickScenarioCombo.SelectedIndex=0;$UpscalerCombo.SelectedIndex=0;$UpscalerVariantCombo.SelectedIndex=0;$UpscalerStrengthSlider.Value=1.0;$NrPresetCombo.SelectedIndex=1;$StyleCombo.SelectedIndex=1;$DepthCombo.SelectedIndex=0;$QualitySlider.Value=18;$GuideMotionPresetCombo.SelectedIndex=0;$GuideMotionBackendCombo.SelectedIndex=0;$RecordMotionPresetCombo.SelectedIndex=1;$RecordMotionBackendCombo.SelectedIndex=0;$RealtimeFpsCombo.SelectedIndex=1;$NetworkHeightCombo.SelectedIndex=1;$NetworkCookiesCombo.SelectedIndex=0;$RecordNetworkHeightCombo.SelectedIndex=3;$RecordNetworkCookiesCombo.SelectedIndex=0;$RealtimeQualityCombo.SelectedIndex=1;$OutputBox.Text=Join-Path $Root 'output';Load-Presets;Apply-Settings $BuiltIn['Balanced · рекомендовано'];Apply-RealtimeProfile 'Balanced';Apply-QuickScenario;Refresh-Labels;Update-RealtimeQualityInfo;Update-RecordFineUi;Update-UpscalerUi;Update-WorkspaceUi;Update-VrUi;Update-ExpertUi;Refresh-StageList
 $Window.ShowDialog() | Out-Null

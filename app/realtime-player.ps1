@@ -13,6 +13,7 @@ param(
     [ValidateRange(0.0,1.0)] [double] $UpscalerStrength = 1.0,
     [ValidateSet('DLSSOnly','VSRThenDLSS')] [string] $PipelineOrder = 'DLSSOnly',
     [ValidateRange(3,30)] [int] $BufferSeconds = 5,
+    [ValidateRange(0,192)] [int] $ChunkFrames = 0,
     [double] $StartSeconds = 0,
     [ValidateSet(720,1080,1440,2160)] [int] $NetworkMaxHeight = 1080,
     [ValidateSet('None','chrome','edge','firefox')] [string] $CookiesBrowser = 'None',
@@ -148,7 +149,7 @@ function Start-Audio([double] $Position) {
 }
 
 Write-Output ('STUDIO_PLAYER_READY ' + (@{
-    duration_seconds=[math]::Round($Duration,3);buffer_seconds=$BufferSeconds;fullscreen=[bool]$Fullscreen
+    duration_seconds=[math]::Round($Duration,3);buffer_seconds=$BufferSeconds;chunk_frames=$ChunkFrames;fullscreen=[bool]$Fullscreen
     source_kind=if($IsOnline){'network'}else{'file'};guide_width=$GuideWidth;depth_interval=$DepthInterval
     motion_backend=$MotionBackend;fps_mode=$FpsMode;frame_generation=$FrameGeneration;audio=[bool]$EnableAudio;volume=$Volume
     hardware_profile=$HardwareProfile;render_preset=$RenderPreset
@@ -167,7 +168,7 @@ while ($true) {
         '-UpscalerStrength',([string]::Format($Invariant,'{0:0.###}',$UpscalerStrength)),
         '-PipelineOrder',$PipelineOrder,'-VRMode','Off','-VRSbsLayout','HalfSBS',
         '-StartSeconds',([string]::Format($Invariant,'{0:0.######}',$CurrentStart)),
-        '-FrameCount','0','-PreviewOnly','-RealtimeBufferSeconds',$BufferSeconds,
+        '-FrameCount','0','-PreviewOnly','-RealtimeBufferSeconds',$BufferSeconds,'-RealtimeChunkFrames',$ChunkFrames,
         '-RealtimeControlPath',$ControlPath,
         '-RealtimeGuideWidth',$GuideWidth,'-RealtimeDepthInterval',$DepthInterval,
         '-RealtimeDepthMinInterval',([math]::Min($DepthMinInterval,$DepthInterval)),

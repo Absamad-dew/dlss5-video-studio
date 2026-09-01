@@ -1,2 +1,2 @@
-11.0.0-hardware-dlssg-depth3d
-Hardware-aware 1080p/1440p/4K profiles, official Streamline DLSS-G x2 + Reflex, MotionGPU fallback, Video Depth Anything, Depth Anything 3, depth-warped stereoscopic VR, and simplified Quick Start UI.
+12.0.0-realtime-queue-url-recording-vr-tabs
+Separate Realtime, Recording and VR workspaces; true multi-chunk realtime buffering; isolated DirectML runtime for RTX 5080; URL recording; offline guide overrides; SBS/Over-Under VR with occlusion and temporal controls.
