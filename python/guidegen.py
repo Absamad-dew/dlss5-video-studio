@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import mmap
 import os
 import subprocess
 import struct
@@ -47,6 +48,20 @@ def atomic_path(path: Path) -> tuple[Path, Path]:
     partial = final.with_name(final.name + ".partial")
     partial.unlink(missing_ok=True)
     return final, partial
+
+
+def is_shared_rgb(reference: str | Path) -> bool:
+    return str(reference).startswith("shm://")
+
+
+def shared_rgb_tag(reference: str | Path) -> str:
+    text = str(reference)
+    if not text.startswith("shm://") or len(text) <= len("shm://"):
+        raise ValueError("invalid shared RGB reference")
+    name = text[len("shm://") :]
+    if any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in name):
+        raise ValueError("shared RGB name contains unsupported characters")
+    return "Local\\" + name
 
 
 def resize_rgb(frame: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -258,9 +273,12 @@ def flow_confidence(
     current: np.ndarray,
     previous: np.ndarray,
     flow: np.ndarray,
+    xx: np.ndarray | None = None,
+    yy: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     height, width = current.shape
-    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    if xx is None or yy is None:
+        yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
     map_x = xx + flow[..., 0]
     map_y = yy + flow[..., 1]
     in_bounds = (map_x >= 0) & (map_x <= width - 1) & (map_y >= 0) & (map_y <= height - 1)
@@ -384,16 +402,22 @@ class DisMotion:
         self.dis = create_dis(preset)
 
     def prepare(
-        self, colors: list[np.ndarray], previous_color: np.ndarray | None
+        self,
+        colors: list[np.ndarray],
+        previous_color: np.ndarray | None,
+        grays: list[np.ndarray] | None = None,
+        previous_gray: np.ndarray | None = None,
     ) -> list[np.ndarray | None]:
         flows: list[np.ndarray | None] = [None] * len(colors)
-        previous = previous_color
-        for index, color in enumerate(colors):
+        if grays is None:
+            grays = [cv2.cvtColor(color, cv2.COLOR_RGB2GRAY) for color in colors]
+        previous = previous_gray
+        if previous is None and previous_color is not None:
+            previous = cv2.cvtColor(previous_color, cv2.COLOR_RGB2GRAY)
+        for index, current in enumerate(grays):
             if previous is not None:
-                current_gray = cv2.cvtColor(color, cv2.COLOR_RGB2GRAY)
-                previous_gray = cv2.cvtColor(previous, cv2.COLOR_RGB2GRAY)
-                flows[index] = self.dis.calc(current_gray, previous_gray, None).astype(np.float32)
-            previous = color
+                flows[index] = self.dis.calc(current, previous, None).astype(np.float32)
+            previous = current
         return flows
 
 
@@ -419,7 +443,11 @@ class RaftMotion:
         self.batch_size = batch_size
 
     def prepare(
-        self, colors: list[np.ndarray], previous_color: np.ndarray | None
+        self,
+        colors: list[np.ndarray],
+        previous_color: np.ndarray | None,
+        grays: list[np.ndarray] | None = None,
+        previous_gray: np.ndarray | None = None,
     ) -> list[np.ndarray | None]:
         torch = self.torch
         flows: list[np.ndarray | None] = [None] * len(colors)
@@ -473,21 +501,35 @@ def generate_chunk(
     runtime: DepthRuntime,
     motion_estimator: DisMotion | RaftMotion,
     state: GuideState,
-    input_path: Path,
+    input_path: Path | str,
     frames_count: int,
     motion_output: Path,
     depth_output: Path,
+    shared_inputs: dict[str, mmap.mmap] | None = None,
 ) -> dict[str, object]:
-    expected = args.width * args.height * frames_count * 3
-    if input_path.stat().st_size != expected:
-        raise ValueError(f"RGB24 extent mismatch: expected {expected}, got {input_path.stat().st_size}")
+    expected = args.input_width * args.input_height * frames_count * 3
+    if is_shared_rgb(input_path):
+        if shared_inputs is None or str(input_path) not in shared_inputs:
+            raise ValueError(f"shared RGB input is not available: {input_path}")
+        shared_mapping = shared_inputs[str(input_path)]
+        frames = np.ndarray(
+            (frames_count, args.input_height, args.input_width, 3),
+            dtype=np.uint8,
+            buffer=shared_mapping,
+        )
+    else:
+        resolved_input = Path(input_path)
+        if resolved_input.stat().st_size != expected:
+            raise ValueError(
+                f"RGB24 extent mismatch: expected {expected}, got {resolved_input.stat().st_size}"
+            )
+        frames = np.memmap(
+            resolved_input,
+            dtype=np.uint8,
+            mode="r",
+            shape=(frames_count, args.input_height, args.input_width, 3),
+        )
     geom = guide_geometry(args.width, args.height, args.guide_width)
-    frames = np.memmap(
-        input_path,
-        dtype=np.uint8,
-        mode="r",
-        shape=(frames_count, args.height, args.width, 3),
-    )
     motion_final, motion_partial = atomic_path(motion_output)
     depth_final, depth_partial = atomic_path(depth_output)
     records = np.zeros((geom.height, geom.width), dtype=MOTION_DTYPE)
@@ -508,8 +550,13 @@ def generate_chunk(
         resize_rgb(np.asarray(frames[index]), geom.width, geom.height)
         for index in range(frames_count)
     ]
+    # DIS and the temporal/depth stages consume the same grayscale guide.
+    # Computing it once saves two conversions per frame in the old DIS path.
+    guide_grays = [cv2.cvtColor(color, cv2.COLOR_RGB2GRAY) for color in guide_colors]
     flow_started = time.perf_counter()
-    prepared_flows = motion_estimator.prepare(guide_colors, state.previous_color)
+    prepared_flows = motion_estimator.prepare(
+        guide_colors, state.previous_color, guide_grays, state.previous_gray
+    )
     flow_prepare_s = time.perf_counter() - flow_started
 
     try:
@@ -541,7 +588,7 @@ def generate_chunk(
             for local_index in range(frames_count):
                 frame = np.asarray(frames[local_index])
                 guide_color = guide_colors[local_index]
-                gray = cv2.cvtColor(guide_color, cv2.COLOR_RGB2GRAY)
+                gray = guide_grays[local_index]
                 records.fill(0)
                 scene_cut = False
                 flow = None
@@ -563,16 +610,26 @@ def generate_chunk(
                         flow = prepared_flows[local_index]
                         if flow is None:
                             raise RuntimeError("motion estimator did not return a consecutive-frame flow")
-                        initial_confidence, valid = flow_confidence(gray, state.previous_gray, flow)
-                        flow = stabilize_flow(flow, state.previous_flow, initial_confidence, xx, yy)
-                        confidence, valid = flow_confidence(gray, state.previous_gray, flow)
+                        if state.previous_flow is not None:
+                            initial_confidence, _ = flow_confidence(
+                                gray, state.previous_gray, flow, xx, yy
+                            )
+                            flow = stabilize_flow(
+                                flow, state.previous_flow, initial_confidence, xx, yy
+                            )
+                        confidence, valid = flow_confidence(
+                            gray, state.previous_gray, flow, xx, yy
+                        )
                         confidence = occlusion_aware_confidence(confidence, valid, flow)
                         valid = valid & (confidence >= 0.08)
                         valid_confidence = confidence[valid]
                         if valid_confidence.size:
                             mean_confidence = float(np.mean(valid_confidence))
-                        magnitude = np.sqrt(flow[..., 0] * flow[..., 0] + flow[..., 1] * flow[..., 1])
-                        p95_motion = float(np.quantile(magnitude[::2, ::2], 0.95))
+                        if args.adaptive_motion > 0:
+                            magnitude = np.sqrt(
+                                flow[..., 0] * flow[..., 0] + flow[..., 1] * flow[..., 1]
+                            )
+                            p95_motion = float(np.quantile(magnitude[::2, ::2], 0.95))
                         records["dx"] = np.clip(
                             flow[..., 0] * (args.width / geom.width), -32752, 32752
                         ).astype(np.float16)
@@ -686,6 +743,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path)
     parser.add_argument("--width", required=True, type=int)
     parser.add_argument("--height", required=True, type=int)
+    parser.add_argument("--input-width", type=int, default=0)
+    parser.add_argument("--input-height", type=int, default=0)
     parser.add_argument("--frames", type=int)
     parser.add_argument("--motion-output", type=Path)
     parser.add_argument("--depth-output", type=Path)
@@ -724,8 +783,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.input_width <= 0:
+        args.input_width = args.width
+    if args.input_height <= 0:
+        args.input_height = args.height
     if args.width < 64 or args.height < 64:
         raise ValueError("invalid input geometry")
+    if (
+        args.input_width < 64
+        or args.input_height < 64
+        or args.input_width > args.width
+        or args.input_height > args.height
+    ):
+        raise ValueError("invalid compact RGB geometry")
     if args.depth_engine.startswith("da3-"):
         if not args.depth_model.is_dir():
             raise FileNotFoundError(args.depth_model)
@@ -793,8 +863,9 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
     decoder: subprocess.Popen[bytes] | None = None
     decoder_next_frame = 0
     prefetch_thread: threading.Thread | None = None
-    prefetch_spec: tuple[Path, int, int] | None = None
+    prefetch_spec: tuple[str, int, int] | None = None
     prefetch_result: dict[str, object] = {}
+    shared_inputs: dict[str, mmap.mmap] = {}
 
     # Keep one decoder alive for the entire job.  The previous implementation
     # launched FFmpeg and performed a fresh seek for every chunk; besides the
@@ -815,7 +886,7 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
             ) + "\r\n"
             if header_block != "\r\n":
                 input_options += ["-headers", header_block]
-        video_filter = f"scale={args.width}:{args.height}:flags=lanczos"
+        video_filter = f"scale={args.input_width}:{args.input_height}:flags=lanczos"
         if args.frame_interpolation == "blend":
             video_filter += f",minterpolate=fps={args.fps}:mi_mode=blend"
         else:
@@ -836,7 +907,7 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
-    def decode_chunk(path: Path, frames_count: int, first_frame: int) -> None:
+    def decode_chunk(reference: str, frames_count: int, first_frame: int) -> None:
         nonlocal decoder_next_frame
         if args.decode_video is None:
             return
@@ -846,15 +917,24 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
             raise RuntimeError(
                 f"decoder request is not sequential: expected frame {decoder_next_frame}, got {first_frame}"
             )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        expected = args.width * args.height * frames_count * 3
-        final, partial = atomic_path(path)
+        expected = args.input_width * args.input_height * frames_count * 3
         remaining = expected
         buffer = bytearray(min(8 * 1024 * 1024, expected))
+        shared_mapping: mmap.mmap | None = None
+        output_view: memoryview | None = None
+        final: Path | None = None
+        partial: Path | None = None
         try:
-            with partial.open("wb", buffering=8 * 1024 * 1024) as stream:
+            if is_shared_rgb(reference):
+                if reference in shared_inputs:
+                    raise RuntimeError(f"shared RGB mapping already exists: {reference}")
+                shared_mapping = mmap.mmap(
+                    -1, expected, tagname=shared_rgb_tag(reference), access=mmap.ACCESS_WRITE
+                )
+                output_view = memoryview(shared_mapping)
+                offset = 0
                 while remaining:
-                    view = memoryview(buffer)[: min(len(buffer), remaining)]
+                    view = output_view[offset : offset + min(len(buffer), remaining)]
                     received = decoder.stdout.readinto(view)
                     if not received:
                         code = decoder.poll()
@@ -865,19 +945,47 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
                             f"ffmpeg decoder ended early at frame {decoder_next_frame}"
                             + (f" ({details})" if details else "")
                         )
-                    stream.write(view[:received])
+                    offset += received
                     remaining -= received
-            os.replace(partial, final)
+                output_view.release()
+                output_view = None
+                shared_inputs[reference] = shared_mapping
+                shared_mapping = None
+            else:
+                path = Path(reference)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                final, partial = atomic_path(path)
+                with partial.open("wb", buffering=8 * 1024 * 1024) as stream:
+                    while remaining:
+                        view = memoryview(buffer)[: min(len(buffer), remaining)]
+                        received = decoder.stdout.readinto(view)
+                        if not received:
+                            code = decoder.poll()
+                            details = ""
+                            if code is not None and decoder.stderr is not None:
+                                details = decoder.stderr.read().decode("utf-8", errors="replace").strip()
+                            raise RuntimeError(
+                                f"ffmpeg decoder ended early at frame {decoder_next_frame}"
+                                + (f" ({details})" if details else "")
+                            )
+                        stream.write(view[:received])
+                        remaining -= received
+                os.replace(partial, final)
             decoder_next_frame += frames_count
         except BaseException:
-            partial.unlink(missing_ok=True)
+            if output_view is not None:
+                output_view.release()
+            if shared_mapping is not None:
+                shared_mapping.close()
+            if partial is not None:
+                partial.unlink(missing_ok=True)
             raise
 
-    def await_prefetch(path: Path, frames_count: int, first_frame: int) -> float | None:
+    def await_prefetch(reference: str, frames_count: int, first_frame: int) -> float | None:
         nonlocal prefetch_thread, prefetch_spec, prefetch_result
         if prefetch_thread is None:
             return None
-        expected_spec = (path.resolve(), frames_count, first_frame)
+        expected_spec = (reference, frames_count, first_frame)
         if prefetch_spec != expected_spec:
             raise RuntimeError(f"prefetch order mismatch: expected {prefetch_spec}, got {expected_spec}")
         prefetch_thread.join()
@@ -896,16 +1004,16 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
             return
         if prefetch_thread is not None:
             raise RuntimeError("decoder prefetch is already active")
-        path = Path(str(spec["input"])).resolve()
+        reference = str(spec["input"])
         frames_count = int(spec["frames"])
         first_frame = int(spec["first_frame"])
-        prefetch_spec = (path, frames_count, first_frame)
+        prefetch_spec = (reference, frames_count, first_frame)
         prefetch_result = {}
 
         def worker() -> None:
             started = time.perf_counter()
             try:
-                decode_chunk(path, frames_count, first_frame)
+                decode_chunk(reference, frames_count, first_frame)
             except BaseException as exc:
                 prefetch_result["error"] = exc
             finally:
@@ -920,6 +1028,7 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
                 "provider": runtime.provider,
                 "motion_provider": motion_estimator.provider,
                 "geometry": [args.width, args.height],
+                "rgb_geometry": [args.input_width, args.input_height],
                 "guide_width": args.guide_width,
                 "depth_interval": args.depth_interval,
             },
@@ -944,10 +1053,27 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
                 print("GUIDE_SERVER_DONE", flush=True)
                 return 0
             command_name = command.get("cmd")
+            if command_name == "release":
+                references = command.get("inputs", [])
+                if not isinstance(references, list):
+                    raise ValueError("release inputs must be a list")
+                released = 0
+                for reference_value in references:
+                    reference = str(reference_value)
+                    mapping = shared_inputs.pop(reference, None)
+                    if mapping is not None:
+                        mapping.close()
+                        released += 1
+                print(
+                    "GUIDE_RELEASED "
+                    + json.dumps({"released": released, "requested": len(references)}, ensure_ascii=True),
+                    flush=True,
+                )
+                continue
             if command_name not in ("chunk", "decode", "guides"):
                 raise ValueError("unknown guide server command")
             chunk_id = int(command["id"])
-            chunk_input = Path(command["input"])
+            chunk_input = str(command["input"])
             if command_name in ("chunk", "decode"):
                 decode_started = time.perf_counter()
                 frames_count = int(command["frames"])
@@ -986,6 +1112,7 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
                 int(command["frames"]),
                 Path(command["motion_output"]),
                 Path(command["depth_output"]),
+                shared_inputs,
             )
             result["id"] = chunk_id
             result["decode_s"] = decode_elapsed
@@ -995,6 +1122,12 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
     finally:
         if prefetch_thread is not None:
             prefetch_thread.join(timeout=5)
+        for mapping in shared_inputs.values():
+            try:
+                mapping.close()
+            except BufferError:
+                pass
+        shared_inputs.clear()
         if decoder is not None:
             if decoder.stdout is not None:
                 decoder.stdout.close()

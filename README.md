@@ -10,6 +10,8 @@ The repository contains source code and dependency installers. It intentionally 
 - five universal profiles — Ultra Fast, Fast, Medium, Heavy, and Maximum — with automatic adaptation by VRAM, resolution, and CPU capacity;
 - true multi-chunk prebuffering, adjustable 3–30 second startup buffer and chunk size, plus measured underrun diagnostics;
 - exact live buffer telemetry in seconds with refill FPS/rate, optional maximum-speed pause filling, and synchronized audio/video rebuffer recovery instead of audio drift or catch-up playback;
+- unconditional loading and log validation of the adjacent ReShade/DLSS5 add-on, so Feature 18 is active even when NVIDIA Frame Generation is disabled;
+- source-resolution RGB transport through pagefile-backed shared memory, followed by a single D3D12 cubic expansion pass that also reconstructs compact motion/depth guides;
 - an isolated portable Python runtime, preventing a user-level CPU-only ONNX Runtime from shadowing the bundled DirectML provider;
 - official fixed DLSS-G/MFG x2, x3, and x4 plus Dynamic MFG targets of 60/72/90/120 FPS, with capability checks reported by Streamline instead of silent fallback;
 - persistent upload mappings and hardware-sized guide worker/batch scheduling, removing repeated map/unmap and undersized-batch overhead without changing image processing;
@@ -26,6 +28,8 @@ The program no longer exposes GPU-model-specific profiles. `Auto` classifies ava
 Dynamic MFG is used only when Streamline reports support. Fixed x3/x4 is likewise rejected when `numFramesToGenerateMax` is too low, so the UI never labels an ordinary blend as NVIDIA MFG. VR recording at 72/90/120 FPS uses bidirectional motion-compensated interpolation after DLSS5 and stereo synthesis; it is separate from display-only MFG.
 
 Validation on the high-VRAM test PC (1080p output, external VSR off) reported 217.85 displayed FPS for fixed x4 from a 49 FPS source. Dynamic MFG on a 15 FPS source reported 89.32 displayed FPS for a 90 FPS target, with 85 generated frames across 20 rendered frames after startup adaptation. A separate DepthSBS smoke test produced a verified 1280×720, 72 FPS HEVC VR file after the DLSS5 pass.
+
+The 13.5 high-resolution path was also validated on the RTX 5080 with a 2880×1620 DLSS input and 3840×2160 display output. With genuine Feature 18 active, the native stage reached 84.55 FPS, guide generation 40.45 FPS, persistent decode 653.74 FPS, and the paced display held 30.14 FPS with zero buffer underruns. Compared with the previous full-resolution CPU transport, the estimated steady pipeline rose from 18.39 to 27.36 FPS and the planned shared RGB reserve fell from 2402.7 MB to 118.7 MB for the test source.
 
 ## Build prerequisites
 

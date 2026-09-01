@@ -145,6 +145,7 @@ static uint32_t g_preview_fps = 25;
 static double g_preview_media_start_seconds = 0.0;
 static double g_preview_media_duration_seconds = 0.0;
 static fs::path g_preview_control_file;
+static fs::path g_preview_event_file;
 static fs::path g_preview_telemetry_file;
 static RECT g_preview_windowed_rect = {};
 static HWND g_preview_buttons[10] = {};
@@ -164,6 +165,7 @@ static uint64_t g_preview_presented_total_frames = 0;
 static double g_preview_real_fps_live = 0.0;
 static double g_preview_display_fps_live = 0.0;
 static bool g_renodx_lazy = false;   // DLSS 5 add-on is v45+ (per-present rescan, lazy adoption)
+static HMODULE g_reshade_proxy = nullptr;
 static bool g_streamline_initialized = false;
 static bool g_streamline_fg_requested = false;
 static bool g_streamline_fg_enabled = false;
@@ -410,6 +412,35 @@ static double CurrentPreviewSeconds()
 {
     return g_preview_media_start_seconds +
            static_cast<double>(g_preview_frame_index) / std::max(1u, g_preview_fps);
+}
+
+// Load the portable ReShade proxy explicitly before D3D12/DXGI initialization.
+// The host deliberately resolves the operating-system DXGI exports by their
+// absolute System32 paths, so relying on normal DLL search order does not load
+// the adjacent proxy.  Previously the proxy happened to be loaded only by the
+// optional Streamline/DLSS-G path, which meant Feature 18 was silently absent
+// whenever frame generation was disabled.
+static bool LoadPortableReShade()
+{
+    wchar_t executable[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(_countof(executable))) == 0)
+        return false;
+    fs::path proxy_path = fs::path(executable).parent_path() / L"dxgi.dll";
+    if (!fs::is_regular_file(proxy_path))
+    {
+        Log("[host] portable ReShade proxy is missing next to the host");
+        return false;
+    }
+    g_reshade_proxy = LoadLibraryExW(proxy_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (g_reshade_proxy == nullptr)
+    {
+        Log("[host] portable ReShade proxy load failed: Win32 %lu", GetLastError());
+        return false;
+    }
+    wchar_t loaded[MAX_PATH] = {};
+    GetModuleFileNameW(g_reshade_proxy, loaded, static_cast<DWORD>(_countof(loaded)));
+    Log("[host] portable ReShade loaded: %ls", loaded);
+    return true;
 }
 
 static void DumpD3DDebugMessages(const char *stage)
@@ -715,8 +746,12 @@ static void TogglePreviewFullscreen(bool fullscreen)
 
 static bool WritePreviewControl(const char *command)
 {
-    if (g_preview_control_file.empty()) return false;
-    std::ofstream control(g_preview_control_file, std::ios::binary | std::ios::trunc);
+    if (g_preview_event_file.empty()) return false;
+    // Native player events are an append-only queue.  A single shared mailbox
+    // lost PLAYING/BUFFER_READY whenever two events arrived inside the
+    // controller's polling interval, which in turn left audio stopped after a
+    // short underrun.  User commands travel in the separate control file.
+    std::ofstream control(g_preview_event_file, std::ios::binary | std::ios::app);
     if (!control) return false;
     control << command << "\n";
     control.flush();
@@ -2099,6 +2134,72 @@ static UINT64 GenerateMotionFrame(
 // intercepts that feature and inserts the signed/private DLSSNR feature 18.
 // ---------------------------------------------------------------------------
 
+class RgbInput
+{
+public:
+    RgbInput(const fs::path &path, size_t expected_bytes)
+    {
+        const std::string text = path.generic_string();
+        static constexpr const char *prefix = "shm://";
+        if (text.rfind(prefix, 0) == 0)
+        {
+            const std::string utf8_name = text.substr(strlen(prefix));
+            if (utf8_name.empty()) throw std::runtime_error("empty shared RGB mapping name");
+            const int wide_count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_name.c_str(),
+                                                        static_cast<int>(utf8_name.size()), nullptr, 0);
+            if (wide_count <= 0) throw std::runtime_error("invalid shared RGB mapping name");
+            std::wstring name = L"Local\\";
+            const size_t prefix_size = name.size();
+            name.resize(prefix_size + static_cast<size_t>(wide_count));
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_name.c_str(),
+                                static_cast<int>(utf8_name.size()), name.data() + prefix_size, wide_count);
+            mapping_ = OpenFileMappingW(FILE_MAP_READ, FALSE, name.c_str());
+            if (mapping_ == nullptr) throw std::runtime_error("cannot open shared RGB mapping");
+            mapped_ = static_cast<const uint8_t *>(MapViewOfFile(mapping_, FILE_MAP_READ, 0, 0, expected_bytes));
+            if (mapped_ == nullptr)
+            {
+                CloseHandle(mapping_);
+                mapping_ = nullptr;
+                throw std::runtime_error("cannot map shared RGB frames");
+            }
+            size_ = expected_bytes;
+        }
+        else
+        {
+            file_.open(path, std::ios::binary);
+            if (!file_) throw std::runtime_error("cannot open batch RGB24 input");
+        }
+    }
+
+    ~RgbInput()
+    {
+        if (mapped_ != nullptr) UnmapViewOfFile(mapped_);
+        if (mapping_ != nullptr) CloseHandle(mapping_);
+    }
+
+    bool ReadExact(void *destination, size_t bytes)
+    {
+        if (mapped_ != nullptr)
+        {
+            if (position_ > size_ || bytes > size_ - position_) return false;
+            memcpy(destination, mapped_ + position_, bytes);
+            position_ += bytes;
+            return true;
+        }
+        file_.read(static_cast<char *>(destination), static_cast<std::streamsize>(bytes));
+        return file_.gcount() == static_cast<std::streamsize>(bytes);
+    }
+
+    bool Shared() const { return mapped_ != nullptr; }
+
+private:
+    std::ifstream file_;
+    HANDLE mapping_ = nullptr;
+    const uint8_t *mapped_ = nullptr;
+    size_t size_ = 0;
+    size_t position_ = 0;
+};
+
 class MotionSidecar
 {
 public:
@@ -2117,7 +2218,7 @@ public:
         records_.resize(static_cast<size_t>(header_.tiles_x) * header_.tiles_y);
     }
 
-    bool ReadExpanded(std::vector<uint16_t> &pixels, std::vector<uint8_t> &bias)
+    bool ReadCompact(std::vector<uint16_t> &premultiplied_flow, std::vector<uint8_t> &confidence)
     {
         const std::streamsize bytes = static_cast<std::streamsize>(records_.size() * sizeof(MotionRecord));
         in_.read(reinterpret_cast<char *>(records_.data()), bytes);
@@ -2126,87 +2227,41 @@ public:
         for (const MotionRecord &record : records_)
             if (record.valid) { reset = false; break; }
         const size_t grid_pixels = records_.size();
-        decoded_x_.resize(grid_pixels);
-        decoded_y_.resize(grid_pixels);
-        decoded_confidence_.resize(grid_pixels);
+        premultiplied_flow.resize(grid_pixels * 2);
+        confidence.resize(grid_pixels);
         for (size_t i = 0; i < grid_pixels; ++i)
         {
             const MotionRecord &r = records_[i];
+            float flow_x = 0.0f, flow_y = 0.0f;
             if (r.valid && v2_)
             {
-                decoded_x_[i] = DirectX::PackedVector::XMConvertHalfToFloat(r.x);
-                decoded_y_[i] = DirectX::PackedVector::XMConvertHalfToFloat(r.y);
+                flow_x = DirectX::PackedVector::XMConvertHalfToFloat(r.x);
+                flow_y = DirectX::PackedVector::XMConvertHalfToFloat(r.y);
             }
             else if (r.valid)
             {
                 int16_t sx = 0, sy = 0;
                 memcpy(&sx, &r.x, sizeof(sx));
                 memcpy(&sy, &r.y, sizeof(sy));
-                decoded_x_[i] = static_cast<float>(sx);
-                decoded_y_[i] = static_cast<float>(sy);
+                flow_x = static_cast<float>(sx);
+                flow_y = static_cast<float>(sy);
             }
-            else
-            {
-                decoded_x_[i] = 0.0f;
-                decoded_y_[i] = 0.0f;
-            }
-            decoded_confidence_[i] = r.valid ? static_cast<float>(r.confidence) / 255.0f : 0.0f;
-        }
-        pixels.resize(static_cast<size_t>(header_.width) * header_.height * 2);
-        bias.resize(static_cast<size_t>(header_.width) * header_.height);
-        #pragma omp parallel for schedule(static)
-        for (int64_t yi = 0; yi < static_cast<int64_t>(header_.height); ++yi)
-        {
-            const uint32_t y = static_cast<uint32_t>(yi);
-            const float gy = (static_cast<float>(y) + 0.5f) / header_.tile - 0.5f;
-            const int y0 = std::clamp(static_cast<int>(std::floor(gy)), 0, static_cast<int>(header_.tiles_y) - 1);
-            const int y1 = std::min(y0 + 1, static_cast<int>(header_.tiles_y) - 1);
-            const float fy = std::clamp(gy - std::floor(gy), 0.0f, 1.0f);
-            for (uint32_t x = 0; x < header_.width; ++x)
-            {
-                const float gx = (static_cast<float>(x) + 0.5f) / header_.tile - 0.5f;
-                const int x0 = std::clamp(static_cast<int>(std::floor(gx)), 0, static_cast<int>(header_.tiles_x) - 1);
-                const int x1 = std::min(x0 + 1, static_cast<int>(header_.tiles_x) - 1);
-                const float fx = std::clamp(gx - std::floor(gx), 0.0f, 1.0f);
-                const size_t indices[4] = {
-                    static_cast<size_t>(y0) * header_.tiles_x + x0,
-                    static_cast<size_t>(y0) * header_.tiles_x + x1,
-                    static_cast<size_t>(y1) * header_.tiles_x + x0,
-                    static_cast<size_t>(y1) * header_.tiles_x + x1,
-                };
-                const float bilinear[4] = {
-                    (1.0f - fx) * (1.0f - fy), fx * (1.0f - fy),
-                    (1.0f - fx) * fy, fx * fy,
-                };
-                float flow_x = 0.0f, flow_y = 0.0f, confidence = 0.0f;
-                for (int sample = 0; sample < 4; ++sample)
-                {
-                    const size_t index = indices[sample];
-                    const float weight = bilinear[sample] * decoded_confidence_[index];
-                    flow_x += decoded_x_[index] * weight;
-                    flow_y += decoded_y_[index] * weight;
-                    confidence += weight;
-                }
-                if (confidence > 1e-4f) { flow_x /= confidence; flow_y /= confidence; }
-                const size_t p = (static_cast<size_t>(y) * header_.width + x) * 2;
-                pixels[p + 0] = DirectX::PackedVector::XMConvertFloatToHalf(flow_x);
-                pixels[p + 1] = DirectX::PackedVector::XMConvertFloatToHalf(flow_y);
-                // DLSS uses this mask to prefer the current frame at motion
-                // discontinuities and newly revealed pixels instead of dragging
-                // stale history through them.
-                const float history_bias = std::clamp(1.0f - confidence * 1.15f, 0.0f, 1.0f);
-                bias[static_cast<size_t>(y) * header_.width + x] =
-                    static_cast<uint8_t>(std::lround(history_bias * 255.0f));
-            }
+            const float normalized_confidence = r.valid ? static_cast<float>(r.confidence) / 255.0f : 0.0f;
+            premultiplied_flow[i * 2 + 0] = DirectX::PackedVector::XMConvertFloatToHalf(flow_x * normalized_confidence);
+            premultiplied_flow[i * 2 + 1] = DirectX::PackedVector::XMConvertFloatToHalf(flow_y * normalized_confidence);
+            confidence[i] = r.valid ? r.confidence : 0;
         }
         return reset;
     }
+
+    uint32_t Tile() const { return header_.tile; }
+    uint32_t TilesX() const { return header_.tiles_x; }
+    uint32_t TilesY() const { return header_.tiles_y; }
 
 private:
     std::ifstream in_;
     MotionHeader header_ = {};
     std::vector<MotionRecord> records_;
-    std::vector<float> decoded_x_, decoded_y_, decoded_confidence_;
     bool v2_ = false;
 };
 
@@ -2226,45 +2281,24 @@ public:
             header_.record_bytes != sizeof(uint16_t) || (header_.flags & 0xffu) != 1 || tile_ > 16)
             throw std::runtime_error("depth sidecar ABI/geometry mismatch");
         encoded_.resize(static_cast<size_t>(tiles_x_) * tiles_y_);
-        decoded_.resize(encoded_.size());
     }
 
-    void ReadFloat(std::vector<float> &pixels)
+    void ReadCompact(std::vector<uint16_t> &encoded)
     {
         const std::streamsize bytes = static_cast<std::streamsize>(encoded_.size() * sizeof(uint16_t));
         in_.read(reinterpret_cast<char *>(encoded_.data()), bytes);
         if (in_.gcount() != bytes) throw std::runtime_error("truncated depth sidecar");
-        for (size_t i = 0; i < encoded_.size(); ++i)
-            decoded_[i] = DirectX::PackedVector::XMConvertHalfToFloat(encoded_[i]);
-        pixels.resize(static_cast<size_t>(header_.width) * header_.height);
-        #pragma omp parallel for schedule(static)
-        for (int64_t yi = 0; yi < static_cast<int64_t>(header_.height); ++yi)
-        {
-            const uint32_t y = static_cast<uint32_t>(yi);
-            const float gy = (static_cast<float>(y) + 0.5f) / tile_ - 0.5f;
-            const int y0 = std::clamp(static_cast<int>(std::floor(gy)), 0, static_cast<int>(tiles_y_) - 1);
-            const int y1 = std::min(y0 + 1, static_cast<int>(tiles_y_) - 1);
-            const float fy = std::clamp(gy - std::floor(gy), 0.0f, 1.0f);
-            for (uint32_t x = 0; x < header_.width; ++x)
-            {
-                const float gx = (static_cast<float>(x) + 0.5f) / tile_ - 0.5f;
-                const int x0 = std::clamp(static_cast<int>(std::floor(gx)), 0, static_cast<int>(tiles_x_) - 1);
-                const int x1 = std::min(x0 + 1, static_cast<int>(tiles_x_) - 1);
-                const float fx = std::clamp(gx - std::floor(gx), 0.0f, 1.0f);
-                const float top = decoded_[static_cast<size_t>(y0) * tiles_x_ + x0] * (1.0f - fx) +
-                                  decoded_[static_cast<size_t>(y0) * tiles_x_ + x1] * fx;
-                const float bottom = decoded_[static_cast<size_t>(y1) * tiles_x_ + x0] * (1.0f - fx) +
-                                     decoded_[static_cast<size_t>(y1) * tiles_x_ + x1] * fx;
-                pixels[static_cast<size_t>(y) * header_.width + x] = top * (1.0f - fy) + bottom * fy;
-            }
-        }
+        encoded = encoded_;
     }
+
+    uint32_t Tile() const { return tile_; }
+    uint32_t TilesX() const { return tiles_x_; }
+    uint32_t TilesY() const { return tiles_y_; }
 
 private:
     std::ifstream in_;
     DepthHeader header_ = {};
     std::vector<uint16_t> encoded_;
-    std::vector<float> decoded_;
     uint32_t tile_ = 1, tiles_x_ = 0, tiles_y_ = 0;
 };
 
@@ -2349,6 +2383,332 @@ static void CopyUploadToTexture(LinearTransfer &upload, ID3D12Resource *texture)
     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     dst.SubresourceIndex = 0;
     h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+}
+
+struct RawUpload
+{
+    ID3D12Resource *buffer = nullptr;
+    uint8_t *persistent_map = nullptr;
+    UINT64 size = 0;
+};
+
+static RawUpload MakeRawUpload(UINT64 requested_size)
+{
+    RawUpload upload;
+    upload.size = (requested_size + 3u) & ~3ull;
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = upload.size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(h.dev->CreateCommittedResource(
+            &hp, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+            __uuidof(ID3D12Resource), reinterpret_cast<void **>(&upload.buffer))) || upload.buffer == nullptr)
+        throw std::runtime_error("raw RGB upload allocation failed");
+    const D3D12_RANGE no_read = {0, 0};
+    if (FAILED(upload.buffer->Map(0, &no_read, reinterpret_cast<void **>(&upload.persistent_map))) ||
+        upload.persistent_map == nullptr)
+        throw std::runtime_error("raw RGB upload mapping failed");
+    return upload;
+}
+
+struct GpuInputExpander
+{
+    ID3D12Resource *flow_grid = nullptr;
+    ID3D12Resource *confidence_grid = nullptr;
+    ID3D12Resource *depth_grid = nullptr;
+    ID3D12RootSignature *root = nullptr;
+    ID3D12PipelineState *pso = nullptr;
+    ID3D12DescriptorHeap *heap = nullptr;
+    UINT descriptor_size = 0;
+    UINT width = 0, height = 0, tiles_x = 0, tiles_y = 0, tile = 1;
+    bool grid_common = true;
+};
+
+static void ReleaseGpuInputExpander(GpuInputExpander &expander)
+{
+    if (expander.heap) expander.heap->Release();
+    if (expander.pso) expander.pso->Release();
+    if (expander.root) expander.root->Release();
+    if (expander.depth_grid) expander.depth_grid->Release();
+    if (expander.confidence_grid) expander.confidence_grid->Release();
+    if (expander.flow_grid) expander.flow_grid->Release();
+    expander = {};
+}
+
+static bool InitGpuInputExpander(
+    GpuInputExpander &expander, RawUpload *rgb_uploads, int pipeline_slots,
+    ID3D12Resource *color, ID3D12Resource *motion, ID3D12Resource *bias, ID3D12Resource *depth,
+    UINT width, UINT height, UINT tiles_x, UINT tiles_y, UINT tile)
+{
+    static const char *shader = R"HLSL(
+cbuffer Params : register(b0)
+{
+    uint OutputWidth;
+    uint OutputHeight;
+    uint GridWidth;
+    uint GridHeight;
+    uint Tile;
+    uint RgbWidth;
+    uint RgbHeight;
+    uint Padding0;
+};
+ByteAddressBuffer PackedRgb : register(t0);
+Texture2D<float2> PremultipliedMotion : register(t1);
+Texture2D<float> Confidence : register(t2);
+Texture2D<float> CompactDepth : register(t3);
+RWTexture2D<float4> ColorOut : register(u0);
+RWTexture2D<float2> MotionOut : register(u1);
+RWTexture2D<float> BiasOut : register(u2);
+RWTexture2D<float> DepthOut : register(u3);
+SamplerState LinearClamp : register(s0);
+
+uint LoadByte(uint address)
+{
+    uint packed = PackedRgb.Load(address & ~3u);
+    return (packed >> ((address & 3u) * 8u)) & 255u;
+}
+
+float3 LoadRgb(int2 pixel)
+{
+    pixel = clamp(pixel, int2(0, 0), int2(RgbWidth - 1u, RgbHeight - 1u));
+    uint address = (uint(pixel.y) * RgbWidth + uint(pixel.x)) * 3u;
+    return float3(LoadByte(address), LoadByte(address + 1u), LoadByte(address + 2u)) / 255.0;
+}
+
+float CubicWeight(float value)
+{
+    // Catmull-Rom cubic: sharp enough for a DLSS input while avoiding the
+    // CPU Lanczos resize and its full-resolution memory round trip.
+    float x = abs(value);
+    if (x <= 1.0) return 1.5 * x * x * x - 2.5 * x * x + 1.0;
+    if (x < 2.0) return -0.5 * x * x * x + 2.5 * x * x - 4.0 * x + 2.0;
+    return 0.0;
+}
+
+float3 SampleRgbCubic(float2 position)
+{
+    int2 origin = int2(floor(position));
+    float3 total = 0.0;
+    float totalWeight = 0.0;
+    [unroll] for (int y = -1; y <= 2; ++y)
+    {
+        float wy = CubicWeight(position.y - float(origin.y + y));
+        [unroll] for (int x = -1; x <= 2; ++x)
+        {
+            float weight = wy * CubicWeight(position.x - float(origin.x + x));
+            total += LoadRgb(origin + int2(x, y)) * weight;
+            totalWeight += weight;
+        }
+    }
+    return saturate(total / max(totalWeight, 1e-5));
+}
+
+[numthreads(8, 8, 1)]
+void main(uint3 dispatchId : SV_DispatchThreadID)
+{
+    if (dispatchId.x >= OutputWidth || dispatchId.y >= OutputHeight) return;
+    float3 rgbColor;
+    if (RgbWidth == OutputWidth && RgbHeight == OutputHeight)
+    {
+        rgbColor = LoadRgb(int2(dispatchId.xy));
+    }
+    else
+    {
+        float2 sourcePosition = (float2(dispatchId.xy) + 0.5) *
+                                float2(RgbWidth, RgbHeight) /
+                                float2(OutputWidth, OutputHeight) - 0.5;
+        rgbColor = SampleRgbCubic(sourcePosition);
+    }
+    ColorOut[dispatchId.xy] = float4(rgbColor, 1.0);
+
+    float2 gridUv = (float2(dispatchId.xy) + 0.5) /
+                    (float2(GridWidth, GridHeight) * float(Tile));
+    float confidence = Confidence.SampleLevel(LinearClamp, gridUv, 0);
+    float2 weightedMotion = PremultipliedMotion.SampleLevel(LinearClamp, gridUv, 0);
+    MotionOut[dispatchId.xy] = confidence > 1e-4 ? weightedMotion / confidence : 0.0;
+    BiasOut[dispatchId.xy] = saturate(1.0 - confidence * 1.15);
+    DepthOut[dispatchId.xy] = CompactDepth.SampleLevel(LinearClamp, gridUv, 0);
+}
+)HLSL";
+
+    expander.width = width;
+    expander.height = height;
+    expander.tiles_x = tiles_x;
+    expander.tiles_y = tiles_y;
+    expander.tile = tile;
+    expander.flow_grid = MakeTex(tiles_x, tiles_y, DXGI_FORMAT_R16G16_FLOAT, false);
+    expander.confidence_grid = MakeTex(tiles_x, tiles_y, DXGI_FORMAT_R8_UNORM, false);
+    expander.depth_grid = MakeTex(tiles_x, tiles_y, DXGI_FORMAT_R16_FLOAT, false);
+    if (!expander.flow_grid || !expander.confidence_grid || !expander.depth_grid) return false;
+
+    ID3DBlob *bytecode = nullptr, *errors = nullptr;
+    HRESULT hr = D3DCompile(shader, strlen(shader), "gpu-input-expansion", nullptr, nullptr, "main", "cs_5_1",
+                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &bytecode, &errors);
+    if (FAILED(hr))
+    {
+        if (errors) Log("[host] input expansion shader: %s", static_cast<const char *>(errors->GetBufferPointer()));
+        if (errors) errors->Release();
+        if (bytecode) bytecode->Release();
+        return false;
+    }
+    if (errors) errors->Release();
+
+    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 4;
+    ranges[0].BaseShaderRegister = 0;
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    ranges[1].NumDescriptors = 4;
+    ranges[1].BaseShaderRegister = 0;
+    D3D12_ROOT_PARAMETER parameters[3] = {};
+    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[0].DescriptorTable.NumDescriptorRanges = 1;
+    parameters[0].DescriptorTable.pDescriptorRanges = &ranges[0];
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+    parameters[1].DescriptorTable.pDescriptorRanges = &ranges[1];
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[2].Constants.ShaderRegister = 0;
+    parameters[2].Constants.Num32BitValues = 8;
+    D3D12_STATIC_SAMPLER_DESC sampler = {};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ShaderRegister = 0;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    D3D12_ROOT_SIGNATURE_DESC signature = {};
+    signature.NumParameters = _countof(parameters);
+    signature.pParameters = parameters;
+    signature.NumStaticSamplers = 1;
+    signature.pStaticSamplers = &sampler;
+    ID3DBlob *serialized = nullptr;
+    hr = g_d3d12_serialize_root_signature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors);
+    if (FAILED(hr) || serialized == nullptr ||
+        FAILED(h.dev->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+                                          __uuidof(ID3D12RootSignature), reinterpret_cast<void **>(&expander.root))))
+    {
+        if (serialized) serialized->Release();
+        if (errors) errors->Release();
+        bytecode->Release();
+        return false;
+    }
+    serialized->Release();
+    if (errors) errors->Release();
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline = {};
+    pipeline.pRootSignature = expander.root;
+    pipeline.CS = {bytecode->GetBufferPointer(), bytecode->GetBufferSize()};
+    hr = h.dev->CreateComputePipelineState(&pipeline, __uuidof(ID3D12PipelineState),
+                                           reinterpret_cast<void **>(&expander.pso));
+    bytecode->Release();
+    if (FAILED(hr)) return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap_desc.NumDescriptors = static_cast<UINT>(pipeline_slots * 8);
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(h.dev->CreateDescriptorHeap(&heap_desc, __uuidof(ID3D12DescriptorHeap),
+                                           reinterpret_cast<void **>(&expander.heap))))
+        return false;
+    expander.descriptor_size = h.dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = expander.heap->GetCPUDescriptorHandleForHeapStart();
+    auto advance = [&]() { cpu.ptr += expander.descriptor_size; };
+    for (int slot = 0; slot < pipeline_slots; ++slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC raw = {};
+        raw.Format = DXGI_FORMAT_R32_TYPELESS;
+        raw.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        raw.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        raw.Buffer.NumElements = static_cast<UINT>(rgb_uploads[slot].size / 4);
+        raw.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        h.dev->CreateShaderResourceView(rgb_uploads[slot].buffer, &raw, cpu); advance();
+        auto make_srv = [&](ID3D12Resource *resource, DXGI_FORMAT format)
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
+            desc.Format = format;
+            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            desc.Texture2D.MipLevels = 1;
+            h.dev->CreateShaderResourceView(resource, &desc, cpu); advance();
+        };
+        make_srv(expander.flow_grid, DXGI_FORMAT_R16G16_FLOAT);
+        make_srv(expander.confidence_grid, DXGI_FORMAT_R8_UNORM);
+        make_srv(expander.depth_grid, DXGI_FORMAT_R16_FLOAT);
+        auto make_uav = [&](ID3D12Resource *resource, DXGI_FORMAT format)
+        {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC desc = {};
+            desc.Format = format;
+            desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            h.dev->CreateUnorderedAccessView(resource, nullptr, &desc, cpu); advance();
+        };
+        make_uav(color, DXGI_FORMAT_R8G8B8A8_UNORM);
+        make_uav(motion, DXGI_FORMAT_R16G16_FLOAT);
+        make_uav(bias, DXGI_FORMAT_R8_UNORM);
+        make_uav(depth, DXGI_FORMAT_R32_FLOAT);
+    }
+    return true;
+}
+
+static bool ExpandGpuInputs(
+    GpuInputExpander &expander, int slot_index, ID3D12Resource *color, ID3D12Resource *motion,
+    ID3D12Resource *bias, ID3D12Resource *depth, LinearTransfer &flow_upload,
+    LinearTransfer &confidence_upload, LinearTransfer &depth_upload, RawUpload &rgb_upload,
+    const std::vector<uint8_t> &rgb, const std::vector<uint16_t> &premultiplied_flow,
+    const std::vector<uint8_t> &confidence, const std::vector<uint16_t> &compact_depth,
+    UINT rgb_width, UINT rgb_height, bool outputs_common)
+{
+    const size_t rgb_bytes = static_cast<size_t>(rgb_width) * rgb_height * 3;
+    if (rgb.size() != rgb_bytes || rgb_bytes > rgb_upload.size) return false;
+    memcpy(rgb_upload.persistent_map, rgb.data(), rgb_bytes);
+    if ((rgb_bytes & 3u) != 0) memset(rgb_upload.persistent_map + rgb_bytes, 0, 4 - (rgb_bytes & 3u));
+    FillUpload(flow_upload, premultiplied_flow.data(), static_cast<size_t>(expander.tiles_x) * 4, expander.tiles_y);
+    FillUpload(confidence_upload, confidence.data(), expander.tiles_x, expander.tiles_y);
+    FillUpload(depth_upload, compact_depth.data(), static_cast<size_t>(expander.tiles_x) * 2, expander.tiles_y);
+    if (!BeginCommands()) return false;
+    const D3D12_RESOURCE_STATES grid_before = expander.grid_common ? D3D12_RESOURCE_STATE_COMMON
+                                                                  : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    Transition(expander.flow_grid, grid_before, D3D12_RESOURCE_STATE_COPY_DEST);
+    Transition(expander.confidence_grid, grid_before, D3D12_RESOURCE_STATE_COPY_DEST);
+    Transition(expander.depth_grid, grid_before, D3D12_RESOURCE_STATE_COPY_DEST);
+    CopyUploadToTexture(flow_upload, expander.flow_grid);
+    CopyUploadToTexture(confidence_upload, expander.confidence_grid);
+    CopyUploadToTexture(depth_upload, expander.depth_grid);
+    Transition(expander.flow_grid, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Transition(expander.confidence_grid, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Transition(expander.depth_grid, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    expander.grid_common = false;
+
+    const D3D12_RESOURCE_STATES output_before = outputs_common ? D3D12_RESOURCE_STATE_COMMON
+                                                               : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    Transition(color, output_before, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(motion, output_before, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(bias, output_before, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(depth, output_before, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ID3D12DescriptorHeap *heaps[] = {expander.heap};
+    h.list->SetDescriptorHeaps(1, heaps);
+    h.list->SetComputeRootSignature(expander.root);
+    h.list->SetPipelineState(expander.pso);
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = expander.heap->GetGPUDescriptorHandleForHeapStart();
+    gpu.ptr += static_cast<UINT64>(slot_index * 8) * expander.descriptor_size;
+    h.list->SetComputeRootDescriptorTable(0, gpu);
+    gpu.ptr += static_cast<UINT64>(4) * expander.descriptor_size;
+    h.list->SetComputeRootDescriptorTable(1, gpu);
+    const UINT constants[8] = {expander.width, expander.height, expander.tiles_x, expander.tiles_y,
+                               expander.tile, rgb_width, rgb_height, 0};
+    h.list->SetComputeRoot32BitConstants(2, 8, constants, 0);
+    h.list->Dispatch((expander.width + 7) / 8, (expander.height + 7) / 8, 1);
+    Transition(color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Transition(motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Transition(bias, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Transition(depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    EndCommands();
+    return true;
 }
 
 static bool UploadBatchInputs(
@@ -2621,13 +2981,15 @@ static int RunBatch(const BatchOptions &o)
         if (!o.preview_only && !chunk_encode_mode && encode_pipe == nullptr && !output_file)
             throw std::runtime_error("cannot open batch output");
 
-        std::unique_ptr<std::ifstream> input;
+        std::unique_ptr<RgbInput> input;
         std::unique_ptr<MotionSidecar> motion_reader;
         std::unique_ptr<DepthSidecar> depth_reader;
         fs::path current_input, current_motion, current_depth;
         fs::path current_raw_output, current_video_output;
         uint32_t current_chunk_id = 0;
         uint32_t current_chunk_frames = 0;
+        uint32_t current_rgb_width = o.width;
+        uint32_t current_rgb_height = o.height;
         uint32_t chunk_frames_left = 0;
         double stream_wait_ms = 0.0;
         double stream_wait_max_ms = 0.0;
@@ -2639,23 +3001,28 @@ static int RunBatch(const BatchOptions &o)
         bool last_stream_buffering_announced = false;
         double chunk_encode_ms = 0.0;
         auto open_chunk = [&](uint32_t id, uint32_t frames, const fs::path &rgb_path,
-                              const fs::path &motion_path, const fs::path &depth_path)
+                              const fs::path &motion_path, const fs::path &depth_path,
+                              uint32_t rgb_width, uint32_t rgb_height)
         {
             if (frames == 0) throw std::runtime_error("stream chunk has no frames");
-            const uintmax_t expected_rgb = static_cast<uintmax_t>(o.width) * o.height * frames * 3;
-            if (!fs::is_regular_file(rgb_path) || fs::file_size(rgb_path) != expected_rgb)
+            if (rgb_width == 0 || rgb_height == 0 || rgb_width > o.width || rgb_height > o.height)
+                throw std::runtime_error("invalid compact RGB geometry");
+            const uintmax_t expected_rgb = static_cast<uintmax_t>(rgb_width) * rgb_height * frames * 3;
+            const bool shared_rgb = rgb_path.generic_string().rfind("shm://", 0) == 0;
+            if (!shared_rgb && (!fs::is_regular_file(rgb_path) || fs::file_size(rgb_path) != expected_rgb))
                 throw std::runtime_error("RGB24 input size mismatch");
             BatchOptions chunk_options = o;
             chunk_options.frames = frames;
             chunk_options.input = rgb_path;
             chunk_options.motion = motion_path;
             chunk_options.depth = depth_path;
-            input = std::make_unique<std::ifstream>(rgb_path, std::ios::binary);
-            if (!*input) throw std::runtime_error("cannot open batch RGB24 input");
+            input = std::make_unique<RgbInput>(rgb_path, static_cast<size_t>(expected_rgb));
             motion_reader = std::make_unique<MotionSidecar>(motion_path, chunk_options);
             depth_reader = std::make_unique<DepthSidecar>(depth_path, chunk_options);
             current_chunk_id = id;
             current_chunk_frames = frames;
+            current_rgb_width = rgb_width;
+            current_rgb_height = rgb_height;
             chunk_frames_left = frames;
             current_input = rgb_path;
             current_motion = motion_path;
@@ -2737,21 +3104,26 @@ static int RunBatch(const BatchOptions &o)
                 line.erase(0, command_start); // tolerate a UTF-8 BOM on redirected stdin
             std::istringstream command(line);
             std::string tag, id_text, frames_text, rgb_text, motion_text, depth_text;
+            std::string rgb_width_text, rgb_height_text;
             std::getline(command, tag, '\t');
             std::getline(command, id_text, '\t');
             std::getline(command, frames_text, '\t');
             std::getline(command, rgb_text, '\t');
             std::getline(command, motion_text, '\t');
             std::getline(command, depth_text, '\t');
+            std::getline(command, rgb_width_text, '\t');
+            std::getline(command, rgb_height_text, '\t');
             if (tag != "CHUNK" || id_text.empty() || frames_text.empty() || rgb_text.empty() ||
                 motion_text.empty() || depth_text.empty())
                 throw std::runtime_error("invalid stream chunk command");
             open_chunk(static_cast<uint32_t>(strtoul(id_text.c_str(), nullptr, 10)),
                        static_cast<uint32_t>(strtoul(frames_text.c_str(), nullptr, 10)),
-                       fs::u8path(rgb_text), fs::u8path(motion_text), fs::u8path(depth_text));
+                       fs::u8path(rgb_text), fs::u8path(motion_text), fs::u8path(depth_text),
+                       rgb_width_text.empty() ? o.width : static_cast<uint32_t>(strtoul(rgb_width_text.c_str(), nullptr, 10)),
+                       rgb_height_text.empty() ? o.height : static_cast<uint32_t>(strtoul(rgb_height_text.c_str(), nullptr, 10)));
             ++stream_chunks_opened;
         };
-        if (!o.stream) open_chunk(0, o.frames, o.input, o.motion, o.depth);
+        if (!o.stream) open_chunk(0, o.frames, o.input, o.motion, o.depth, o.width, o.height);
 
         Log("[host] --batch%s: render=%ux%u target=%ux%u, %u frame(s), output=%s, fast_start=%d, genuine D3D12 DLSS contract + inline NR",
             o.stream ? "-stream" : "", o.width, o.height, target_width, target_height, o.frames,
@@ -2769,11 +3141,11 @@ static int RunBatch(const BatchOptions &o)
             for (int i = 0; i < 120; ++i) { PumpPresent(); Sleep(8); }
         }
 
-        ID3D12Resource *color = MakeTex(o.width, o.height, DXGI_FORMAT_R8G8B8A8_UNORM, false);
+        ID3D12Resource *color = MakeTex(o.width, o.height, DXGI_FORMAT_R8G8B8A8_UNORM, true);
         ID3D12Resource *output_tex = MakeTex(target_width, target_height, DXGI_FORMAT_R8G8B8A8_UNORM, true);
-        ID3D12Resource *depth = MakeTex(o.width, o.height, DXGI_FORMAT_R32_FLOAT, false);
-        ID3D12Resource *mv = MakeTex(o.width, o.height, DXGI_FORMAT_R16G16_FLOAT, false);
-        ID3D12Resource *bias = MakeTex(o.width, o.height, DXGI_FORMAT_R8_UNORM, false);
+        ID3D12Resource *depth = MakeTex(o.width, o.height, DXGI_FORMAT_R32_FLOAT, true);
+        ID3D12Resource *mv = MakeTex(o.width, o.height, DXGI_FORMAT_R16G16_FLOAT, true);
+        ID3D12Resource *bias = MakeTex(o.width, o.height, DXGI_FORMAT_R8_UNORM, true);
         if (!color || !output_tex || !depth || !mv || !bias) throw std::runtime_error("batch texture allocation failed");
         MotionFrameGeneration frame_generation = {};
         if (o.preview_only && o.motion_frame_generation &&
@@ -2781,14 +3153,41 @@ static int RunBatch(const BatchOptions &o)
             throw std::runtime_error("motion-compensated GPU frame generation initialization failed");
         constexpr int kPipeline = 3;
         LinearTransfer color_up[kPipeline], depth_up[kPipeline], mv_up[kPipeline], bias_up[kPipeline], readback[kPipeline];
+        LinearTransfer compact_flow_up[kPipeline], compact_confidence_up[kPipeline], compact_depth_up[kPipeline];
+        RawUpload raw_rgb_up[kPipeline];
         for (int i = 0; i < kPipeline; ++i)
         {
             color_up[i] = MakeTransfer(color, D3D12_HEAP_TYPE_UPLOAD);
             depth_up[i] = MakeTransfer(depth, D3D12_HEAP_TYPE_UPLOAD);
             mv_up[i] = MakeTransfer(mv, D3D12_HEAP_TYPE_UPLOAD);
             bias_up[i] = MakeTransfer(bias, D3D12_HEAP_TYPE_UPLOAD);
+            raw_rgb_up[i] = MakeRawUpload(static_cast<UINT64>(o.width) * o.height * 3);
             if (!o.preview_only) readback[i] = MakeTransfer(output_tex, D3D12_HEAP_TYPE_READBACK);
         }
+        GpuInputExpander input_expander = {};
+        bool input_expander_initialized = false;
+        auto ensure_input_expander = [&]()
+        {
+            if (input_expander_initialized) return;
+            if (!motion_reader || !depth_reader) throw std::runtime_error("guide sidecars are unavailable");
+            if (motion_reader->Tile() != depth_reader->Tile() ||
+                motion_reader->TilesX() != depth_reader->TilesX() ||
+                motion_reader->TilesY() != depth_reader->TilesY())
+                throw std::runtime_error("motion/depth compact-grid mismatch");
+            if (!InitGpuInputExpander(input_expander, raw_rgb_up, kPipeline, color, mv, bias, depth,
+                                      o.width, o.height, motion_reader->TilesX(), motion_reader->TilesY(),
+                                      motion_reader->Tile()))
+                throw std::runtime_error("GPU input expansion initialization failed");
+            for (int i = 0; i < kPipeline; ++i)
+            {
+                compact_flow_up[i] = MakeTransfer(input_expander.flow_grid, D3D12_HEAP_TYPE_UPLOAD);
+                compact_confidence_up[i] = MakeTransfer(input_expander.confidence_grid, D3D12_HEAP_TYPE_UPLOAD);
+                compact_depth_up[i] = MakeTransfer(input_expander.depth_grid, D3D12_HEAP_TYPE_UPLOAD);
+            }
+            input_expander_initialized = true;
+            Log("[host] GPU input expansion active: RGB24 + %ux%u compact motion/depth -> %ux%u",
+                input_expander.tiles_x, input_expander.tiles_y, o.width, o.height);
+        };
 
         const int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
                           NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
@@ -2811,10 +3210,10 @@ static int RunBatch(const BatchOptions &o)
         const size_t pixels = static_cast<size_t>(o.width) * o.height;
         struct PreparedBatchFrame
         {
-            std::vector<uint8_t> rgb, rgba;
-            std::vector<uint16_t> motion;
-            std::vector<uint8_t> bias;
-            std::vector<float> depth;
+            std::vector<uint8_t> rgb;
+            std::vector<uint16_t> premultiplied_motion;
+            std::vector<uint8_t> confidence;
+            std::vector<uint16_t> compact_depth;
             double input_ms = 0.0;
             double guides_ms = 0.0;
             bool reset = false;
@@ -2823,7 +3222,6 @@ static int RunBatch(const BatchOptions &o)
         for (auto &slot : prepared)
         {
             slot.rgb.resize(pixels * 3);
-            slot.rgba.resize(pixels * 4);
         }
         std::vector<uint8_t> out_rgb[kPipeline];
         struct PendingOutput
@@ -2906,23 +3304,13 @@ static int RunBatch(const BatchOptions &o)
                 auto phase_begin = BatchClock::now();
                 if (!input || !motion_reader || !depth_reader)
                     throw std::runtime_error("batch chunk is not open");
-                input->read(reinterpret_cast<char *>(slot.rgb.data()),
-                            static_cast<std::streamsize>(slot.rgb.size()));
-                if (input->gcount() != static_cast<std::streamsize>(slot.rgb.size()))
+                slot.rgb.resize(static_cast<size_t>(current_rgb_width) * current_rgb_height * 3);
+                if (!input->ReadExact(slot.rgb.data(), slot.rgb.size()))
                     throw std::runtime_error("truncated RGB24 input");
-                #pragma omp parallel for schedule(static)
-                for (int64_t pi = 0; pi < static_cast<int64_t>(pixels); ++pi)
-                {
-                    const size_t p = static_cast<size_t>(pi);
-                    slot.rgba[p * 4 + 0] = slot.rgb[p * 3 + 0];
-                    slot.rgba[p * 4 + 1] = slot.rgb[p * 3 + 1];
-                    slot.rgba[p * 4 + 2] = slot.rgb[p * 3 + 2];
-                    slot.rgba[p * 4 + 3] = 255;
-                }
                 slot.input_ms = ElapsedMs(phase_begin);
                 phase_begin = BatchClock::now();
-                slot.reset = motion_reader->ReadExpanded(slot.motion, slot.bias);
-                depth_reader->ReadFloat(slot.depth);
+                slot.reset = motion_reader->ReadCompact(slot.premultiplied_motion, slot.confidence);
+                depth_reader->ReadCompact(slot.compact_depth);
                 slot.guides_ms = ElapsedMs(phase_begin);
             }
             catch (...)
@@ -3024,6 +3412,7 @@ static int RunBatch(const BatchOptions &o)
                 if (chunk_frames_left > o.frames - frame)
                     throw std::runtime_error("stream chunks exceed the declared frame count");
             }
+            ensure_input_expander();
             const int slot_index = static_cast<int>(frame % kPipeline);
             PreparedBatchFrame &current = prepared[slot_index];
             prepare_frame(current);
@@ -3038,11 +3427,13 @@ static int RunBatch(const BatchOptions &o)
             PumpPresent();
 
             auto phase_begin = BatchClock::now();
-            if (!UploadBatchInputs(color, depth, mv, bias, output_tex,
-                                   color_up[slot_index], depth_up[slot_index], mv_up[slot_index], bias_up[slot_index],
-                                   current.rgba, current.depth, current.motion, current.bias,
-                                   o.width, o.height, frame == 0 && !o.fast_start))
-                throw std::runtime_error("GPU input upload failed");
+            if (!ExpandGpuInputs(input_expander, slot_index, color, mv, bias, depth,
+                                 compact_flow_up[slot_index], compact_confidence_up[slot_index],
+                                 compact_depth_up[slot_index], raw_rgb_up[slot_index],
+                                 current.rgb, current.premultiplied_motion, current.confidence,
+                                 current.compact_depth, current_rgb_width, current_rgb_height,
+                                 frame == 0 && !o.fast_start))
+                throw std::runtime_error("GPU compact-input expansion failed");
             upload_ms += ElapsedMs(phase_begin);
             const int reset = (frame == 0 || current.reset || o.reset_every_frame) ? 1 : 0;
 
@@ -3141,7 +3532,7 @@ static int RunBatch(const BatchOptions &o)
                 if (o.delete_chunks)
                 {
                     std::error_code ignored;
-                    fs::remove(current_input, ignored);
+                    if (current_input.generic_string().rfind("shm://", 0) != 0) fs::remove(current_input, ignored);
                     fs::remove(current_motion, ignored);
                     fs::remove(current_depth, ignored);
                 }
@@ -3242,12 +3633,21 @@ static int RunBatch(const BatchOptions &o)
             if (depth_up[i].persistent_map != nullptr) depth_up[i].buffer->Unmap(0, nullptr);
             if (mv_up[i].persistent_map != nullptr) mv_up[i].buffer->Unmap(0, nullptr);
             if (bias_up[i].persistent_map != nullptr) bias_up[i].buffer->Unmap(0, nullptr);
+            if (compact_flow_up[i].persistent_map != nullptr) compact_flow_up[i].buffer->Unmap(0, nullptr);
+            if (compact_confidence_up[i].persistent_map != nullptr) compact_confidence_up[i].buffer->Unmap(0, nullptr);
+            if (compact_depth_up[i].persistent_map != nullptr) compact_depth_up[i].buffer->Unmap(0, nullptr);
+            if (raw_rgb_up[i].persistent_map != nullptr) raw_rgb_up[i].buffer->Unmap(0, nullptr);
             color_up[i].buffer->Release();
             depth_up[i].buffer->Release();
             mv_up[i].buffer->Release();
             bias_up[i].buffer->Release();
+            if (compact_flow_up[i].buffer != nullptr) compact_flow_up[i].buffer->Release();
+            if (compact_confidence_up[i].buffer != nullptr) compact_confidence_up[i].buffer->Release();
+            if (compact_depth_up[i].buffer != nullptr) compact_depth_up[i].buffer->Release();
+            raw_rgb_up[i].buffer->Release();
             if (readback[i].buffer != nullptr) readback[i].buffer->Release();
         }
+        ReleaseGpuInputExpander(input_expander);
         color->Release();
         output_tex->Release();
         depth->Release();
@@ -3552,6 +3952,7 @@ int main(int argc, char **argv)
     g_preview_direct = batch.preview_only;
     g_preview_fullscreen = batch.fullscreen;
     g_preview_control_file = batch.control_file;
+    g_preview_event_file = batch.control_file.empty() ? fs::path() : fs::path(batch.control_file.wstring() + L".events");
     g_preview_telemetry_file = batch.telemetry_file;
     g_preview_media_start_seconds = batch.media_start_seconds;
     g_preview_media_duration_seconds = batch.media_duration_seconds;
@@ -3563,10 +3964,11 @@ int main(int argc, char **argv)
     }
 
     DetectRenodxAddon();   // must run BEFORE ReShade loads, so an EnableHooks write is read
+    if (!LoadPortableReShade()) return 1;
     if (batch.nvidia_frame_generation)
     {
         // Register the neural-rendering add-on before Streamline loads NGX.
-        if (LoadLibraryW(L"dxgi.dll") == nullptr || !InitStreamline())
+        if (!InitStreamline())
         {
             Log("[streamline] NVIDIA DLSS Frame Generation is unavailable");
             return 1;

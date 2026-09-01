@@ -94,9 +94,11 @@ $ControlDirectory = [IO.Path]::GetDirectoryName($ControlPath)
 New-Item -ItemType Directory -Force -Path $ControlDirectory | Out-Null
 [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
 $TelemetryPath = $ControlPath + '.telemetry'
+$NativeEventPath = $ControlPath + '.events'
 $PlaybackStatePath = $ControlPath + '.playback'
 $BufferStatePath = $ControlPath + '.buffer'
 if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
+if (Test-Path -LiteralPath $NativeEventPath) { Remove-Item -LiteralPath $NativeEventPath -Force }
 [IO.File]::WriteAllText($PlaybackStatePath,'buffering',$Utf8NoBom)
 if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
 
@@ -289,6 +291,8 @@ Write-Output ('STUDIO_PLAYER_READY ' + (@{
 
 while ($true) {
     [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
+    [IO.File]::WriteAllText($NativeEventPath,'',$Utf8NoBom)
+    $NativeEventOffset = 0
     if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
     Set-PlaybackState 'buffering'
     if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
@@ -374,9 +378,16 @@ while ($true) {
         # interrupt a healthy audio device.
 
         try {
+            $Command = $null
+            $NativeEvents = @(Get-Content -LiteralPath $NativeEventPath -ErrorAction SilentlyContinue)
             if ((Get-Item -LiteralPath $ControlPath -ErrorAction Stop).Length -gt 0) {
                 $Command = [IO.File]::ReadAllText($ControlPath,$Utf8NoBom).Trim()
                 [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
+            } elseif ($NativeEventOffset -lt $NativeEvents.Count) {
+                $Command = ([string]$NativeEvents[$NativeEventOffset]).Trim()
+                $NativeEventOffset++
+            }
+            if (-not [string]::IsNullOrWhiteSpace($Command)) {
                 if ($Command -match '^SEEK\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
                     $ParsedTarget = 0.0
                     if ([double]::TryParse($Matches.s,[Globalization.NumberStyles]::Float,$Invariant,[ref]$ParsedTarget)) {
@@ -458,6 +469,7 @@ while ($true) {
         Remove-RealtimeWork $ActiveWork
         if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) { Remove-Item -LiteralPath $HeadersPath -Force }
         if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
+        if (Test-Path -LiteralPath $NativeEventPath) { Remove-Item -LiteralPath $NativeEventPath -Force }
         if (Test-Path -LiteralPath $PlaybackStatePath) { Remove-Item -LiteralPath $PlaybackStatePath -Force }
         if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
         Write-Output 'STUDIO_PLAYER_CLOSED'
@@ -465,6 +477,7 @@ while ($true) {
     }
     if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) { Remove-Item -LiteralPath $HeadersPath -Force }
     if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
+    if (Test-Path -LiteralPath $NativeEventPath) { Remove-Item -LiteralPath $NativeEventPath -Force }
     if (Test-Path -LiteralPath $PlaybackStatePath) { Remove-Item -LiteralPath $PlaybackStatePath -Force }
     if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
     exit $ExitCode

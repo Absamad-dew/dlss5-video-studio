@@ -1,2 +1,2 @@
-13.4.0-exact-av-clock-live-buffer
-Audio starts from the exact first presented frame with sample-count timestamps; underruns pause and resume audio/video together; live remaining-buffer seconds and refill FPS; optional maximum-speed buffer filling during pause.
+13.5.0-gpu-compact-realtime
+Feature 18 now loads in every mode; compact RGB stays at source resolution in shared memory, while D3D12 expands RGB and compact motion/depth directly on the GPU for substantially faster high-resolution realtime playback.

@@ -434,6 +434,15 @@ $DlssInputWidth = if ($VsrAfterDlss) { $UpscalerInputWidth } else { $RenderWidth
 $DlssInputHeight = if ($VsrAfterDlss) { $UpscalerInputHeight } else { $RenderHeight }
 $DlssOutputWidth = if ($VsrAfterDlss) { $UpscalerInputWidth } else { $OutputWidth }
 $DlssOutputHeight = if ($VsrAfterDlss) { $UpscalerInputHeight } else { $OutputHeight }
+# Realtime no longer asks FFmpeg/CPU to enlarge every RGB frame to the DLSS
+# render extent.  Preserve the complete source frame (or downscale only when
+# the source itself exceeds the render extent), then perform one high-quality
+# cubic expansion in the native D3D12 input pass.
+$RgbTransportGeometry = if ($IsPreviewOnly -and -not $UseExternalUpscaler) {
+    Fit-Geometry $SourceWidth $SourceHeight $DlssInputWidth $DlssInputHeight $false
+} else { @($DlssInputWidth,$DlssInputHeight) }
+$RgbTransportWidth = [int]$RgbTransportGeometry[0]
+$RgbTransportHeight = [int]$RgbTransportGeometry[1]
 if ($VRMode -eq 'Equirect360' -and [math]::Abs(($OutputWidth/[double]$OutputHeight)-2.0) -gt 0.035) {
     throw 'Equirect360 requires a 2:1 panoramic source/output (for example 3840x1920). Use CinemaSBS for ordinary flat video.'
 }
@@ -618,6 +627,19 @@ $RealtimeStartupBufferFrames = if ($IsPreviewOnly) { $RealtimeBufferCapacityFram
 $RealtimePrebufferChunks = if ($IsPreviewOnly) {
     [int][math]::Max(1,[math]::Min($Chunks,[math]::Ceiling($RealtimeStartupBufferFrames/[double]$ChunkSize)))
 } else { 0 }
+$PhysicalMemoryBytes = try {
+    [long](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory
+} catch { 16GB }
+$SharedRgbBudgetBytes = [long][math]::Min([double]6GB,[math]::Max([double]1GB,[double]$PhysicalMemoryBytes*0.25))
+$SharedRgbPlannedBytes = if ($IsPreviewOnly) {
+    [long]($RealtimeBufferCapacityFrames+2*$ChunkSize)*[long]$RgbTransportWidth*[long]$RgbTransportHeight*3L
+} else { 0L }
+# Pagefile-backed named mappings remove the full-resolution RGB round trip
+# through the SSD.  Keep a strict RAM/commit budget so very long user-selected
+# buffers fall back to the file transport instead of pressuring the machine.
+$UseSharedRgbTransport = $IsPreviewOnly -and -not $VsrBeforeDlss -and `
+    $SharedRgbPlannedBytes -gt 0 -and $SharedRgbPlannedBytes -le $SharedRgbBudgetBytes
+$SharedRgbNamePrefix = 'd5rgb_' + (($RunId -replace '[^A-Za-z0-9_-]','_'))
 $ChunkOffsets = New-Object 'Collections.Generic.List[int]'
 $ChunkEndFrames = New-Object 'Collections.Generic.List[int]'
 $ChunkCursor = 0
@@ -657,6 +679,7 @@ $ContainerHeight = if ($VRMode -in @('CinemaSBS','DepthSBS') -and $VRSbsLayout -
 $Plan = [ordered]@{
     source_geometry=@($SourceWidth,$SourceHeight); output_geometry=@($OutputWidth,$OutputHeight)
     render_geometry=@($DlssInputWidth,$DlssInputHeight); hardware_profile=$ResolvedHardwareProfile
+    rgb_transport_geometry=@($RgbTransportWidth,$RgbTransportHeight)
     realtime_render_preset=if($IsPreviewOnly){$ResolvedRealtimeRenderPreset}else{$null}
     depth_model_profile=$DepthModelProfile
     container_geometry=@($ContainerWidth,$ContainerHeight); source_fps=$SourceRate; fps=$Fps
@@ -678,6 +701,8 @@ $Plan = [ordered]@{
     realtime_chunk_frames=if($IsPreviewOnly){$ChunkSize}else{$null}
     realtime_prebuffer_chunks=if($IsPreviewOnly){$RealtimePrebufferChunks}else{$null}
     realtime_fill_buffer_on_pause=if($IsPreviewOnly){[bool]$RealtimeFillBufferOnPause}else{$null}
+    realtime_rgb_transport=if($IsPreviewOnly){if($UseSharedRgbTransport){'shared-memory'}else{'ssd-file'}}else{$null}
+    realtime_shared_rgb_planned_mb=if($IsPreviewOnly){[math]::Round($SharedRgbPlannedBytes/1MB,1)}else{$null}
     source_kind=if($IsNetworkSource){'network'}else{'file'}
     source_page=if($ResolvedOnlineSource){$ResolvedOnlineSource.PageUrl}else{$null}
     fine_guide_settings=[bool]$FineGuideSettings
@@ -743,7 +768,8 @@ try {
     }
 
     $GuideArgs = @(
-        '--server','--width',$DlssInputWidth,'--height',$DlssInputHeight,'--depth-model',$DepthModel,
+        '--server','--width',$DlssInputWidth,'--height',$DlssInputHeight,
+        '--input-width',$RgbTransportWidth,'--input-height',$RgbTransportHeight,'--depth-model',$DepthModel,
         '--depth-engine',$DepthEngine,'--depth-backend','auto','--cache-dir',$DepthCache,'--guide-width',$GuideWidth,
         '--depth-interval',$DepthInterval,'--depth-min-interval',$DepthMinInterval,
         '--motion-preset',$MotionPreset,
@@ -844,6 +870,14 @@ try {
     Wait-ProtocolLine $HostProcess 'HOST_STREAM_READY' 'DLSS5 host'
     $HostReadySeconds = $PipelineWatch.Elapsed.TotalSeconds
 
+    function Release-SharedRgbChunk([int] $ReleasedChunkIndex) {
+        if (-not $UseSharedRgbTransport) { return }
+        $Reference = 'shm://{0}_{1:D5}' -f $SharedRgbNamePrefix,$ReleasedChunkIndex
+        $ReleaseCommand = [ordered]@{cmd='release';inputs=@($Reference)} | ConvertTo-Json -Compress
+        $GuideProcess.StandardInput.WriteLine($ReleaseCommand)
+        Wait-ProtocolLine $GuideProcess 'GUIDE_RELEASED ' 'Guide shared-memory release'
+    }
+
     Stage 3 8 $(if ($VsrBeforeDlss) { "$Upscaler x4 -> DLSS5" } elseif ($VsrAfterDlss) { "DLSS5 at model input resolution -> $Upscaler x4" } else { "DLSS5 with adaptive motion/depth ($PerformanceProfile)" })
     $AcknowledgedChunks = 0
     $SentChunks = 0
@@ -903,7 +937,7 @@ try {
                 $GuideSceneCuts += [int]$GuideResult.scene_cuts
             } catch {}
 
-            $HostCommand = "CHUNK`t$ChunkIndex`t$ThisFrames`t$Raw`t$Motion`t$Depth"
+            $HostCommand = "CHUNK`t$ChunkIndex`t$ThisFrames`t$Raw`t$Motion`t$Depth`t$RgbTransportWidth`t$RgbTransportHeight"
             if ($IsPreviewOnly -and $SentChunks -eq 0) {
                 $StartupHostCommands.Add([pscustomobject]@{Command=$HostCommand;Frames=[int]$ThisFrames})
                 $StartupPreparedFrames += $ThisFrames
@@ -963,7 +997,10 @@ try {
         $FirstFrame = $ChunkOffsets[$ChunkIndex]
         $ThisFrames = $ChunkFrameCounts[$ChunkIndex]
         $Prefix = Join-Path $ChunkDirectory ('chunk-{0:D4}' -f $ChunkIndex)
-        $Raw = $Prefix + '.rgb'
+        $RawStorage = $Prefix + '.rgb'
+        $Raw = if ($UseSharedRgbTransport) {
+            'shm://{0}_{1:D5}' -f $SharedRgbNamePrefix,$ChunkIndex
+        } else { $RawStorage }
         $Motion = $Prefix + '.motion'
         $Depth = $Prefix + '.depth'
         $CommandData = [ordered]@{
@@ -974,7 +1011,7 @@ try {
         if ($ChunkIndex + 1 -lt $Chunks) {
             $NextPrefix = Join-Path $ChunkDirectory ('chunk-{0:D4}' -f ($ChunkIndex + 1))
             $PrefetchData = [ordered]@{
-                input=($NextPrefix + '.rgb')
+                input=if($UseSharedRgbTransport){'shm://{0}_{1:D5}' -f $SharedRgbNamePrefix,($ChunkIndex+1)}else{($NextPrefix+'.rgb')}
                 frames=$ChunkFrameCounts[$ChunkIndex + 1]
                 first_frame=$ChunkOffsets[$ChunkIndex + 1]
             }
@@ -999,6 +1036,7 @@ try {
                 if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
                 $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
                 $AcknowledgedChunks++
+                Release-SharedRgbChunk ($AcknowledgedChunks-1)
                 $DoneFrames = $ChunkEndFrames[$AcknowledgedChunks - 1]
                 $Span = if($VsrAfterDlss){42.0}else{85.0}; $Percent=5.0+$Span*$DoneFrames/[double]$TotalFrames
                 Emit-Progress 'DLSS5' 'DLSS5 motion/depth neural rendering' $Percent $DoneFrames $TotalFrames $PrimaryPhaseWatch.Elapsed.TotalSeconds
@@ -1029,7 +1067,7 @@ try {
             }
         } catch {}
 
-        $HostCommand = "CHUNK`t$ChunkIndex`t$ThisFrames`t$Raw`t$Motion`t$Depth"
+        $HostCommand = "CHUNK`t$ChunkIndex`t$ThisFrames`t$Raw`t$Motion`t$Depth`t$RgbTransportWidth`t$RgbTransportHeight"
         if ($IsPreviewOnly -and $SentChunks -eq 0) {
             # Do not start on a chunk count approximation: accumulate the exact
             # number of fully decoded RGB+motion+depth frames selected by the
@@ -1060,6 +1098,7 @@ try {
                 if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
                 $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
                 $AcknowledgedChunks++
+                Release-SharedRgbChunk ($AcknowledgedChunks-1)
                 $DoneFrames = $ChunkEndFrames[$AcknowledgedChunks - 1]
                 $Percent = 5.0 + 85.0*$DoneFrames/[double]$TotalFrames
             }
@@ -1086,11 +1125,13 @@ try {
     }
     }
 
-    $GuideProcess.StandardInput.WriteLine('{"cmd":"end"}')
-    Wait-ProtocolLine $GuideProcess 'GUIDE_SERVER_DONE' 'Guide engine'
-    $GuideProcess.StandardInput.Close()
-    $GuideProcess.WaitForExit()
-    if ($GuideProcess.ExitCode -ne 0) { throw "Guide engine failed: $($GuideProcess.StandardError.ReadToEnd())" }
+    if (-not $UseSharedRgbTransport) {
+        $GuideProcess.StandardInput.WriteLine('{"cmd":"end"}')
+        Wait-ProtocolLine $GuideProcess 'GUIDE_SERVER_DONE' 'Guide engine'
+        $GuideProcess.StandardInput.Close()
+        $GuideProcess.WaitForExit()
+        if ($GuideProcess.ExitCode -ne 0) { throw "Guide engine failed: $($GuideProcess.StandardError.ReadToEnd())" }
+    }
 
     Stage 4 8 $(if ($IsPreviewOnly) { 'Displaying the remaining DLSS5 frames' } elseif ($DirectEncode) { 'Draining the DLSS5 GPU pipeline and continuous NVENC stream' } else { 'Draining the DLSS5 GPU pipeline and NVENC encoder' })
     while ($AcknowledgedChunks -lt $Chunks) {
@@ -1098,9 +1139,17 @@ try {
         if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
         $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
         $AcknowledgedChunks++
+        Release-SharedRgbChunk ($AcknowledgedChunks-1)
         $DoneFrames = $ChunkEndFrames[$AcknowledgedChunks - 1]
         $Span = if($VsrAfterDlss){42.0}else{85.0}; $Percent=5.0+$Span*$DoneFrames/[double]$TotalFrames
         Emit-Progress 'DLSS5' 'Draining DLSS5 and NVENC queues' $Percent $DoneFrames $TotalFrames $PrimaryPhaseWatch.Elapsed.TotalSeconds
+    }
+    if ($UseSharedRgbTransport) {
+        $GuideProcess.StandardInput.WriteLine('{"cmd":"end"}')
+        Wait-ProtocolLine $GuideProcess 'GUIDE_SERVER_DONE' 'Guide engine'
+        $GuideProcess.StandardInput.Close()
+        $GuideProcess.WaitForExit()
+        if ($GuideProcess.ExitCode -ne 0) { throw "Guide engine failed: $($GuideProcess.StandardError.ReadToEnd())" }
     }
     $HostProcess.StandardInput.Close()
     Wait-ProtocolLine $HostProcess 'HOST_STREAM_DONE ' 'DLSS5 host'
@@ -1346,6 +1395,7 @@ try {
         realtime_max_chunk_wait_ms = if($IsPreviewOnly -and $MaxStreamWaitMatch.Success){[math]::Round([double]::Parse($MaxStreamWaitMatch.Groups['ms'].Value,[Globalization.CultureInfo]::InvariantCulture),3)}else{$null}
         source_geometry = @($SourceWidth,$SourceHeight)
         render_geometry = @($DlssInputWidth,$DlssInputHeight)
+        rgb_transport_geometry = @($RgbTransportWidth,$RgbTransportHeight)
         dlss_output_geometry = @($DlssOutputWidth,$DlssOutputHeight)
         output_geometry = @($OutputWidth,$OutputHeight)
         container_geometry = @($ContainerWidth,$ContainerHeight)
@@ -1367,6 +1417,9 @@ try {
         regular_chunk_frames = [int]$ChunkSize
         persistent_pipeline = $true
         persistent_decoder = -not $VsrBeforeDlss
+        rgb_transport = if($UseSharedRgbTransport){'shared-memory'}else{'ssd-file'}
+        shared_rgb_planned_mb = if($IsPreviewOnly){[math]::Round($SharedRgbPlannedBytes/1MB,1)}else{0.0}
+        gpu_compact_guide_expansion = $true
         fast_start = -not $UseExternalUpscaler
         continuous_nvenc = [bool]$DirectEncode
         guide_ready_seconds = [double]$GuideReadySeconds
