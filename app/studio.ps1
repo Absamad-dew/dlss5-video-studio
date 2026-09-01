@@ -818,8 +818,8 @@ $HelpText=[ordered]@{
     RealtimeFullscreenCheck='Открывает GPU-direct плеер сразу без рамки на весь экран. F11 и двойной щелчок переключают режим во время просмотра.'
     RealtimeAudioCheck='Аудиопоток сверяется с телеметрией самого видеоплеера. При заметном дрейфе или зависании он автоматически удерживается и перезапускается с текущей позиции.'
     RealtimeVolumeSlider='Громкость отдельного realtime-аудиопотока. На обработку кадров и запись не влияет.'
-    RealtimeBufferSlider='Сколько секунд полностью подготовленных кадров накопить до старта. Больший запас лучше скрывает пики нагрузки, но увеличивает задержку запуска и расход SSD.'
-    RealtimeChunkSlider='Размер независимого блока кадров. Малые блоки уменьшают задержку, большие снижают служебные расходы. Авто выбирается по VRAM и разрешению.'
+    RealtimeBufferSlider='Гарантированный запас полностью подготовленных RGB, motion и depth кадров. Плеер запускается только после набора выбранных секунд и затем постоянно восстанавливает этот уровень.'
+    RealtimeChunkSlider='Частота пополнения буфера. Авто использует блоки около 0,5 секунды (меньше для 4K), чтобы сложная сцена не задерживала следующую порцию на несколько секунд.'
     GuideWorkerSlider='Число CPU-потоков OpenCV/guide. Авто учитывает доступные ядра и VRAM; ручное завышение может ухудшить плавность из-за конкуренции.'
     GuideWidthSlider='Разрешение служебной motion/depth-карты. Выше — точнее мелкие границы, больше CPU/GPU-нагрузка; выходной кадр DLSS5 остаётся полноразмерным.'
     DepthIntervalSlider='Как часто нейросеть заново считает полную глубину. Меньше N — устойчивее сложное движение и выше нагрузка.'
@@ -1021,6 +1021,17 @@ $Timer.Add_Tick({
                     $StatusText.Text='Подготовка буфера…'
                     $DetailText.Text=('Позиция {0} · формируются кадры motion/depth и DLSS5' -f (Format-Time ([double]$Session.start_seconds)))
                 } catch { Add-Log ('Player session JSON: '+$_.Exception.Message) }
+            } elseif ($L -match '^STUDIO_REALTIME_BUFFER_READY_JSON (?<j>.+)$') {
+                try {
+                    $Buffer=$Matches.j|ConvertFrom-Json
+                    $StatusText.Text='Буфер готов — запуск воспроизведения'
+                    $DetailText.Text=('Подготовлено {0:0.00} сек ({1} кадров) · задано {2} сек' -f [double]$Buffer.ready_seconds,[int]$Buffer.ready_frames,[int]$Buffer.target_seconds)
+                } catch { Add-Log ('Buffer ready JSON: '+$_.Exception.Message) }
+            } elseif ($L -match '^STUDIO_REALTIME_BUFFER_LEVEL (?<j>.+)$') {
+                try {
+                    $Buffer=$Matches.j|ConvertFrom-Json
+                    $DetailText.Text=('Постоянный запас: {0:0.00}/{1} сек · звук непрерывный' -f [double]$Buffer.ready_seconds,[int]$Buffer.target_seconds)
+                } catch { Add-Log ('Buffer level JSON: '+$_.Exception.Message) }
             } elseif ($L -match '^STUDIO_PLAYER_PLAYING (?<j>.+)$') {
                 try {
                     $Playing=$Matches.j|ConvertFrom-Json

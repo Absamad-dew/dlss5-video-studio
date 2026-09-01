@@ -1,2 +1,2 @@
-13.2.1-dlssg-vsync-continuous-audio
-Stable vsynced DLSS-G/MFG presentation; continuous realtime audio across transient telemetry gaps; local Streamline runtime pinning; automatic non-black fallback; player FPS/controls overlay.
+13.3.0-constant-frame-buffer-audio-master
+Exact prepared-frame startup/steady-state buffer; sub-second adaptive chunks; uninterrupted audio master clock with restart only after a real device/process failure; live buffer health UI.

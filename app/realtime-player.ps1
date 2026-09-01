@@ -124,17 +124,9 @@ $AudioProcess = $null
 $AudioStderrTask = $null
 $AudioMuted = $false
 $VideoPaused = $false
-# ffplay's process/decoder start is consistently about 1.24 s on both tested
-# machines.  Seek the audio clock ahead by that measured startup latency so
-# the first audible sample lines up with the already-presented video frame;
-# telemetry correction below still removes residual drift and handles stalls.
-$AudioStartupCompensationSeconds = 1.24
-$AudioClockMediaStart = 0.0
-$AudioClockWallStart = 0.0
-$LastAudioCorrectionWall = 0.0
+$LastAudioStartWall = 0.0
 $LastTelemetryWall = 0.0
 $LastTelemetryFrame = -1L
-$AudioNeedsResync = $false
 $VideoPlaybackStarted = $false
 $LatestVideoPosition = $CurrentStart
 $InputHeaderBlock = $null
@@ -166,7 +158,7 @@ function Get-MonotonicSeconds {
 function Start-Audio([double] $Position) {
     if (-not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused) { return }
     Stop-Audio
-    $SeekPosition = [math]::Max(0.0,[math]::Min($Duration-0.01,$Position + $AudioStartupCompensationSeconds))
+    $SeekPosition = [math]::Max(0.0,[math]::Min($Duration-0.01,$Position))
     $AudioArgs=@('-nodisp','-autoexit','-loglevel','error','-volume',$Volume)
     if($InputTlsNoVerify){$AudioArgs+=@('-tls_verify','0')}
     if($InputHeaderBlock){$AudioArgs+=@('-headers',$InputHeaderBlock)}
@@ -179,10 +171,7 @@ function Start-Audio([double] $Position) {
     $script:AudioProcess=[Diagnostics.Process]::new();$script:AudioProcess.StartInfo=$Psi
     if(-not $script:AudioProcess.Start()){$script:AudioProcess=$null;return}
     $script:AudioStderrTask=$script:AudioProcess.StandardError.ReadToEndAsync()
-    $script:AudioClockMediaStart=$SeekPosition
-    $script:AudioClockWallStart=Get-MonotonicSeconds
-    $script:LastAudioCorrectionWall=$script:AudioClockWallStart
-    $script:AudioNeedsResync=$false
+    $script:LastAudioStartWall=Get-MonotonicSeconds
 }
 
 function Update-AudioClockFromTelemetry {
@@ -197,16 +186,15 @@ function Update-AudioClockFromTelemetry {
     $script:LastTelemetryWall = $Now
     $script:LatestVideoPosition = $Position
     if (-not $script:VideoPlaybackStarted -or -not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused) { return }
-    if ($script:AudioNeedsResync -or -not $script:AudioProcess -or $script:AudioProcess.HasExited) {
+    # Audio is the continuous master clock. Never kill/restart a healthy audio
+    # device merely because video telemetry is early, late or temporarily
+    # absent: those corrective restarts were heard as recurring drop-outs.
+    # Recover only when ffplay actually exited, with a retry guard for broken
+    # network streams or inputs without an audio track.
+    if ((-not $script:AudioProcess -or $script:AudioProcess.HasExited) -and
+        ($Now-$script:LastAudioStartWall) -ge 2.0) {
         Start-Audio $Position
-        Write-Output ('STUDIO_PLAYER_AVSYNC action=resume position={0:0.###}' -f $Position)
-        return
-    }
-    $EstimatedAudioPosition = $script:AudioClockMediaStart + ($Now - $script:AudioClockWallStart)
-    $Drift = $Position - $EstimatedAudioPosition
-    if ([math]::Abs($Drift) -ge 0.35 -and ($Now - $script:LastAudioCorrectionWall) -ge 2.0) {
-        Start-Audio $Position
-        Write-Output ('STUDIO_PLAYER_AVSYNC action=correct drift_ms={0:0} position={1:0.###}' -f ($Drift*1000.0),$Position)
+        Write-Output ('STUDIO_PLAYER_AUDIO_RECOVERED position={0:0.###}' -f $Position)
     }
 }
 
@@ -221,7 +209,7 @@ Write-Output ('STUDIO_PLAYER_READY ' + (@{
 while ($true) {
     [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
     if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
-    $script:LastTelemetryWall=0.0;$script:LastTelemetryFrame=-1L;$script:AudioNeedsResync=$false
+    $script:LastTelemetryWall=0.0;$script:LastTelemetryFrame=-1L;$script:LastAudioStartWall=0.0
     $script:VideoPlaybackStarted=$false;$script:LatestVideoPosition=$CurrentStart
     $ChildArgs = @(
         '-NoProfile','-ExecutionPolicy','Bypass','-File',$Runner,
@@ -293,11 +281,9 @@ while ($true) {
         }
 
         Update-AudioClockFromTelemetry
-        # A guide/depth chunk can temporarily delay telemetry even while the
-        # already buffered video remains visible. Do not kill audio on that
-        # transient gap: this was the reason sound disappeared after roughly
-        # ten seconds. When the next video timestamp arrives, the drift check
-        # above performs a bounded seek only if clocks actually diverged.
+        # Audio intentionally runs continuously. Buffering protects the video
+        # clock; telemetry is used for position/recovery, never as a reason to
+        # interrupt a healthy audio device.
 
         try {
             if ((Get-Item -LiteralPath $ControlPath -ErrorAction Stop).Length -gt 0) {

@@ -506,10 +506,18 @@ $SelectedRaftUpdates = if ($IsPreviewOnly) {
 }
 
 if ($IsPreviewOnly) {
-    $AutoRealtimeChunk = if ($ResolvedHardwareProfile -eq 'HighVram') {
-        if ($RenderWidth -ge 3000) { 32 } elseif ($RenderWidth -ge 1900) { 48 } else { 64 }
+    # Refill the realtime queue several times per second. Multi-second chunks
+    # made a single hard depth scene consume the entire safety margin before a
+    # new command could be published, even when average processing was faster
+    # than realtime. Keep automatic chunks near 0.5 s (smaller at 4K to cap
+    # per-chunk RAM/SSD traffic); the expert slider can still override this.
+    $HalfSecondFrames = [int][math]::Max(8,[math]::Ceiling($Fps*0.5))
+    $AutoRealtimeChunk = if ($RenderWidth -ge 3000) {
+        [int][math]::Min(12,$HalfSecondFrames)
+    } elseif ($RenderWidth -ge 1900) {
+        [int][math]::Min(16,$HalfSecondFrames)
     } else {
-        if ($RenderWidth -ge 1900) { 48 } else { 64 }
+        [int][math]::Min(24,$HalfSecondFrames)
     }
     $ChunkSize = if ($RealtimeChunkFrames -gt 0) { $RealtimeChunkFrames } else { $AutoRealtimeChunk }
 }
@@ -578,10 +586,12 @@ while ($RemainingFrames -gt 0) {
 }
 $Chunks = $ChunkFrameCounts.Count
 $RealtimePrebufferChunks = if ($IsPreviewOnly) {
-    # The selected duration is a guaranteed minimum.  One additional ready
-    # chunk absorbs DML/NGX scheduling spikes without increasing steady-state
-    # disk usage beyond a single small block.
-    [int][math]::Max(1,[math]::Min($Chunks,1+[math]::Ceiling($RealtimeBufferFrames/[double]$ChunkSize)))
+    [int][math]::Max(1,[math]::Min($Chunks,[math]::Ceiling($RealtimeBufferFrames/[double]$ChunkSize)))
+} else { 0 }
+# Chunk granularity may round the selected duration upward, never downward.
+# This is the steady-state high-water mark used by the producer/consumer queue.
+$RealtimeBufferCapacityFrames = if ($IsPreviewOnly) {
+    [int][math]::Min($TotalFrames,$RealtimeBufferFrames+$ChunkSize-1)
 } else { 0 }
 $ChunkOffsets = New-Object 'Collections.Generic.List[int]'
 $ChunkEndFrames = New-Object 'Collections.Generic.List[int]'
@@ -638,6 +648,7 @@ $Plan = [ordered]@{
     vr_eye_swap=if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
     realtime_buffer_seconds=if($IsPreviewOnly){$RealtimeBufferSeconds}else{$null}
     realtime_buffer_frames=if($IsPreviewOnly){$RealtimeBufferFrames}else{$null}
+    realtime_buffer_capacity_frames=if($IsPreviewOnly){$RealtimeBufferCapacityFrames}else{$null}
     realtime_chunk_frames=if($IsPreviewOnly){$ChunkSize}else{$null}
     realtime_prebuffer_chunks=if($IsPreviewOnly){$RealtimePrebufferChunks}else{$null}
     source_kind=if($IsNetworkSource){'network'}else{'file'}
@@ -809,7 +820,10 @@ try {
     Stage 3 8 $(if ($VsrBeforeDlss) { "$Upscaler x4 -> DLSS5" } elseif ($VsrAfterDlss) { "DLSS5 at model input resolution -> $Upscaler x4" } else { "DLSS5 with adaptive motion/depth ($PerformanceProfile)" })
     $AcknowledgedChunks = 0
     $SentChunks = 0
-    $StartupHostCommands = New-Object 'Collections.Generic.List[string]'
+    $AcknowledgedFrames = 0
+    $SentFrames = 0
+    $StartupPreparedFrames = 0
+    $StartupHostCommands = New-Object 'Collections.Generic.List[object]'
     $PrimaryPhaseWatch = [Diagnostics.Stopwatch]::StartNew()
     if ($VsrBeforeDlss) {
         for ($ChunkIndex = 0; $ChunkIndex -lt $Chunks; $ChunkIndex++) {
@@ -861,13 +875,47 @@ try {
                 $GuideSceneCuts += [int]$GuideResult.scene_cuts
             } catch {}
 
-            $HostProcess.StandardInput.WriteLine("CHUNK`t$ChunkIndex`t$ThisFrames`t$Raw`t$Motion`t$Depth")
-            Wait-ProtocolLine $HostProcess 'HOST_CHUNK_SUBMITTED ' 'DLSS5 host'
-            if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
-            $AcknowledgedChunks++
-            $DoneFrames = [math]::Min($TotalFrames, $FirstFrame + $ThisFrames)
+            $HostCommand = "CHUNK`t$ChunkIndex`t$ThisFrames`t$Raw`t$Motion`t$Depth"
+            if ($IsPreviewOnly -and $SentChunks -eq 0) {
+                $StartupHostCommands.Add([pscustomobject]@{Command=$HostCommand;Frames=[int]$ThisFrames})
+                $StartupPreparedFrames += $ThisFrames
+                if ($StartupPreparedFrames -ge $RealtimeBufferFrames -or $ChunkIndex -eq $Chunks - 1) {
+                    foreach ($ReadyChunk in $StartupHostCommands) {
+                        $HostProcess.StandardInput.WriteLine($ReadyChunk.Command)
+                        $SentChunks++;$SentFrames += [int]$ReadyChunk.Frames
+                    }
+                    $ReadySeconds=[math]::Round($SentFrames/[double]$Fps,3)
+                    Write-Output ('STUDIO_REALTIME_BUFFER_READY_JSON '+([ordered]@{
+                        ready_frames=$SentFrames;ready_seconds=$ReadySeconds;target_frames=$RealtimeBufferFrames
+                        target_seconds=$RealtimeBufferSeconds;chunk_frames=$ChunkSize;chunks=$SentChunks
+                    }|ConvertTo-Json -Compress))
+                }
+            } elseif ($IsPreviewOnly) {
+                while (($SentFrames-$AcknowledgedFrames+$ThisFrames) -gt $RealtimeBufferCapacityFrames) {
+                    Wait-ProtocolLine $HostProcess 'HOST_CHUNK_SUBMITTED ' 'DLSS5 host'
+                    if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
+                    $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
+                    $AcknowledgedChunks++
+                }
+                $HostProcess.StandardInput.WriteLine($HostCommand)
+                $SentChunks++;$SentFrames += $ThisFrames
+                $ReadyFrames=[math]::Max(0,$SentFrames-$AcknowledgedFrames)
+                $ReadySeconds=[math]::Round($ReadyFrames/[double]$Fps,3)
+                Write-Output ('STUDIO_REALTIME_BUFFER_LEVEL '+([ordered]@{
+                    ready_frames=$ReadyFrames;ready_seconds=$ReadySeconds;target_seconds=$RealtimeBufferSeconds
+                }|ConvertTo-Json -Compress))
+            } else {
+                $HostProcess.StandardInput.WriteLine($HostCommand)
+                $SentChunks++;$SentFrames += $ThisFrames
+                Wait-ProtocolLine $HostProcess 'HOST_CHUNK_SUBMITTED ' 'DLSS5 host'
+                if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
+                $AcknowledgedFrames += [int]$ThisFrames
+                $AcknowledgedChunks++
+            }
+            $DoneFrames = if($IsPreviewOnly){$AcknowledgedFrames}else{[math]::Min($TotalFrames, $FirstFrame + $ThisFrames)}
             $Percent = 5.0 + 85.0*$DoneFrames/[double]$TotalFrames
-            Emit-Progress "$Upscaler -> DLSS5" 'VSR restoration, motion/depth guides and DLSS5' $Percent $DoneFrames $TotalFrames $PrimaryPhaseWatch.Elapsed.TotalSeconds
+            $ProgressMessage = if($IsPreviewOnly){"Buffer $([math]::Round(($SentFrames-$AcknowledgedFrames)/[double]$Fps,2))/$RealtimeBufferSeconds s"}else{'VSR restoration, motion/depth guides and DLSS5'}
+            Emit-Progress "$Upscaler -> DLSS5" $ProgressMessage $Percent $DoneFrames $TotalFrames $PrimaryPhaseWatch.Elapsed.TotalSeconds
         }
         $UpscalerProcess.StandardInput.WriteLine('{"cmd":"end"}')
         Wait-ProtocolLine $UpscalerProcess 'UPSCALER_SERVER_DONE' "$Upscaler engine"
@@ -913,6 +961,7 @@ try {
             if (-not $IsPreviewOnly) {
                 Wait-ProtocolLine $HostProcess 'HOST_CHUNK_SUBMITTED ' 'DLSS5 host'
                 if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
+                $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
                 $AcknowledgedChunks++
                 $DoneFrames = $ChunkEndFrames[$AcknowledgedChunks - 1]
                 $Span = if($VsrAfterDlss){42.0}else{85.0}; $Percent=5.0+$Span*$DoneFrames/[double]$TotalFrames
@@ -946,35 +995,50 @@ try {
 
         $HostCommand = "CHUNK`t$ChunkIndex`t$ThisFrames`t$Raw`t$Motion`t$Depth"
         if ($IsPreviewOnly -and $SentChunks -eq 0) {
-            # Build a real startup queue.  Previously the whole buffer was one
-            # huge raw block, so the host still had nothing ready after the
-            # first boundary.  Small independently ready chunks also avoid
-            # 0.5+ GB allocation spikes on 1440p/4K sources.
-            $StartupHostCommands.Add($HostCommand)
-            if ($StartupHostCommands.Count -ge $RealtimePrebufferChunks -or $ChunkIndex -eq $Chunks - 1) {
-                foreach ($ReadyCommand in $StartupHostCommands) {
-                    $HostProcess.StandardInput.WriteLine($ReadyCommand)
+            # Do not start on a chunk count approximation: accumulate the exact
+            # number of fully decoded RGB+motion+depth frames selected by the
+            # user, then publish them as one ready queue to the native consumer.
+            $StartupHostCommands.Add([pscustomobject]@{Command=$HostCommand;Frames=[int]$ThisFrames})
+            $StartupPreparedFrames += $ThisFrames
+            if ($StartupPreparedFrames -ge $RealtimeBufferFrames -or $ChunkIndex -eq $Chunks - 1) {
+                foreach ($ReadyChunk in $StartupHostCommands) {
+                    $HostProcess.StandardInput.WriteLine($ReadyChunk.Command)
                     $SentChunks++
+                    $SentFrames += [int]$ReadyChunk.Frames
                 }
-                Write-Output "STUDIO_REALTIME_BUFFER_READY chunks=$SentChunks frames=$([math]::Min($TotalFrames,$SentChunks*$ChunkSize))"
+                $ReadySeconds=[math]::Round($SentFrames/[double]$Fps,3)
+                Write-Output ('STUDIO_REALTIME_BUFFER_READY_JSON '+([ordered]@{
+                    ready_frames=$SentFrames;ready_seconds=$ReadySeconds;target_frames=$RealtimeBufferFrames
+                    target_seconds=$RealtimeBufferSeconds;chunk_frames=$ChunkSize;chunks=$SentChunks
+                }|ConvertTo-Json -Compress))
             }
         } elseif ($IsPreviewOnly) {
-            # Keep no more than the requested buffer in temporary RGB/depth
-            # files.  Acknowledgements arrive only after a chunk was displayed,
-            # making Sent-Acknowledged the exact queue occupancy.
-            while (($SentChunks - $AcknowledgedChunks) -ge $RealtimePrebufferChunks) {
+            # Acknowledgements arrive only after every frame of a chunk was
+            # displayed. Maintain the selected high-water mark in exact frames,
+            # not in coarse chunk counts, for a constant prepared-time reserve.
+            while (($SentFrames-$AcknowledgedFrames+$ThisFrames) -gt $RealtimeBufferCapacityFrames) {
                 Wait-ProtocolLine $HostProcess 'HOST_CHUNK_SUBMITTED ' 'DLSS5 host'
                 if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
+                $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
                 $AcknowledgedChunks++
                 $DoneFrames = $ChunkEndFrames[$AcknowledgedChunks - 1]
                 $Percent = 5.0 + 85.0*$DoneFrames/[double]$TotalFrames
-                Emit-Progress 'DLSS5' "Realtime queue $($SentChunks-$AcknowledgedChunks)/$RealtimePrebufferChunks" $Percent $DoneFrames $TotalFrames $PrimaryPhaseWatch.Elapsed.TotalSeconds
             }
             $HostProcess.StandardInput.WriteLine($HostCommand)
             $SentChunks++
+            $SentFrames += $ThisFrames
+            $ReadyFrames=[math]::Max(0,$SentFrames-$AcknowledgedFrames)
+            $ReadySeconds=[math]::Round($ReadyFrames/[double]$Fps,3)
+            $DoneFrames=$AcknowledgedFrames
+            $Percent = 5.0 + 85.0*$DoneFrames/[double]$TotalFrames
+            Write-Output ('STUDIO_REALTIME_BUFFER_LEVEL '+([ordered]@{
+                ready_frames=$ReadyFrames;ready_seconds=$ReadySeconds;target_seconds=$RealtimeBufferSeconds
+            }|ConvertTo-Json -Compress))
+            Emit-Progress 'DLSS5' "Realtime buffer $ReadySeconds/$RealtimeBufferSeconds s" $Percent $DoneFrames $TotalFrames $PrimaryPhaseWatch.Elapsed.TotalSeconds
         } else {
             $HostProcess.StandardInput.WriteLine($HostCommand)
             $SentChunks++
+            $SentFrames += $ThisFrames
         }
     }
     }
@@ -989,6 +1053,7 @@ try {
     while ($AcknowledgedChunks -lt $Chunks) {
         Wait-ProtocolLine $HostProcess 'HOST_CHUNK_SUBMITTED ' 'DLSS5 host'
         if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
+        $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
         $AcknowledgedChunks++
         $DoneFrames = $ChunkEndFrames[$AcknowledgedChunks - 1]
         $Span = if($VsrAfterDlss){42.0}else{85.0}; $Percent=5.0+$Span*$DoneFrames/[double]$TotalFrames
