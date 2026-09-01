@@ -2,7 +2,7 @@
 
 Windows video player/processor that reconstructs motion and depth from ordinary video, evaluates NVIDIA NGX through a D3D12 host, and can present the result with official NVIDIA DLSS Frame Generation through Streamline + Reflex.
 
-The repository contains source code and dependency installers only. It intentionally excludes proprietary NVIDIA DLLs, the user's custom `nvngx_dlssnr.dll`, model weights, FFmpeg binaries, ReShade binaries, and portable Python.
+The repository contains source code and dependency installers. It intentionally excludes proprietary NVIDIA DLLs, the user's custom `nvngx_dlssnr.dll`, FFmpeg binaries, ReShade binaries, portable Python, and very large optional model weights. A small open-licensed core model pack for an existing V11 portable folder is available from [GitHub Releases](https://github.com/Absamad-dew/dlss5-video-studio/releases).
 
 ## V11 highlights
 
@@ -27,6 +27,10 @@ Validated on an RTX 4060 Laptop GPU at 50.63 display FPS for 1080p and 50.44 FPS
 
 Build the native host with `build_native.bat` and the WPF launcher with `build_ui.bat`. `scripts/Install-DepthModels.ps1` downloads the open depth checkpoints into a prepared portable runtime.
 
+## Core model pack
+
+Extract `DLSS5_VIDEO_STUDIO_CORE_MODELS_V11.zip` directly into the V11 program folder. It installs DA2 Small, DA3 Small, and TorchVision RAFT Small into their exact runtime paths. See `MODEL_PACK_CORE_RU.md` for the included profiles and verification command. The archive supplements an existing portable build; it is not the application or NVIDIA runtime.
+
 ## Important limitations
 
 Ordinary video has no authoritative game-engine motion vectors, geometry, material buffers, or camera matrices. The project estimates them, so temporal stability depends on content and profile. Advanced depth models are intended for recording and 3D VR; the realtime default remains the smaller DA2 model.
@@ -35,4 +39,4 @@ NVIDIA Optical Flow FRUC is not bundled because its SDK requires a separate lice
 
 ## Licensing
 
-Original project code is MIT-licensed. Third-party components retain their own licenses. NVIDIA binaries and model weights are not covered by this repository's MIT license and are not distributed here.
+Original project code is MIT-licensed. Third-party components and model weights retain their own licenses. The core pack includes only the open-licensed small checkpoints listed in its manifest and license folder. Proprietary NVIDIA binaries and large optional weights are not distributed in the repository or core pack.

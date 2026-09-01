@@ -15,3 +15,11 @@ Relevant upstream projects:
 - Torchvision RAFT: https://github.com/pytorch/vision
 - FFmpeg: https://github.com/FFmpeg/FFmpeg
 - yt-dlp: https://github.com/yt-dlp/yt-dlp
+
+## Core model pack
+
+- Depth Anything V2 Small: Apache-2.0; https://github.com/DepthAnything/Depth-Anything-V2
+- Depth Anything 3 Small: Apache-2.0; https://huggingface.co/depth-anything/DA3-SMALL
+- TorchVision RAFT Small C_T_V2: BSD-3-Clause code distribution; https://docs.pytorch.org/vision/main/models/generated/torchvision.models.optical_flow.raft_small.html
+
+The release archive carries local copies of the applicable license texts. Dataset-derived restrictions, if any, remain the responsibility of the user as described by the upstream TorchVision documentation.
