@@ -34,6 +34,7 @@ param(
     [ValidateRange(0,16)] [int] $GuideWorkerThreads = 0,
     [switch] $EnableAudio,
     [ValidateRange(0,100)] [int] $Volume = 80,
+    [switch] $FillBufferOnPause,
     [switch] $Fullscreen
 )
 
@@ -93,7 +94,11 @@ $ControlDirectory = [IO.Path]::GetDirectoryName($ControlPath)
 New-Item -ItemType Directory -Force -Path $ControlDirectory | Out-Null
 [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
 $TelemetryPath = $ControlPath + '.telemetry'
+$PlaybackStatePath = $ControlPath + '.playback'
+$BufferStatePath = $ControlPath + '.buffer'
 if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
+[IO.File]::WriteAllText($PlaybackStatePath,'buffering',$Utf8NoBom)
+if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
 
 $ResolvedInput = $InputVideo
 $HeadersPath = $null
@@ -124,11 +129,21 @@ $AudioProcess = $null
 $AudioStderrTask = $null
 $AudioMuted = $false
 $VideoPaused = $false
+$BufferingPaused = $false
 $LastAudioStartWall = 0.0
 $LastTelemetryWall = 0.0
 $LastTelemetryFrame = -1L
 $VideoPlaybackStarted = $false
 $LatestVideoPosition = $CurrentStart
+$LatestRealFrames = 0L
+$ProducerSentFrames = 0L
+$ProducerTargetFrames = 0L
+$ProducerFps = 0.0
+$ProducerRateFps = 0.0
+$ProducerLastEventWall = 0.0
+$ProducerLastEventFrames = 0L
+$ProducerSamples = @()
+$LastBufferPublishWall = 0.0
 $InputHeaderBlock = $null
 if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) {
     $HeaderObject = Get-Content -LiteralPath $HeadersPath -Raw | ConvertFrom-Json
@@ -155,15 +170,79 @@ function Get-MonotonicSeconds {
     return [Diagnostics.Stopwatch]::GetTimestamp() / [double][Diagnostics.Stopwatch]::Frequency
 }
 
+function Set-PlaybackState([string] $State) {
+    try { [IO.File]::WriteAllText($PlaybackStatePath,$State,$Utf8NoBom) } catch {}
+}
+
+function Update-ProducerBufferFromLine([string] $Line) {
+    if ($Line -notmatch '^STUDIO_REALTIME_BUFFER_(?:READY_JSON|LEVEL) (?<j>.+)$') { return }
+    try { $Payload = $Matches.j | ConvertFrom-Json } catch { return }
+    $Now = Get-MonotonicSeconds
+    $SentProperty = $Payload.PSObject.Properties['sent_frames']
+    $TargetProperty = $Payload.PSObject.Properties['target_frames']
+    $FpsProperty = $Payload.PSObject.Properties['source_fps']
+    $ElapsedProperty = $Payload.PSObject.Properties['producer_elapsed_seconds']
+    $NewSent = if ($SentProperty) { [long]$SentProperty.Value } else { [long]$Payload.ready_frames }
+    if ($TargetProperty) { $script:ProducerTargetFrames = [long]$TargetProperty.Value }
+    if ($FpsProperty -and [double]$FpsProperty.Value -gt 0) { $script:ProducerFps = [double]$FpsProperty.Value }
+    $EventTime = if ($ElapsedProperty -and [double]$ElapsedProperty.Value -gt 0) { [double]$ElapsedProperty.Value } else { $Now }
+    if ($NewSent -gt $script:ProducerLastEventFrames) {
+        $script:ProducerSamples += [pscustomobject]@{Time=$EventTime;Frames=$NewSent}
+        $Cutoff = $EventTime - 3.0
+        $script:ProducerSamples = @($script:ProducerSamples | Where-Object { $_.Time -ge $Cutoff })
+        if ($script:ProducerSamples.Count -ge 2) {
+            $FirstSample = $script:ProducerSamples[0]
+            $LastSample = $script:ProducerSamples[-1]
+            $SampleSeconds = [double]$LastSample.Time - [double]$FirstSample.Time
+            if ($SampleSeconds -ge 0.25) {
+                $script:ProducerRateFps = ([long]$LastSample.Frames-[long]$FirstSample.Frames)/$SampleSeconds
+            }
+        } elseif ($EventTime -gt 0.25) {
+            $script:ProducerRateFps = $NewSent/$EventTime
+        }
+    }
+    $script:ProducerSentFrames = $NewSent
+    $script:ProducerLastEventFrames = $NewSent
+    $script:ProducerLastEventWall = $Now
+}
+
+function Publish-LiveBufferStatus([switch] $Force) {
+    if ($script:ProducerFps -le 0 -or $script:ProducerTargetFrames -le 0) { return }
+    $Now = Get-MonotonicSeconds
+    if (-not $Force -and ($Now-$script:LastBufferPublishWall) -lt 0.45) { return }
+    $RemainingFrames = [long][math]::Max(0,$script:ProducerSentFrames-$script:LatestRealFrames)
+    $RemainingSeconds = $RemainingFrames/[double]$script:ProducerFps
+    $TargetSeconds = $script:ProducerTargetFrames/[double]$script:ProducerFps
+    $RateRatio = if ($script:ProducerFps -gt 0) { $script:ProducerRateFps/$script:ProducerFps } else { 0.0 }
+    $IsFull = $RemainingFrames -ge $script:ProducerTargetFrames
+    $State = if ($script:BufferingPaused) { 'rebuffering' } elseif ($script:VideoPaused) {
+        if ($FillBufferOnPause -and -not $IsFull) { 'pause-filling' } elseif ($IsFull) { 'pause-full' } else { 'paused' }
+    } elseif ($IsFull) { 'full' } else { 'filling' }
+    $Payload = [ordered]@{
+        remaining_frames=$RemainingFrames;remaining_seconds=[math]::Round($RemainingSeconds,3)
+        target_frames=$script:ProducerTargetFrames;target_seconds=[math]::Round($TargetSeconds,3)
+        sent_frames=$script:ProducerSentFrames;presented_real_frames=$script:LatestRealFrames
+        refill_fps=[math]::Round($script:ProducerRateFps,3);refill_realtime=[math]::Round($RateRatio,3)
+        full=[bool]$IsFull;paused=[bool]$script:VideoPaused;rebuffering=[bool]$script:BufferingPaused;fill_on_pause=[bool]$FillBufferOnPause;state=$State
+    }
+    $Json = $Payload | ConvertTo-Json -Compress
+    Write-Output ('STUDIO_REALTIME_BUFFER_STATUS ' + $Json)
+    $StateLine = [string]::Format($Invariant,
+        'remaining_seconds={0:0.###} target_seconds={1:0.###} refill_fps={2:0.###} refill_realtime={3:0.###} paused={4} fill_on_pause={5} full={6} rebuffering={7}',
+        $RemainingSeconds,$TargetSeconds,$script:ProducerRateFps,$RateRatio,[int]$script:VideoPaused,[int][bool]$FillBufferOnPause,[int]$IsFull,[int]$script:BufferingPaused)
+    try { [IO.File]::WriteAllText($BufferStatePath,$StateLine,$Utf8NoBom) } catch {}
+    $script:LastBufferPublishWall = $Now
+}
+
 function Start-Audio([double] $Position) {
-    if (-not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused) { return }
+    if (-not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused -or $script:BufferingPaused) { return }
     Stop-Audio
     $SeekPosition = [math]::Max(0.0,[math]::Min($Duration-0.01,$Position))
     $AudioArgs=@('-nodisp','-autoexit','-loglevel','error','-volume',$Volume)
     if($InputTlsNoVerify){$AudioArgs+=@('-tls_verify','0')}
     if($InputHeaderBlock){$AudioArgs+=@('-headers',$InputHeaderBlock)}
     $AudioArgs+=@('-ss',([string]::Format($Invariant,'{0:0.######}',$SeekPosition)),'-i',$ResolvedInput,
-        '-vn','-sn','-sync','audio','-af','aresample=async=1:min_hard_comp=0.100:first_pts=0')
+        '-vn','-sn','-sync','audio','-af','aresample=async=0,asetpts=N/SR/TB')
     $Psi=[Diagnostics.ProcessStartInfo]::new();$Psi.FileName=$Ffplay
     $Psi.Arguments=(($AudioArgs|ForEach-Object{Quote-Argument([string]$_)})-join' ')
     $Psi.WorkingDirectory=$Root;$Psi.UseShellExecute=$false;$Psi.CreateNoWindow=$true
@@ -172,6 +251,7 @@ function Start-Audio([double] $Position) {
     if(-not $script:AudioProcess.Start()){$script:AudioProcess=$null;return}
     $script:AudioStderrTask=$script:AudioProcess.StandardError.ReadToEndAsync()
     $script:LastAudioStartWall=Get-MonotonicSeconds
+    Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_STARTED position={0:0.######} pid={1}',$SeekPosition,$script:AudioProcess.Id))
 }
 
 function Update-AudioClockFromTelemetry {
@@ -185,7 +265,8 @@ function Update-AudioClockFromTelemetry {
     $script:LastTelemetryFrame = $Frame
     $script:LastTelemetryWall = $Now
     $script:LatestVideoPosition = $Position
-    if (-not $script:VideoPlaybackStarted -or -not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused) { return }
+    $script:LatestRealFrames = $Frame
+    if (-not $script:VideoPlaybackStarted -or -not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused -or $script:BufferingPaused) { return }
     # Audio is the continuous master clock. Never kill/restart a healthy audio
     # device merely because video telemetry is early, late or temporarily
     # absent: those corrective restarts were heard as recurring drop-outs.
@@ -194,7 +275,7 @@ function Update-AudioClockFromTelemetry {
     if ((-not $script:AudioProcess -or $script:AudioProcess.HasExited) -and
         ($Now-$script:LastAudioStartWall) -ge 2.0) {
         Start-Audio $Position
-        Write-Output ('STUDIO_PLAYER_AUDIO_RECOVERED position={0:0.###}' -f $Position)
+        Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RECOVERED position={0:0.###}',$Position))
     }
 }
 
@@ -203,14 +284,18 @@ Write-Output ('STUDIO_PLAYER_READY ' + (@{
     source_kind=if($IsOnline){'network'}else{'file'};guide_width=$GuideWidth;depth_interval=$DepthInterval
     motion_backend=$MotionBackend;fps_mode=$FpsMode;frame_generation=$FrameGeneration;audio=[bool]$EnableAudio;volume=$Volume
     performance_profile=$PerformanceProfile;hardware_profile=$HardwareProfile;render_preset=$RenderPreset;target_fps=$TargetFps;guide_worker_threads=$GuideWorkerThreads
-    depth_model_profile=$DepthModelProfile
+    depth_model_profile=$DepthModelProfile;fill_buffer_on_pause=[bool]$FillBufferOnPause
 }|ConvertTo-Json -Compress))
 
 while ($true) {
     [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
     if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
+    Set-PlaybackState 'buffering'
+    if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
     $script:LastTelemetryWall=0.0;$script:LastTelemetryFrame=-1L;$script:LastAudioStartWall=0.0
-    $script:VideoPlaybackStarted=$false;$script:LatestVideoPosition=$CurrentStart
+    $script:VideoPlaybackStarted=$false;$script:VideoPaused=$false;$script:BufferingPaused=$false;$script:LatestVideoPosition=$CurrentStart
+    $script:LatestRealFrames=0L;$script:ProducerSentFrames=0L;$script:ProducerTargetFrames=0L;$script:ProducerFps=0.0
+    $script:ProducerRateFps=0.0;$script:ProducerLastEventWall=Get-MonotonicSeconds;$script:ProducerLastEventFrames=0L;$script:ProducerSamples=@();$script:LastBufferPublishWall=0.0
     $ChildArgs = @(
         '-NoProfile','-ExecutionPolicy','Bypass','-File',$Runner,
         '-InputVideo',$ResolvedInput,'-ConfigPath',$ConfigPath,
@@ -233,6 +318,7 @@ while ($true) {
         '-RealtimeFpsMode',$FpsMode,'-RealtimeFrameGeneration',$FrameGeneration,
         '-RealtimeTargetFps',$TargetFps,'-GuideWorkerThreads',$GuideWorkerThreads
     )
+    if ($FillBufferOnPause) { $ChildArgs += '-RealtimeFillBufferOnPause' }
     if ($HeadersPath) { $ChildArgs += @('-InputHeadersPath',$HeadersPath) }
     if ($InputTlsNoVerify) { $ChildArgs += '-InputTlsNoVerify' }
     if ($Fullscreen) { $ChildArgs += '-RealtimeFullscreen' }
@@ -261,9 +347,10 @@ while ($true) {
 
     while ($true) {
         $StdoutLines = 0
-        while ($Stdout -and $Stdout.IsCompleted -and $StdoutLines -lt 16) {
+        while ($Stdout -and $Stdout.IsCompleted -and $StdoutLines -lt 128) {
             $Line = $Stdout.Result
             if ($null -eq $Line) { $Stdout = $null; break }
+            Update-ProducerBufferFromLine $Line
             Write-Output $Line
             if ($Line -match '^STUDIO_WORK (?<p>.+)$') { $ActiveWork = $Matches.p }
             if ($Line -match 'HOST_DLSSG_FALLBACK') { $DlssgFallbackRequested = $true }
@@ -271,7 +358,7 @@ while ($true) {
             ++$StdoutLines
         }
         $StderrLines = 0
-        while ($Stderr -and $Stderr.IsCompleted -and $StderrLines -lt 16) {
+        while ($Stderr -and $Stderr.IsCompleted -and $StderrLines -lt 64) {
             $Line = $Stderr.Result
             if ($null -eq $Line) { $Stderr = $null; break }
             Write-Output ('PLAYER_CHILD_ERROR: ' + $Line)
@@ -281,6 +368,7 @@ while ($true) {
         }
 
         Update-AudioClockFromTelemetry
+        Publish-LiveBufferStatus
         # Audio intentionally runs continuously. Buffering protects the video
         # clock; telemetry is used for position/recovery, never as a reason to
         # interrupt a healthy audio device.
@@ -299,21 +387,31 @@ while ($true) {
                     $script:VideoPaused=$false
                     $Position=[double]::Parse($Matches.s,$Invariant)
                     $script:VideoPlaybackStarted=$true
+                    Set-PlaybackState 'playing'
+                    # PLAYING is emitted by the native host at the first frame
+                    # actually presented. Telemetry can already describe frames
+                    # prepared further ahead, so it must never replace this exact
+                    # presentation position for audio seeking.
                     $AudioPosition=$Position
-                    if ($script:LatestVideoPosition -ge $Position -and ($script:LatestVideoPosition-$Position) -lt 5.0) {
-                        $AudioPosition=$script:LatestVideoPosition
-                    }
                     Start-Audio $AudioPosition
                     Write-Output ('STUDIO_PLAYER_PLAYING ' + (@{
                         position_seconds=[math]::Round($Position,3);audio_position_seconds=[math]::Round($AudioPosition,3)
                         audio=[bool]($EnableAudio -and -not $script:AudioMuted)
                         audio_pid=if($script:AudioProcess){$script:AudioProcess.Id}else{$null};muted=[bool]$script:AudioMuted;volume=$Volume
                     }|ConvertTo-Json -Compress))
+                } elseif ($Command -match '^BUFFERING\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
+                    $script:BufferingPaused=$true;Set-PlaybackState 'rebuffering';Stop-Audio;Publish-LiveBufferStatus -Force
+                    Write-Output ('STUDIO_PLAYER_REBUFFERING ' + $Matches.s)
+                } elseif ($Command -match '^BUFFER_READY\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
+                    $script:BufferingPaused=$false
+                    if(-not $script:VideoPaused){Set-PlaybackState 'playing';Start-Audio ([double]::Parse($Matches.s,$Invariant))}
+                    Publish-LiveBufferStatus -Force
+                    Write-Output ('STUDIO_PLAYER_REBUFFERED ' + $Matches.s)
                 } elseif ($Command -match '^PAUSE\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
-                    $script:VideoPaused=$true;Stop-Audio
+                    $script:VideoPaused=$true;Set-PlaybackState 'paused';Stop-Audio;Publish-LiveBufferStatus -Force
                     Write-Output ('STUDIO_PLAYER_PAUSED ' + $Matches.s)
                 } elseif ($Command -match '^RESUME\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
-                    $script:VideoPaused=$false;Start-Audio ([double]::Parse($Matches.s,$Invariant))
+                    $script:VideoPaused=$false;Set-PlaybackState 'playing';Start-Audio ([double]::Parse($Matches.s,$Invariant));Publish-LiveBufferStatus -Force
                     Write-Output ('STUDIO_PLAYER_RESUMED ' + $Matches.s)
                 } elseif ($Command -match '^MUTE\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
                     $script:AudioMuted=$true;Stop-Audio
@@ -347,7 +445,7 @@ while ($true) {
             $CurrentStart = $script:LatestVideoPosition
         }
         $FrameGeneration = 'MotionGPU'
-        Write-Output ('STUDIO_PLAYER_WARNING NVIDIA DLSSG presentation failed; restarting at {0:0.###} s with MotionGPU so the player cannot remain black.' -f $CurrentStart)
+        Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_WARNING NVIDIA DLSSG presentation failed; restarting at {0:0.###} s with MotionGPU so the player cannot remain black.',$CurrentStart))
         continue
     }
     if ($Action -eq 'seek') {
@@ -360,10 +458,14 @@ while ($true) {
         Remove-RealtimeWork $ActiveWork
         if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) { Remove-Item -LiteralPath $HeadersPath -Force }
         if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
+        if (Test-Path -LiteralPath $PlaybackStatePath) { Remove-Item -LiteralPath $PlaybackStatePath -Force }
+        if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
         Write-Output 'STUDIO_PLAYER_CLOSED'
         exit 0
     }
     if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) { Remove-Item -LiteralPath $HeadersPath -Force }
     if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
+    if (Test-Path -LiteralPath $PlaybackStatePath) { Remove-Item -LiteralPath $PlaybackStatePath -Force }
+    if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
     exit $ExitCode
 }

@@ -150,6 +150,7 @@ $Xaml = @'
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel><Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="52"/></Grid.ColumnDefinitions><TextBlock Text="Громкость"/><TextBlock x:Name="RealtimeVolumeValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#60D7FF"/></Grid><Slider x:Name="RealtimeVolumeSlider" Minimum="0" Maximum="100" Value="80" TickFrequency="5" IsSnapToTickEnabled="True"/></StackPanel><StackPanel Grid.Column="2"><TextBlock Text="MFG работает только при поддержке драйвера и GPU" Foreground="#7F91AA" TextWrapping="Wrap" Margin="0,5,0,0"/></StackPanel></Grid>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="76"/></Grid.ColumnDefinitions><TextBlock Text="Предварительная буферизация"/><TextBlock x:Name="RealtimeBufferValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#60D7FF"/></Grid>
               <Slider x:Name="RealtimeBufferSlider" Minimum="3" Maximum="30" Value="5" TickFrequency="1" IsSnapToTickEnabled="True"/>
+              <CheckBox x:Name="RealtimeFillPauseCheck" Content="Продолжать максимально наполнять буфер во время паузы" IsChecked="True"/>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="76"/></Grid.ColumnDefinitions><TextBlock Text="Размер чанка (0 = авто под GPU)"/><TextBlock x:Name="RealtimeChunkValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#60D7FF"/></Grid>
               <Slider x:Name="RealtimeChunkSlider" Minimum="0" Maximum="192" Value="0" TickFrequency="8" IsSnapToTickEnabled="True"/>
               <Border Background="#0B1722" BorderBrush="#28435D" BorderThickness="1" CornerRadius="8" Padding="9" Margin="0,0,0,7"><TextBlock x:Name="RealtimeQualityInfo" Foreground="#78D9FF" TextWrapping="Wrap"/></Border>
@@ -283,7 +284,7 @@ $Window = [Windows.Markup.XamlReader]::Load($Reader)
 $Names = @('RuntimeStatus','InputBox','BrowseInput','PasteInput','SourceResolutionText','VideoInfo','ExpectedTimeText','RecordingPathPanel','OutputBox','BrowseOutput','QuickScenarioCombo','ExpertCheck','QuickScenarioInfo','VrGroup','StageGroup','UpscalerGroup','NeuralGroup','AdvancedParams','HardwareCombo','RenderPresetCombo','DepthModelCombo','VREyeSlider','VREyeValue','VRConvergenceSlider','VRConvergenceValue','FrameGenerationCombo','ModeCombo','CodecCombo','PerformanceCombo','LivePreviewCheck','QualitySlider','QualityValue','ComparisonCheck','KeepTempCheck','VrModeCombo','VrLayoutCombo','VrInfo','RealtimePanel','RealtimeFullscreenCheck','RealtimeQualityCombo','RealtimeQualityInfo','RealtimeFpsCombo','RealtimeAudioCheck','RealtimeVolumeSlider','RealtimeVolumeValue','RealtimeBufferSlider','RealtimeBufferValue','GuideWidthSlider','GuideWidthValue','DepthIntervalSlider','DepthIntervalValue','DepthMinIntervalSlider','DepthMinIntervalValue','AdaptiveConfidenceSlider','AdaptiveConfidenceValue','AdaptiveMotionSlider','AdaptiveMotionValue','TemporalDepthSlider','TemporalDepthValue','SceneCutSlider','SceneCutValue','GuideMotionPresetCombo','GuideMotionBackendCombo','RaftUpdatesSlider','RaftUpdatesValue','UpscalerCombo','UpscalerVariantCombo','UpscalerStrengthSlider','UpscalerStrengthValue','UpscalerInfo','StageList','StageUp','StageDown','StageOrderInfo','PresetBox','SavePreset','DeletePreset','IntensitySlider','IntensityValue','ToneSlider','ToneValue','StructureSlider','StructureValue','SkinSlider','SkinValue','NrPresetCombo','StyleCombo','AutoMaskCheck','UpliftCheck','UICorrectionCheck','AggressionText','MotionXSlider','MotionXValue','MotionYSlider','MotionYValue','DepthCombo','TransferSlider','TransferValue','ColorSlider','ColorValue','PaperSlider','PaperValue','StartBox','FramesBox','FullVideoCheck','RangeHint','StatusText','DetailText','EtaText','ElapsedText','SpeedText','Preview','Placeholder','LogBox','Progress','ProgressHint','PlayButton','OpenVideo','OpenFolder','CancelButton','RunButton')
 foreach ($Name in $Names) { Set-Variable -Name $Name -Value $Window.FindName($Name) -Scope Script }
 $AdditionalNames = @(
-    'WorkspaceTabs','QuickGroup','OutputGroup','RecordingPanel','RangeGroup','RealtimeChunkSlider','RealtimeChunkValue',
+    'WorkspaceTabs','QuickGroup','OutputGroup','RecordingPanel','RangeGroup','RealtimeChunkSlider','RealtimeChunkValue','RealtimeFillPauseCheck',
     'PreviewPaneButton','PreviewPane','SettingsColumn','PreviewGapColumn','PreviewColumn','NetworkSourcePanel','SourceNetworkHeightCombo','SourceCookiesCombo','ContextHelpText',
     'RealtimeTargetFpsCombo','GuideWorkerSlider','GuideWorkerValue','RecordWorkerSlider','RecordWorkerValue',
     'RecordFineGuideCheck','RecordFineGuideExpander','VrTargetFpsCombo','VRDisparitySlider','VRDisparityValue',
@@ -727,6 +728,7 @@ function Update-ProfileUi {
     $RealtimePanel.Opacity = if ($Realtime) { 1.0 } else { 0.48 }
     $RealtimeFullscreenCheck.IsEnabled = $Realtime
     $RealtimeBufferSlider.IsEnabled = $Realtime
+    $RealtimeFillPauseCheck.IsEnabled = $Realtime
     $RealtimeQualityCombo.IsEnabled = $Realtime
     $SourceNetworkHeightCombo.IsEnabled = $true
     $SourceCookiesCombo.IsEnabled = $true
@@ -816,9 +818,10 @@ $HelpText=[ordered]@{
     FrameGenerationCombo='Dynamic MFG целится в выбранный FPS; фиксированный MFG создаёт 2/3/4 кадра на один базовый. Поддержка проверяется через официальный Streamline API.'
     RealtimeTargetFpsCombo='Цель Dynamic MFG. 0 использует частоту текущего монитора; 72/90/120 полезны для шлемов и высокочастотных дисплеев.'
     RealtimeFullscreenCheck='Открывает GPU-direct плеер сразу без рамки на весь экран. F11 и двойной щелчок переключают режим во время просмотра.'
-    RealtimeAudioCheck='Аудиопоток сверяется с телеметрией самого видеоплеера. При заметном дрейфе или зависании он автоматически удерживается и перезапускается с текущей позиции.'
+    RealtimeAudioCheck='Звук запускается строго с позиции первого реально показанного кадра. Аудиосэмплы идут в исходном темпе без ускоряющей коррекции по нестабильным timestamp; здоровый аудиопроцесс не перезапускается.'
     RealtimeVolumeSlider='Громкость отдельного realtime-аудиопотока. На обработку кадров и запись не влияет.'
     RealtimeBufferSlider='Гарантированный запас полностью подготовленных RGB, motion и depth кадров. Плеер запускается только после набора выбранных секунд и затем постоянно восстанавливает этот уровень.'
+    RealtimeFillPauseCheck='Если включено, декодирование и построение motion/depth продолжаются на паузе с максимальной доступной скоростью, пока выбранный запас не станет полным. Если выключено, вычислительный конвейер тоже ждёт.'
     RealtimeChunkSlider='Частота пополнения буфера. Авто использует блоки около 0,5 секунды (меньше для 4K), чтобы сложная сцена не задерживала следующую порцию на несколько секунд.'
     GuideWorkerSlider='Число CPU-потоков OpenCV/guide. Авто учитывает доступные ядра и VRAM; ручное завышение может ухудшить плавность из-за конкуренции.'
     GuideWidthSlider='Разрешение служебной motion/depth-карты. Выше — точнее мелкие границы, больше CPU/GPU-нагрузка; выходной кадр DLSS5 остаётся полноразмерным.'
@@ -1032,6 +1035,14 @@ $Timer.Add_Tick({
                     $Buffer=$Matches.j|ConvertFrom-Json
                     $DetailText.Text=('Постоянный запас: {0:0.00}/{1} сек · звук непрерывный' -f [double]$Buffer.ready_seconds,[int]$Buffer.target_seconds)
                 } catch { Add-Log ('Buffer level JSON: '+$_.Exception.Message) }
+            } elseif ($L -match '^STUDIO_REALTIME_BUFFER_STATUS (?<j>.+)$') {
+                try {
+                    $Buffer=$Matches.j|ConvertFrom-Json
+                    $PauseText=if([bool]$Buffer.rebuffering){' · синхронное ожидание кадров'}elseif([bool]$Buffer.paused){if([bool]$Buffer.fill_on_pause){' · пауза, буфер наполняется'}else{' · пауза, вычисления остановлены'}}else{''}
+                    $FullText=if([bool]$Buffer.full){' · запас полный'}else{''}
+                    $DetailText.Text=('Осталось в буфере: {0:0.00}/{1:0.00} сек · пополнение {2:0.0} FPS ({3:0.00}× realtime){4}{5}' -f [double]$Buffer.remaining_seconds,[double]$Buffer.target_seconds,[double]$Buffer.refill_fps,[double]$Buffer.refill_realtime,$FullText,$PauseText)
+                    $SpeedText.Text=('Буфер {0:0.00} сек · +{1:0.0} FPS' -f [double]$Buffer.remaining_seconds,[double]$Buffer.refill_fps)
+                } catch { Add-Log ('Buffer status JSON: '+$_.Exception.Message) }
             } elseif ($L -match '^STUDIO_PLAYER_PLAYING (?<j>.+)$') {
                 try {
                     $Playing=$Matches.j|ConvertFrom-Json
@@ -1039,6 +1050,10 @@ $Timer.Add_Tick({
                     $SoundText=if([bool]$Playing.audio){'звук синхронизирован'}else{'без звука'}
                     $DetailText.Text=('Позиция {0} · {1} · Space пауза · F11 весь экран' -f (Format-Time ([double]$Playing.position_seconds)),$SoundText)
                 } catch { Add-Log ('Player playing JSON: '+$_.Exception.Message) }
+            } elseif ($L -match '^STUDIO_PLAYER_REBUFFERING (?<s>[0-9.]+)$') {
+                $StatusText.Text='Буфер временно исчерпан — звук и видео удерживаются вместе'
+            } elseif ($L -match '^STUDIO_PLAYER_REBUFFERED (?<s>[0-9.]+)$') {
+                $StatusText.Text='Realtime-воспроизведение восстановлено синхронно'
             } elseif ($L -match '^STUDIO_PLAYER_SEEK (?<s>[0-9.]+)$') {
                 $StatusText.Text='Перемотка и повторная буферизация…'
                 $DetailText.Text=('Новая позиция: '+(Format-Time ([double]::Parse($Matches.s,$Invariant))))
@@ -1165,6 +1180,7 @@ $RunButton.Add_Click({
             )
             if ($RealtimeFullscreenCheck.IsChecked) { $Args += '-Fullscreen' }
             if ($RealtimeAudioCheck.IsChecked) { $Args += '-EnableAudio' }
+            if ($RealtimeFillPauseCheck.IsChecked) { $Args += '-FillBufferOnPause' }
         } else {
             $Args = @(
                 '-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$Runner+'"'),

@@ -9,6 +9,7 @@ The repository contains source code and dependency installers. It intentionally 
 - three dedicated workspaces: Realtime, Recording, and VR / 3D;
 - five universal profiles — Ultra Fast, Fast, Medium, Heavy, and Maximum — with automatic adaptation by VRAM, resolution, and CPU capacity;
 - true multi-chunk prebuffering, adjustable 3–30 second startup buffer and chunk size, plus measured underrun diagnostics;
+- exact live buffer telemetry in seconds with refill FPS/rate, optional maximum-speed pause filling, and synchronized audio/video rebuffer recovery instead of audio drift or catch-up playback;
 - an isolated portable Python runtime, preventing a user-level CPU-only ONNX Runtime from shadowing the bundled DirectML provider;
 - official fixed DLSS-G/MFG x2, x3, and x4 plus Dynamic MFG targets of 60/72/90/120 FPS, with capability checks reported by Streamline instead of silent fallback;
 - persistent upload mappings and hardware-sized guide worker/batch scheduling, removing repeated map/unmap and undersized-batch overhead without changing image processing;

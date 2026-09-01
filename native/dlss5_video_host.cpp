@@ -447,7 +447,7 @@ static void PositionPreviewFps()
     if (h.hwnd == nullptr || g_preview_fps_window == nullptr) return;
     POINT origin = {16, 16};
     ClientToScreen(h.hwnd, &origin);
-    SetWindowPos(g_preview_fps_window, HWND_TOP, origin.x, origin.y, 430, 58,
+    SetWindowPos(g_preview_fps_window, HWND_TOP, origin.x, origin.y, 600, 82,
                  SWP_NOACTIVATE | (g_preview_window_revealed && g_preview_fps_visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
 }
 
@@ -485,6 +485,36 @@ static void WritePreviewTelemetry()
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
 }
 
+static bool ReadPreviewBufferStats(double &remaining_seconds, double &target_seconds,
+                                   double &refill_fps, double &refill_realtime,
+                                   int &paused, int &fill_on_pause, int &full, int &rebuffering)
+{
+    if (g_preview_control_file.empty()) return false;
+    const fs::path state_file = g_preview_control_file.wstring() + L".buffer";
+    std::ifstream input(state_file, std::ios::binary);
+    if (!input) return false;
+    std::string token;
+    bool found_remaining = false;
+    while (input >> token)
+    {
+        double value = 0.0;
+        int flag = 0;
+        if (sscanf_s(token.c_str(), "remaining_seconds=%lf", &value) == 1)
+        {
+            remaining_seconds = value;
+            found_remaining = true;
+        }
+        else if (sscanf_s(token.c_str(), "target_seconds=%lf", &value) == 1) target_seconds = value;
+        else if (sscanf_s(token.c_str(), "refill_fps=%lf", &value) == 1) refill_fps = value;
+        else if (sscanf_s(token.c_str(), "refill_realtime=%lf", &value) == 1) refill_realtime = value;
+        else if (sscanf_s(token.c_str(), "paused=%d", &flag) == 1) paused = flag;
+        else if (sscanf_s(token.c_str(), "fill_on_pause=%d", &flag) == 1) fill_on_pause = flag;
+        else if (sscanf_s(token.c_str(), "full=%d", &flag) == 1) full = flag;
+        else if (sscanf_s(token.c_str(), "rebuffering=%d", &flag) == 1) rebuffering = flag;
+    }
+    return found_remaining;
+}
+
 static void UpdatePreviewPerformance(uint32_t presented_frames)
 {
     const auto now = BatchClock::now();
@@ -498,10 +528,27 @@ static void UpdatePreviewPerformance(uint32_t presented_frames)
     if (elapsed < 0.5) return;
     g_preview_real_fps_live = g_preview_real_window_frames / elapsed;
     g_preview_display_fps_live = g_preview_presented_window_frames / elapsed;
-    wchar_t label[256] = {};
-    swprintf_s(label, L"Текущий FPS: %.1f   |   Реальный FPS: %.1f\nMFG: %llu сгенерировано",
-               g_preview_display_fps_live, g_preview_real_fps_live,
-               static_cast<unsigned long long>(g_preview_presented_total_frames - g_preview_real_total_frames));
+    double buffer_remaining = 0.0, buffer_target = 0.0, refill_fps = 0.0, refill_realtime = 0.0;
+    int paused = 0, fill_on_pause = 0, buffer_full = 0, rebuffering = 0;
+    const bool has_buffer = ReadPreviewBufferStats(buffer_remaining, buffer_target, refill_fps,
+                                                   refill_realtime, paused, fill_on_pause, buffer_full, rebuffering);
+    wchar_t label[512] = {};
+    if (has_buffer)
+    {
+        const wchar_t *buffer_state = rebuffering ? L"ожидание кадров" :
+            (buffer_full ? L"полон" : (paused ? (fill_on_pause ? L"пауза + наполнение" : L"пауза") : L"пополняется"));
+        swprintf_s(label,
+                   L"Текущий FPS: %.1f   |   Реальный FPS: %.1f\nMFG: %llu сгенерировано\nБуфер: %.2f / %.2f сек · +%.1f FPS (%.2fx) · %ls",
+                   g_preview_display_fps_live, g_preview_real_fps_live,
+                   static_cast<unsigned long long>(g_preview_presented_total_frames - g_preview_real_total_frames),
+                   buffer_remaining, buffer_target, refill_fps, refill_realtime, buffer_state);
+    }
+    else
+    {
+        swprintf_s(label, L"Текущий FPS: %.1f   |   Реальный FPS: %.1f\nMFG: %llu сгенерировано\nБуфер: подготовка телеметрии",
+                   g_preview_display_fps_live, g_preview_real_fps_live,
+                   static_cast<unsigned long long>(g_preview_presented_total_frames - g_preview_real_total_frames));
+    }
     if (g_preview_fps_text != nullptr) SetWindowTextW(g_preview_fps_text, label);
     WritePreviewTelemetry();
     g_preview_real_window_frames = 0;
@@ -761,13 +808,13 @@ static void CreatePreviewControls(HWND parent)
 
     g_preview_fps_window = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"dlss5feedhost", L"FPS",
-        WS_POPUP | WS_CLIPCHILDREN, 0, 0, 430, 58, parent, nullptr,
+        WS_POPUP | WS_CLIPCHILDREN, 0, 0, 600, 82, parent, nullptr,
         GetModuleHandleW(nullptr), nullptr);
     if (g_preview_fps_window != nullptr)
     {
         g_preview_fps_text = CreateWindowExW(0, L"STATIC",
-            L"Текущий FPS: —   |   Реальный FPS: —\nMFG: ожидание кадров",
-            WS_CHILD | WS_VISIBLE | SS_LEFT, 12, 8, 406, 44, g_preview_fps_window,
+            L"Текущий FPS: —   |   Реальный FPS: —\nMFG: ожидание кадров\nБуфер: подготовка телеметрии",
+            WS_CHILD | WS_VISIBLE | SS_LEFT, 12, 8, 576, 68, g_preview_fps_window,
             nullptr, GetModuleHandleW(nullptr), nullptr);
         if (g_preview_fps_text != nullptr)
             SendMessageW(g_preview_fps_text, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
@@ -2588,6 +2635,8 @@ static int RunBatch(const BatchOptions &o)
         uint32_t stream_wait_events = 0;
         uint32_t stream_underruns = 0;
         uint32_t stream_chunks_opened = 0;
+        double last_stream_wait_ms = 0.0;
+        bool last_stream_buffering_announced = false;
         double chunk_encode_ms = 0.0;
         auto open_chunk = [&](uint32_t id, uint32_t frames, const fs::path &rgb_path,
                               const fs::path &motion_path, const fs::path &depth_path)
@@ -2627,9 +2676,50 @@ static int RunBatch(const BatchOptions &o)
         {
             const auto stream_wait_begin = BatchClock::now();
             std::string line;
-            if (!std::getline(std::cin, line))
-                throw std::runtime_error("stream command pipe closed early");
+            last_stream_buffering_announced = false;
+            HANDLE stream_input = GetStdHandle(STD_INPUT_HANDLE);
+            for (;;)
+            {
+                // std::getline may read several CHUNK lines from the Windows
+                // pipe into iostream's own filebuf. Check that user-space
+                // buffer first; looking only at PeekNamedPipe would report a
+                // false underrun and then wait forever while complete commands
+                // were already resident in std::cin.
+                if (std::cin.rdbuf()->in_avail() > 0)
+                {
+                    if (!std::getline(std::cin, line))
+                        throw std::runtime_error("stream command pipe closed early");
+                    break;
+                }
+                DWORD available = 0;
+                if (stream_input == INVALID_HANDLE_VALUE ||
+                    !PeekNamedPipe(stream_input, nullptr, 0, nullptr, &available, nullptr))
+                {
+                    if (!std::getline(std::cin, line))
+                        throw std::runtime_error("stream command pipe closed early");
+                    break;
+                }
+                if (available > 0)
+                {
+                    if (!std::getline(std::cin, line))
+                        throw std::runtime_error("stream command pipe closed early");
+                    break;
+                }
+                if (o.preview_only && stream_chunks_opened > 0 && !last_stream_buffering_announced &&
+                    ElapsedMs(stream_wait_begin) > 20.0)
+                {
+                    char command[96] = {};
+                    sprintf_s(command, "BUFFERING %.6f", CurrentPreviewSeconds());
+                    WritePreviewControl(command);
+                    last_stream_buffering_announced = true;
+                    printf("HOST_BUFFERING_START media_seconds=%.6f\n", CurrentPreviewSeconds());
+                    fflush(stdout);
+                }
+                PumpPresent();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
             const double waited_ms = ElapsedMs(stream_wait_begin);
+            last_stream_wait_ms = waited_ms;
             stream_wait_ms += waited_ms;
             stream_wait_max_ms = std::max(stream_wait_max_ms, waited_ms);
             ++stream_wait_events;
@@ -2916,6 +3006,21 @@ static int RunBatch(const BatchOptions &o)
             {
                 if (!o.stream) throw std::runtime_error("batch input ended before the declared frame count");
                 read_stream_chunk();
+                if (o.preview_only && stream_chunks_opened > 1 && last_stream_wait_ms > 8.0 &&
+                    preview_start.time_since_epoch().count() != 0)
+                {
+                    preview_start += std::chrono::duration_cast<BatchClock::duration>(
+                        std::chrono::duration<double, std::milli>(last_stream_wait_ms));
+                }
+                if (o.preview_only && last_stream_buffering_announced)
+                {
+                    char command[96] = {};
+                    sprintf_s(command, "BUFFER_READY %.6f", CurrentPreviewSeconds());
+                    WritePreviewControl(command);
+                    printf("HOST_BUFFERING_END media_seconds=%.6f wait_ms=%.3f\n",
+                           CurrentPreviewSeconds(), last_stream_wait_ms);
+                    fflush(stdout);
+                }
                 if (chunk_frames_left > o.frames - frame)
                     throw std::runtime_error("stream chunks exceed the declared frame count");
             }

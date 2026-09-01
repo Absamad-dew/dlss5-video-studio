@@ -33,6 +33,7 @@ param(
     [ValidateRange(3,30)] [int] $RealtimeBufferSeconds = 5,
     [ValidateRange(0,192)] [int] $RealtimeChunkFrames = 0,
     [string] $RealtimeControlPath,
+    [switch] $RealtimeFillBufferOnPause,
     [switch] $RealtimeFullscreen,
     [string] $InputHeadersPath,
     [switch] $InputTlsNoVerify,
@@ -297,6 +298,20 @@ $NetworkInputOptions = @()
 if ($InputTlsNoVerify) { $NetworkInputOptions += @('-tls_verify','0') }
 if ($InputHeaderBlock) { $NetworkInputOptions += @('-headers',$InputHeaderBlock) }
 $IsPreviewOnly = [bool]$PreviewOnly
+$RealtimePlaybackStatePath = if ($IsPreviewOnly -and -not [string]::IsNullOrWhiteSpace($RealtimeControlPath)) {
+    [IO.Path]::GetFullPath($RealtimeControlPath) + '.playback'
+} else { $null }
+
+function Wait-RealtimePlaybackGate {
+    if (-not $IsPreviewOnly -or $RealtimeFillBufferOnPause -or -not $RealtimePlaybackStatePath) { return }
+    while (Test-Path -LiteralPath $RealtimePlaybackStatePath -PathType Leaf) {
+        $PlaybackState = ''
+        try { $PlaybackState = [IO.File]::ReadAllText($RealtimePlaybackStatePath,$Utf8NoBom).Trim() } catch {}
+        if ($PlaybackState -ne 'paused') { return }
+        Start-Sleep -Milliseconds 25
+    }
+}
+
 $UseNvidiaDlssg = $RealtimeFrameGeneration -in @('NvidiaDLSSG','NvidiaDLSSGx2','NvidiaMFGx3','NvidiaMFGx4','NvidiaDynamicMFG')
 $ResolvedRealtimeTargetFps = $RealtimeTargetFps
 if (-not $IsPreviewOnly -and $RealtimeFrameGeneration -ne 'Off') { throw 'Realtime frame generation is available only in display mode.' }
@@ -585,13 +600,23 @@ while ($RemainingFrames -gt 0) {
     $RemainingFrames -= $FramesInChunk
 }
 $Chunks = $ChunkFrameCounts.Count
-$RealtimePrebufferChunks = if ($IsPreviewOnly) {
-    [int][math]::Max(1,[math]::Min($Chunks,[math]::Ceiling($RealtimeBufferFrames/[double]$ChunkSize)))
-} else { 0 }
 # Chunk granularity may round the selected duration upward, never downward.
-# This is the steady-state high-water mark used by the producer/consumer queue.
+# Pause-fill keeps several complete look-ahead chunks publishable. This lets the
+# producer keep using CPU/GPU at full speed during startup transients and when
+# playback stops between two acknowledgements. The selected duration remains
+# the minimum reserve; the extra aligned look-ahead is a short safety margin.
+$RealtimeCapacitySlackChunks = if ($IsPreviewOnly -and $RealtimeFillBufferOnPause) { 4 } else { 2 }
 $RealtimeBufferCapacityFrames = if ($IsPreviewOnly) {
-    [int][math]::Min($TotalFrames,$RealtimeBufferFrames+$ChunkSize-1)
+    # Align the high-water mark to a complete chunk. Otherwise (for example
+    # 179 capacity with 15-frame chunks) the producer has to wait for two
+    # acknowledgements before it may publish one replacement, causing a
+    # needless half-second sawtooth below the selected reserve.
+    $AlignedCapacity = [int]([math]::Ceiling(($RealtimeBufferFrames+$RealtimeCapacitySlackChunks*$ChunkSize)/[double]$ChunkSize)*$ChunkSize)
+    [int][math]::Min($TotalFrames,$AlignedCapacity)
+} else { 0 }
+$RealtimeStartupBufferFrames = if ($IsPreviewOnly) { $RealtimeBufferCapacityFrames } else { 0 }
+$RealtimePrebufferChunks = if ($IsPreviewOnly) {
+    [int][math]::Max(1,[math]::Min($Chunks,[math]::Ceiling($RealtimeStartupBufferFrames/[double]$ChunkSize)))
 } else { 0 }
 $ChunkOffsets = New-Object 'Collections.Generic.List[int]'
 $ChunkEndFrames = New-Object 'Collections.Generic.List[int]'
@@ -648,9 +673,11 @@ $Plan = [ordered]@{
     vr_eye_swap=if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
     realtime_buffer_seconds=if($IsPreviewOnly){$RealtimeBufferSeconds}else{$null}
     realtime_buffer_frames=if($IsPreviewOnly){$RealtimeBufferFrames}else{$null}
+    realtime_startup_buffer_frames=if($IsPreviewOnly){$RealtimeStartupBufferFrames}else{$null}
     realtime_buffer_capacity_frames=if($IsPreviewOnly){$RealtimeBufferCapacityFrames}else{$null}
     realtime_chunk_frames=if($IsPreviewOnly){$ChunkSize}else{$null}
     realtime_prebuffer_chunks=if($IsPreviewOnly){$RealtimePrebufferChunks}else{$null}
+    realtime_fill_buffer_on_pause=if($IsPreviewOnly){[bool]$RealtimeFillBufferOnPause}else{$null}
     source_kind=if($IsNetworkSource){'network'}else{'file'}
     source_page=if($ResolvedOnlineSource){$ResolvedOnlineSource.PageUrl}else{$null}
     fine_guide_settings=[bool]$FineGuideSettings
@@ -827,6 +854,7 @@ try {
     $PrimaryPhaseWatch = [Diagnostics.Stopwatch]::StartNew()
     if ($VsrBeforeDlss) {
         for ($ChunkIndex = 0; $ChunkIndex -lt $Chunks; $ChunkIndex++) {
+            Wait-RealtimePlaybackGate
             $FirstFrame = $ChunkOffsets[$ChunkIndex]
             $ThisFrames = $ChunkFrameCounts[$ChunkIndex]
             $Prefix = Join-Path $ChunkDirectory ('chunk-{0:D4}' -f $ChunkIndex)
@@ -879,15 +907,18 @@ try {
             if ($IsPreviewOnly -and $SentChunks -eq 0) {
                 $StartupHostCommands.Add([pscustomobject]@{Command=$HostCommand;Frames=[int]$ThisFrames})
                 $StartupPreparedFrames += $ThisFrames
-                if ($StartupPreparedFrames -ge $RealtimeBufferFrames -or $ChunkIndex -eq $Chunks - 1) {
+                if ($StartupPreparedFrames -ge $RealtimeStartupBufferFrames -or $ChunkIndex -eq $Chunks - 1) {
                     foreach ($ReadyChunk in $StartupHostCommands) {
                         $HostProcess.StandardInput.WriteLine($ReadyChunk.Command)
                         $SentChunks++;$SentFrames += [int]$ReadyChunk.Frames
                     }
                     $ReadySeconds=[math]::Round($SentFrames/[double]$Fps,3)
                     Write-Output ('STUDIO_REALTIME_BUFFER_READY_JSON '+([ordered]@{
-                        ready_frames=$SentFrames;ready_seconds=$ReadySeconds;target_frames=$RealtimeBufferFrames
-                        target_seconds=$RealtimeBufferSeconds;chunk_frames=$ChunkSize;chunks=$SentChunks
+                        ready_frames=$SentFrames;ready_seconds=$ReadySeconds;sent_frames=$SentFrames
+                        target_frames=$RealtimeBufferFrames;capacity_frames=$RealtimeBufferCapacityFrames
+                        target_seconds=$RealtimeBufferSeconds;source_fps=$Fps;chunk_frames=$ChunkSize;chunks=$SentChunks
+                        producer_elapsed_seconds=[math]::Round($PrimaryPhaseWatch.Elapsed.TotalSeconds,6)
+                        fill_on_pause=[bool]$RealtimeFillBufferOnPause
                     }|ConvertTo-Json -Compress))
                 }
             } elseif ($IsPreviewOnly) {
@@ -897,12 +928,16 @@ try {
                     $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
                     $AcknowledgedChunks++
                 }
+                Wait-RealtimePlaybackGate
                 $HostProcess.StandardInput.WriteLine($HostCommand)
                 $SentChunks++;$SentFrames += $ThisFrames
                 $ReadyFrames=[math]::Max(0,$SentFrames-$AcknowledgedFrames)
                 $ReadySeconds=[math]::Round($ReadyFrames/[double]$Fps,3)
                 Write-Output ('STUDIO_REALTIME_BUFFER_LEVEL '+([ordered]@{
-                    ready_frames=$ReadyFrames;ready_seconds=$ReadySeconds;target_seconds=$RealtimeBufferSeconds
+                    ready_frames=$ReadyFrames;ready_seconds=$ReadySeconds;sent_frames=$SentFrames
+                    target_frames=$RealtimeBufferFrames;capacity_frames=$RealtimeBufferCapacityFrames
+                    target_seconds=$RealtimeBufferSeconds;source_fps=$Fps;fill_on_pause=[bool]$RealtimeFillBufferOnPause
+                    producer_elapsed_seconds=[math]::Round($PrimaryPhaseWatch.Elapsed.TotalSeconds,6)
                 }|ConvertTo-Json -Compress))
             } else {
                 $HostProcess.StandardInput.WriteLine($HostCommand)
@@ -924,6 +959,7 @@ try {
         if ($UpscalerProcess.ExitCode -ne 0) { throw "$Upscaler engine failed: $($UpscalerProcess.StandardError.ReadToEnd())" }
     } else {
     for ($ChunkIndex = 0; $ChunkIndex -lt $Chunks; $ChunkIndex++) {
+        Wait-RealtimePlaybackGate
         $FirstFrame = $ChunkOffsets[$ChunkIndex]
         $ThisFrames = $ChunkFrameCounts[$ChunkIndex]
         $Prefix = Join-Path $ChunkDirectory ('chunk-{0:D4}' -f $ChunkIndex)
@@ -1000,7 +1036,7 @@ try {
             # user, then publish them as one ready queue to the native consumer.
             $StartupHostCommands.Add([pscustomobject]@{Command=$HostCommand;Frames=[int]$ThisFrames})
             $StartupPreparedFrames += $ThisFrames
-            if ($StartupPreparedFrames -ge $RealtimeBufferFrames -or $ChunkIndex -eq $Chunks - 1) {
+            if ($StartupPreparedFrames -ge $RealtimeStartupBufferFrames -or $ChunkIndex -eq $Chunks - 1) {
                 foreach ($ReadyChunk in $StartupHostCommands) {
                     $HostProcess.StandardInput.WriteLine($ReadyChunk.Command)
                     $SentChunks++
@@ -1008,8 +1044,11 @@ try {
                 }
                 $ReadySeconds=[math]::Round($SentFrames/[double]$Fps,3)
                 Write-Output ('STUDIO_REALTIME_BUFFER_READY_JSON '+([ordered]@{
-                    ready_frames=$SentFrames;ready_seconds=$ReadySeconds;target_frames=$RealtimeBufferFrames
-                    target_seconds=$RealtimeBufferSeconds;chunk_frames=$ChunkSize;chunks=$SentChunks
+                    ready_frames=$SentFrames;ready_seconds=$ReadySeconds;sent_frames=$SentFrames
+                    target_frames=$RealtimeBufferFrames;capacity_frames=$RealtimeBufferCapacityFrames
+                    target_seconds=$RealtimeBufferSeconds;source_fps=$Fps;chunk_frames=$ChunkSize;chunks=$SentChunks
+                    producer_elapsed_seconds=[math]::Round($PrimaryPhaseWatch.Elapsed.TotalSeconds,6)
+                    fill_on_pause=[bool]$RealtimeFillBufferOnPause
                 }|ConvertTo-Json -Compress))
             }
         } elseif ($IsPreviewOnly) {
@@ -1024,6 +1063,7 @@ try {
                 $DoneFrames = $ChunkEndFrames[$AcknowledgedChunks - 1]
                 $Percent = 5.0 + 85.0*$DoneFrames/[double]$TotalFrames
             }
+            Wait-RealtimePlaybackGate
             $HostProcess.StandardInput.WriteLine($HostCommand)
             $SentChunks++
             $SentFrames += $ThisFrames
@@ -1032,7 +1072,10 @@ try {
             $DoneFrames=$AcknowledgedFrames
             $Percent = 5.0 + 85.0*$DoneFrames/[double]$TotalFrames
             Write-Output ('STUDIO_REALTIME_BUFFER_LEVEL '+([ordered]@{
-                ready_frames=$ReadyFrames;ready_seconds=$ReadySeconds;target_seconds=$RealtimeBufferSeconds
+                ready_frames=$ReadyFrames;ready_seconds=$ReadySeconds;sent_frames=$SentFrames
+                target_frames=$RealtimeBufferFrames;capacity_frames=$RealtimeBufferCapacityFrames
+                target_seconds=$RealtimeBufferSeconds;source_fps=$Fps;fill_on_pause=[bool]$RealtimeFillBufferOnPause
+                producer_elapsed_seconds=[math]::Round($PrimaryPhaseWatch.Elapsed.TotalSeconds,6)
             }|ConvertTo-Json -Compress))
             Emit-Progress 'DLSS5' "Realtime buffer $ReadySeconds/$RealtimeBufferSeconds s" $Percent $DoneFrames $TotalFrames $PrimaryPhaseWatch.Elapsed.TotalSeconds
         } else {
