@@ -1,0 +1,283 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)] [string] $Runner,
+    [Parameter(Mandatory)] [string] $InputVideo,
+    [Parameter(Mandatory)] [string] $ConfigPath,
+    [Parameter(Mandatory)] [string] $ControlPath,
+    [ValidateSet('Source','Same','4K','2160p','1440p','1080p','720p','540p')] [string] $OutputMode = 'Source',
+    [ValidateSet('Auto','Laptop8GB','RTX5080')] [string] $HardwareProfile = 'Auto',
+    [ValidateSet('Auto','Native','Quality','Balanced','Performance')] [string] $RenderPreset = 'Auto',
+    [ValidateSet('DA2Small','VideoDepthSmall','DA3Small','DA3Base')] [string] $DepthModelProfile = 'DA2Small',
+    [ValidateSet('None','NanoVSR','AnimeSR','FlashVSR','DLoRAL')] [string] $Upscaler = 'None',
+    [ValidateSet('Auto','Realtime','Balanced','Quality','Max')] [string] $UpscalerVariant = 'Auto',
+    [ValidateRange(0.0,1.0)] [double] $UpscalerStrength = 1.0,
+    [ValidateSet('DLSSOnly','VSRThenDLSS')] [string] $PipelineOrder = 'DLSSOnly',
+    [ValidateRange(3,30)] [int] $BufferSeconds = 5,
+    [double] $StartSeconds = 0,
+    [ValidateSet(720,1080,1440,2160)] [int] $NetworkMaxHeight = 1080,
+    [ValidateSet('None','chrome','edge','firefox')] [string] $CookiesBrowser = 'None',
+    [ValidateRange(256,768)] [int] $GuideWidth = 320,
+    [ValidateRange(1,24)] [int] $DepthInterval = 24,
+    [ValidateRange(1,24)] [int] $DepthMinInterval = 12,
+    [ValidateRange(0.0,1.0)] [double] $AdaptiveConfidence = 0.0,
+    [ValidateRange(0.0,30.0)] [double] $AdaptiveMotion = 0.0,
+    [ValidateRange(0.0,0.9)] [double] $TemporalDepth = 0.85,
+    [ValidateRange(0.03,0.35)] [double] $SceneCutThreshold = 0.12,
+    [ValidateSet('quality','balanced','realtime')] [string] $MotionPreset = 'realtime',
+    [ValidateSet('dis','raft')] [string] $MotionBackend = 'dis',
+    [ValidateRange(1,12)] [int] $RaftUpdates = 4,
+    [ValidateSet('Source','Double','60')] [string] $FpsMode = 'Source',
+    [ValidateSet('Off','MotionGPU','CompatibilityBlend','NvidiaDLSSG','NvidiaOpticalFlow','Rife')] [string] $FrameGeneration = 'Off',
+    [switch] $EnableAudio,
+    [ValidateRange(0,100)] [int] $Volume = 80,
+    [switch] $Fullscreen
+)
+
+$ErrorActionPreference = 'Stop'
+$Utf8NoBom = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $Utf8NoBom
+$OutputEncoding = $Utf8NoBom
+$Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$Ffprobe = Join-Path $Root 'tools\ffprobe.exe'
+$Ffplay = Join-Path $Root 'tools\ffplay.exe'
+$YtDlp = Join-Path $Root 'tools\yt-dlp.exe'
+$SourceResolver = Join-Path $PSScriptRoot 'source-resolver.psm1'
+$PowerShell = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+$Invariant = [Globalization.CultureInfo]::InvariantCulture
+
+function Quote-Argument([string] $Value) {
+    if ($Value -notmatch '[\s"]') { return $Value }
+    return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Remove-RealtimeWork([string] $Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+    try {
+        $Resolved = [IO.Path]::GetFullPath($Path)
+        $Parent = [IO.Directory]::GetParent($Resolved)
+        $GrandParent = if ($Parent) { $Parent.Parent } else { $null }
+        if ([IO.Path]::GetFileName($Resolved) -like 'job-*' -and $Parent -and $Parent.Name -eq 'temp' -and $GrandParent -and $GrandParent.Name -eq 'DLSS5VideoStudio') {
+            Remove-Item -LiteralPath $Resolved -Recurse -Force
+            Write-Output "STUDIO_PLAYER_CLEANUP $Resolved"
+        }
+    } catch {
+        Write-Output ('STUDIO_PLAYER_CLEANUP_WARNING ' + $_.Exception.Message)
+    }
+}
+
+function Stop-ChildTree($Child) {
+    if ($Child -and -not $Child.HasExited) {
+        try { & taskkill.exe /PID $Child.Id /T /F 2>$null | Out-Null } catch {}
+        try { if (-not $Child.WaitForExit(10000)) { $Child.Kill() } } catch {}
+    }
+}
+
+if (-not (Test-Path -LiteralPath $Runner -PathType Leaf)) { throw "Realtime runner is missing: $Runner" }
+if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { throw "Realtime config is missing: $ConfigPath" }
+if (-not (Test-Path -LiteralPath $Ffprobe -PathType Leaf)) { throw "ffprobe is missing: $Ffprobe" }
+if (-not (Test-Path -LiteralPath $SourceResolver -PathType Leaf)) { throw "Online source resolver is missing: $SourceResolver" }
+Import-Module $SourceResolver -Force
+$IsOnline = Test-HttpVideoSource $InputVideo
+if (-not $IsOnline -and -not (Test-Path -LiteralPath $InputVideo -PathType Leaf)) { throw "Input video is missing: $InputVideo" }
+if ($EnableAudio -and -not (Test-Path -LiteralPath $Ffplay -PathType Leaf)) {
+    Write-Output 'STUDIO_PLAYER_WARNING Audio component ffplay is missing; continuing without sound.'
+    $EnableAudio = $false
+}
+
+$ControlPath = [IO.Path]::GetFullPath($ControlPath)
+$ControlDirectory = [IO.Path]::GetDirectoryName($ControlPath)
+New-Item -ItemType Directory -Force -Path $ControlDirectory | Out-Null
+[IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
+
+$ResolvedInput = $InputVideo
+$HeadersPath = $null
+$InputTlsNoVerify = $false
+$OnlineInfo = $null
+if ($IsOnline) {
+    $HeadersPath = $ControlPath + '.headers.json'
+    Write-Output 'STUDIO_SOURCE_RESOLVING network-source'
+    $OnlineInfo = Resolve-OnlineVideoSource -PageUrl $InputVideo -YtDlpPath $YtDlp -MaxHeight $NetworkMaxHeight -CookiesBrowser $CookiesBrowser -HeadersPath $HeadersPath
+    $ResolvedInput = $OnlineInfo.MediaUrl
+    $InputTlsNoVerify = [bool]$OnlineInfo.TlsNoVerify
+    $Duration = [double]$OnlineInfo.Duration
+    Write-Output ('STUDIO_SOURCE_JSON ' + ([ordered]@{
+        kind='network'; title=$OnlineInfo.Title; duration_seconds=[math]::Round($Duration,3)
+        width=$OnlineInfo.Width; height=$OnlineInfo.Height; format_id=$OnlineInfo.FormatId
+        extractor=$OnlineInfo.Extractor; max_height=$NetworkMaxHeight
+    } | ConvertTo-Json -Compress))
+} else {
+    $Probe = (& $Ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 $InputVideo | Select-Object -First 1)
+    $Duration = 0.0
+    if (-not [double]::TryParse([string]$Probe,[Globalization.NumberStyles]::Float,$Invariant,[ref]$Duration) -or $Duration -le 0) {
+        throw 'Could not determine the video duration for realtime seeking.'
+    }
+}
+if ($Duration -le 0) { throw 'Could not determine the video duration for realtime seeking.' }
+$CurrentStart = [math]::Max(0.0,[math]::Min($Duration-0.05,$StartSeconds))
+$AudioProcess = $null
+$AudioMuted = $false
+$VideoPaused = $false
+$InputHeaderBlock = $null
+if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) {
+    $HeaderObject = Get-Content -LiteralPath $HeadersPath -Raw | ConvertFrom-Json
+    $HeaderLines = foreach($Property in $HeaderObject.PSObject.Properties){if($Property.Value){'{0}: {1}'-f $Property.Name,$Property.Value}}
+    if($HeaderLines){$InputHeaderBlock=($HeaderLines-join "`r`n")+"`r`n"}
+}
+
+function Stop-Audio {
+    if ($script:AudioProcess) {
+        Stop-ChildTree $script:AudioProcess
+        try { $script:AudioProcess.Dispose() } catch {}
+        $script:AudioProcess = $null
+    }
+}
+
+function Start-Audio([double] $Position) {
+    if (-not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused) { return }
+    Stop-Audio
+    $AudioArgs=@('-nodisp','-autoexit','-loglevel','error','-volume',$Volume)
+    if($InputTlsNoVerify){$AudioArgs+=@('-tls_verify','0')}
+    if($InputHeaderBlock){$AudioArgs+=@('-headers',$InputHeaderBlock)}
+    $AudioArgs+=@('-ss',([string]::Format($Invariant,'{0:0.######}',$Position)),'-i',$ResolvedInput,'-vn','-sn')
+    $Psi=[Diagnostics.ProcessStartInfo]::new();$Psi.FileName=$Ffplay
+    $Psi.Arguments=(($AudioArgs|ForEach-Object{Quote-Argument([string]$_)})-join' ')
+    $Psi.WorkingDirectory=$Root;$Psi.UseShellExecute=$false;$Psi.CreateNoWindow=$true
+    $Psi.RedirectStandardOutput=$false;$Psi.RedirectStandardError=$false
+    $script:AudioProcess=[Diagnostics.Process]::new();$script:AudioProcess.StartInfo=$Psi
+    if(-not $script:AudioProcess.Start()){$script:AudioProcess=$null}
+}
+
+Write-Output ('STUDIO_PLAYER_READY ' + (@{
+    duration_seconds=[math]::Round($Duration,3);buffer_seconds=$BufferSeconds;fullscreen=[bool]$Fullscreen
+    source_kind=if($IsOnline){'network'}else{'file'};guide_width=$GuideWidth;depth_interval=$DepthInterval
+    motion_backend=$MotionBackend;fps_mode=$FpsMode;frame_generation=$FrameGeneration;audio=[bool]$EnableAudio;volume=$Volume
+    hardware_profile=$HardwareProfile;render_preset=$RenderPreset
+    depth_model_profile=$DepthModelProfile
+}|ConvertTo-Json -Compress))
+
+while ($true) {
+    [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
+    $ChildArgs = @(
+        '-NoProfile','-ExecutionPolicy','Bypass','-File',$Runner,
+        '-InputVideo',$ResolvedInput,'-ConfigPath',$ConfigPath,
+        '-OutputMode',$OutputMode,'-PerformanceProfile','Realtime',
+        '-HardwareProfile',$HardwareProfile,'-RealtimeRenderPreset',$RenderPreset,
+        '-DepthModelProfile',$DepthModelProfile,
+        '-Upscaler',$Upscaler,'-UpscalerVariant',$UpscalerVariant,
+        '-UpscalerStrength',([string]::Format($Invariant,'{0:0.###}',$UpscalerStrength)),
+        '-PipelineOrder',$PipelineOrder,'-VRMode','Off','-VRSbsLayout','HalfSBS',
+        '-StartSeconds',([string]::Format($Invariant,'{0:0.######}',$CurrentStart)),
+        '-FrameCount','0','-PreviewOnly','-RealtimeBufferSeconds',$BufferSeconds,
+        '-RealtimeControlPath',$ControlPath,
+        '-RealtimeGuideWidth',$GuideWidth,'-RealtimeDepthInterval',$DepthInterval,
+        '-RealtimeDepthMinInterval',([math]::Min($DepthMinInterval,$DepthInterval)),
+        '-RealtimeAdaptiveConfidence',([string]::Format($Invariant,'{0:0.###}',$AdaptiveConfidence)),
+        '-RealtimeAdaptiveMotion',([string]::Format($Invariant,'{0:0.###}',$AdaptiveMotion)),
+        '-RealtimeTemporalDepth',([string]::Format($Invariant,'{0:0.###}',$TemporalDepth)),
+        '-RealtimeSceneCutThreshold',([string]::Format($Invariant,'{0:0.###}',$SceneCutThreshold)),
+        '-RealtimeMotionPreset',$MotionPreset,'-RealtimeMotionBackend',$MotionBackend,'-RealtimeRaftUpdates',$RaftUpdates,
+        '-RealtimeFpsMode',$FpsMode,'-RealtimeFrameGeneration',$FrameGeneration
+    )
+    if ($HeadersPath) { $ChildArgs += @('-InputHeadersPath',$HeadersPath) }
+    if ($InputTlsNoVerify) { $ChildArgs += '-InputTlsNoVerify' }
+    if ($Fullscreen) { $ChildArgs += '-RealtimeFullscreen' }
+
+    $Psi = [Diagnostics.ProcessStartInfo]::new()
+    $Psi.FileName = $PowerShell
+    $Psi.Arguments = (($ChildArgs | ForEach-Object { Quote-Argument ([string]$_) }) -join ' ')
+    $Psi.WorkingDirectory = $Root
+    $Psi.UseShellExecute = $false
+    $Psi.CreateNoWindow = $true
+    $Psi.RedirectStandardOutput = $true
+    $Psi.RedirectStandardError = $true
+    $Psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $Psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $Child = [Diagnostics.Process]::new()
+    $Child.StartInfo = $Psi
+    if (-not $Child.Start()) { throw 'Could not start the realtime processing pipeline.' }
+
+    Write-Output ('STUDIO_PLAYER_SESSION ' + (@{start_seconds=[math]::Round($CurrentStart,3);pid=$Child.Id}|ConvertTo-Json -Compress))
+    $Stdout = $Child.StandardOutput.ReadLineAsync()
+    $Stderr = $Child.StandardError.ReadLineAsync()
+    $ActiveWork = $null
+    $Action = $null
+    $Target = $CurrentStart
+
+    while ($true) {
+        while ($Stdout -and $Stdout.IsCompleted) {
+            $Line = $Stdout.Result
+            if ($null -eq $Line) { $Stdout = $null; break }
+            Write-Output $Line
+            if ($Line -match '^STUDIO_WORK (?<p>.+)$') { $ActiveWork = $Matches.p }
+            $Stdout = $Child.StandardOutput.ReadLineAsync()
+        }
+        while ($Stderr -and $Stderr.IsCompleted) {
+            $Line = $Stderr.Result
+            if ($null -eq $Line) { $Stderr = $null; break }
+            Write-Output ('PLAYER_CHILD_ERROR: ' + $Line)
+            $Stderr = $Child.StandardError.ReadLineAsync()
+        }
+
+        try {
+            if ((Get-Item -LiteralPath $ControlPath -ErrorAction Stop).Length -gt 0) {
+                $Command = [IO.File]::ReadAllText($ControlPath,$Utf8NoBom).Trim()
+                [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
+                if ($Command -match '^SEEK\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
+                    $ParsedTarget = 0.0
+                    if ([double]::TryParse($Matches.s,[Globalization.NumberStyles]::Float,$Invariant,[ref]$ParsedTarget)) {
+                        $Target = [math]::Max(0.0,[math]::Min($Duration-0.05,$ParsedTarget))
+                        $Action = 'seek'
+                    }
+                } elseif ($Command -match '^PLAYING\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
+                    $script:VideoPaused=$false
+                    $Position=[double]::Parse($Matches.s,$Invariant)
+                    Start-Audio $Position
+                    Write-Output ('STUDIO_PLAYER_PLAYING ' + (@{
+                        position_seconds=[math]::Round($Position,3);audio=[bool]($EnableAudio -and -not $script:AudioMuted)
+                        audio_pid=if($script:AudioProcess){$script:AudioProcess.Id}else{$null};muted=[bool]$script:AudioMuted;volume=$Volume
+                    }|ConvertTo-Json -Compress))
+                } elseif ($Command -match '^PAUSE\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
+                    $script:VideoPaused=$true;Stop-Audio
+                    Write-Output ('STUDIO_PLAYER_PAUSED ' + $Matches.s)
+                } elseif ($Command -match '^RESUME\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
+                    $script:VideoPaused=$false;Start-Audio ([double]::Parse($Matches.s,$Invariant))
+                    Write-Output ('STUDIO_PLAYER_RESUMED ' + $Matches.s)
+                } elseif ($Command -match '^MUTE\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
+                    $script:AudioMuted=$true;Stop-Audio
+                    Write-Output ('STUDIO_PLAYER_MUTED ' + $Matches.s)
+                } elseif ($Command -match '^UNMUTE\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
+                    $script:AudioMuted=$false
+                    if(-not $script:VideoPaused){Start-Audio ([double]::Parse($Matches.s,$Invariant))}
+                    Write-Output ('STUDIO_PLAYER_UNMUTED ' + $Matches.s)
+                } elseif ($Command -eq 'CLOSE') {
+                    $Action = 'close'
+                }
+            }
+        } catch {}
+
+        if ($Action) {
+            Stop-Audio
+            Stop-ChildTree $Child
+        }
+        if ($Child.HasExited -and -not $Stdout -and -not $Stderr) { break }
+        Start-Sleep -Milliseconds 20
+    }
+
+    $ExitCode = $Child.ExitCode
+    Stop-Audio
+    $Child.Dispose()
+    if ($Action -eq 'seek') {
+        Remove-RealtimeWork $ActiveWork
+        $CurrentStart = $Target
+        Write-Output ('STUDIO_PLAYER_SEEK ' + ([string]::Format($Invariant,'{0:0.###}',$CurrentStart)))
+        continue
+    }
+    if ($Action -eq 'close') {
+        Remove-RealtimeWork $ActiveWork
+        if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) { Remove-Item -LiteralPath $HeadersPath -Force }
+        Write-Output 'STUDIO_PLAYER_CLOSED'
+        exit 0
+    }
+    if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) { Remove-Item -LiteralPath $HeadersPath -Force }
+    exit $ExitCode
+}

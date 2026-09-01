@@ -1,0 +1,52 @@
+# Generated builds and portable payloads
+/build/
+/dist/
+/tools/
+/qa-engine-logs/
+/qa-output/
+/.corebroker/
+
+# Downloaded SDKs, models and nested repositories
+/third_party/
+/models/
+/runtime/
+*.safetensors
+*.ckpt
+*.pth
+*.pkl
+*.onnx
+
+# Proprietary NVIDIA and ReShade payloads are never published
+nvngx_*.dll
+sl.*.dll
+sl.interposer.dll
+dxgi.dll
+*.addon64
+
+# Generated media, guide sidecars and diagnostics
+*.mp4
+*.mkv
+*.webm
+*.rgb
+*.rgb24
+*.nv12
+*.motion
+*.depth
+*.log
+*.previous
+*.run.json
+/python/*.bin
+/python/build/
+/python/dist/
+/python/pyi-work/
+/python/.venv/
+
+# Local editor/cache files
+.vs/
+.vscode/
+__pycache__/
+*.pyc
+*.obj
+*.pdb
+*.ilk
+*.user

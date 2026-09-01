@@ -1,0 +1,2 @@
+8.0.0-realtime-player
+Fullscreen/pause/seeking controls, configurable 3-30 second realtime buffer, unlimited realtime playback, and the Temporal Stability 7 motion/depth pipeline.
