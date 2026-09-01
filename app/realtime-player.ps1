@@ -121,6 +121,7 @@ if ($IsOnline) {
 if ($Duration -le 0) { throw 'Could not determine the video duration for realtime seeking.' }
 $CurrentStart = [math]::Max(0.0,[math]::Min($Duration-0.05,$StartSeconds))
 $AudioProcess = $null
+$AudioStderrTask = $null
 $AudioMuted = $false
 $VideoPaused = $false
 # ffplay's process/decoder start is consistently about 1.24 s on both tested
@@ -146,8 +147,15 @@ if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) {
 function Stop-Audio {
     if ($script:AudioProcess) {
         Stop-ChildTree $script:AudioProcess
+        if ($script:AudioStderrTask) {
+            try {
+                $AudioError = (([string]$script:AudioStderrTask.Result) -replace "\x1B\[[0-?]*[ -/]*[@-~]",'').Trim()
+                if ($AudioError) { Write-Output ('STUDIO_PLAYER_AUDIO_ERROR ' + ($AudioError -replace '[\r\n]+',' | ')) }
+            } catch {}
+        }
         try { $script:AudioProcess.Dispose() } catch {}
         $script:AudioProcess = $null
+        $script:AudioStderrTask = $null
     }
 }
 
@@ -167,9 +175,10 @@ function Start-Audio([double] $Position) {
     $Psi=[Diagnostics.ProcessStartInfo]::new();$Psi.FileName=$Ffplay
     $Psi.Arguments=(($AudioArgs|ForEach-Object{Quote-Argument([string]$_)})-join' ')
     $Psi.WorkingDirectory=$Root;$Psi.UseShellExecute=$false;$Psi.CreateNoWindow=$true
-    $Psi.RedirectStandardOutput=$false;$Psi.RedirectStandardError=$false
+    $Psi.RedirectStandardOutput=$false;$Psi.RedirectStandardError=$true
     $script:AudioProcess=[Diagnostics.Process]::new();$script:AudioProcess.StartInfo=$Psi
     if(-not $script:AudioProcess.Start()){$script:AudioProcess=$null;return}
+    $script:AudioStderrTask=$script:AudioProcess.StandardError.ReadToEndAsync()
     $script:AudioClockMediaStart=$SeekPosition
     $script:AudioClockWallStart=Get-MonotonicSeconds
     $script:LastAudioCorrectionWall=$script:AudioClockWallStart
@@ -284,17 +293,11 @@ while ($true) {
         }
 
         Update-AudioClockFromTelemetry
-        $ClockNow = Get-MonotonicSeconds
-        if ($script:VideoPlaybackStarted -and -not $Child.HasExited -and
-            $EnableAudio -and -not $script:AudioMuted -and -not $script:VideoPaused -and
-            $script:AudioProcess -and -not $script:AudioProcess.HasExited -and
-            $script:LastTelemetryWall -gt 0 -and ($ClockNow-$script:LastTelemetryWall) -gt 1.25 -and
-            $script:LatestVideoPosition -lt ($Duration-1.0) -and
-            -not $script:AudioNeedsResync) {
-            Stop-Audio
-            $script:AudioNeedsResync=$true
-            Write-Output 'STUDIO_PLAYER_AVSYNC action=hold reason=video-stall'
-        }
+        # A guide/depth chunk can temporarily delay telemetry even while the
+        # already buffered video remains visible. Do not kill audio on that
+        # transient gap: this was the reason sound disappeared after roughly
+        # ten seconds. When the next video timestamp arrives, the drift check
+        # above performs a bounded seek only if clocks actually diverged.
 
         try {
             if ((Get-Item -LiteralPath $ControlPath -ErrorAction Stop).Length -gt 0) {

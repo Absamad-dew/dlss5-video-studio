@@ -1,2 +1,2 @@
-13.2.0-dlssg-vsync-avsync-player-osd
-Stable vsynced DLSS-G/MFG presentation; local Streamline runtime pinning; automatic non-black fallback; telemetry-locked audio; hideable controls and separate displayed/real FPS.
+13.2.1-dlssg-vsync-continuous-audio
+Stable vsynced DLSS-G/MFG presentation; continuous realtime audio across transient telemetry gaps; local Streamline runtime pinning; automatic non-black fallback; player FPS/controls overlay.
