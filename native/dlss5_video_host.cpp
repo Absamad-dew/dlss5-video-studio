@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <d3d12.h>
+#include <d3d12sdklayers.h>
 #include <d3dcompiler.h>
 #include <dxgi1_4.h>
 #include <cstdio>
@@ -102,7 +103,7 @@ struct BatchOptions
     uint32_t nvidia_generated_frames = 1;
     uint32_t nvidia_dynamic_target_fps = 0;
     fs::path input, output, encode_mp4, encode_chunks_dir, motion, depth;
-    fs::path control_file;
+    fs::path control_file, telemetry_file;
     std::string codec = "h264";
     uint32_t width = 0, height = 0, frames = 0;
     uint32_t output_width = 0, output_height = 0;
@@ -133,32 +134,56 @@ static UINT g_preview_height = 540;
 static bool g_preview_fullscreen = false;
 static bool g_preview_paused = false;
 static bool g_preview_controls_visible = true;
+static bool g_preview_controls_manually_hidden = false;
+static bool g_preview_fps_visible = false;
+static bool g_preview_window_revealed = false;
+static bool g_d3d_debug_enabled = false;
+static ID3D12InfoQueue *g_d3d_info_queue = nullptr;
 static UINT64 g_preview_control_activity = 0;
 static uint64_t g_preview_frame_index = 0;
 static uint32_t g_preview_fps = 25;
 static double g_preview_media_start_seconds = 0.0;
 static double g_preview_media_duration_seconds = 0.0;
 static fs::path g_preview_control_file;
+static fs::path g_preview_telemetry_file;
 static RECT g_preview_windowed_rect = {};
-static HWND g_preview_buttons[8] = {};
+static HWND g_preview_buttons[10] = {};
 static HWND g_preview_seekbar = nullptr;
 static HWND g_preview_time_current = nullptr;
 static HWND g_preview_time_total = nullptr;
 static HWND g_preview_controls_window = nullptr;
+static HWND g_preview_fps_window = nullptr;
+static HWND g_preview_fps_text = nullptr;
 static HWND g_preview_backdrop = nullptr;
 static bool g_preview_muted = false;
+static BatchClock::time_point g_preview_fps_window_start = {};
+static uint64_t g_preview_real_window_frames = 0;
+static uint64_t g_preview_presented_window_frames = 0;
+static uint64_t g_preview_real_total_frames = 0;
+static uint64_t g_preview_presented_total_frames = 0;
+static double g_preview_real_fps_live = 0.0;
+static double g_preview_display_fps_live = 0.0;
 static bool g_renodx_lazy = false;   // DLSS 5 add-on is v45+ (per-present rescan, lazy adoption)
 static bool g_streamline_initialized = false;
+static bool g_streamline_fg_requested = false;
 static bool g_streamline_fg_enabled = false;
+static bool g_streamline_fg_activate_after_present = false;
+static sl::DLSSGOptions g_streamline_requested_options{};
 static uint32_t g_streamline_last_present_count = 1;
 static uint64_t g_streamline_frame_index = 0;
+static volatile LONG g_streamline_api_error = S_OK;
+static HRESULT g_streamline_last_present_hresult = S_OK;
 static sl::ViewportHandle g_streamline_viewport(0);
 static ID3D12Device *g_streamline_device_proxy = nullptr;
 static ID3D12CommandQueue *g_streamline_queue_proxy = nullptr;
 static ID3D12CommandQueue *g_streamline_pump_proxy = nullptr;
 static IDXGIFactory2 *g_streamline_factory_proxy = nullptr;
+using PFN_D3D12_SERIALIZE_ROOT_SIGNATURE_ = HRESULT (WINAPI *)(
+    const D3D12_ROOT_SIGNATURE_DESC *, D3D_ROOT_SIGNATURE_VERSION, ID3DBlob **, ID3DBlob **);
+static PFN_D3D12_SERIALIZE_ROOT_SIGNATURE_ g_d3d12_serialize_root_signature = nullptr;
 
 static void Log(const char *fmt, ...);
+static void SuspendStreamlineFrameGeneration(const char *reason);
 
 // Detect the DLSS 5 add-on generation next to this exe: v45+ ('EnableHooks' marker in
 // the binary) rescans every present and adopts missed features lazily, so the warm-up
@@ -376,13 +401,33 @@ enum PreviewControlId
     IDC_SEEK_FORWARD_BIG = 1005,
     IDC_MUTE = 1006,
     IDC_FULLSCREEN = 1007,
-    IDC_CLOSE_PLAYER = 1008
+    IDC_TOGGLE_FPS = 1008,
+    IDC_HIDE_MENU = 1009,
+    IDC_CLOSE_PLAYER = 1010
 };
 
 static double CurrentPreviewSeconds()
 {
     return g_preview_media_start_seconds +
            static_cast<double>(g_preview_frame_index) / std::max(1u, g_preview_fps);
+}
+
+static void DumpD3DDebugMessages(const char *stage)
+{
+    if (g_d3d_info_queue == nullptr) return;
+    const UINT64 count = g_d3d_info_queue->GetNumStoredMessagesAllowedByRetrievalFilter();
+    for (UINT64 i = 0; i < count; ++i)
+    {
+        SIZE_T bytes = 0;
+        if (FAILED(g_d3d_info_queue->GetMessage(i, nullptr, &bytes)) || bytes == 0) continue;
+        std::vector<uint8_t> storage(bytes);
+        auto *message = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
+        if (SUCCEEDED(g_d3d_info_queue->GetMessage(i, message, &bytes)))
+            Log("[d3d12-debug] %s severity=%u id=%u %s", stage,
+                static_cast<unsigned>(message->Severity), static_cast<unsigned>(message->ID),
+                message->pDescription != nullptr ? message->pDescription : "<no description>");
+    }
+    g_d3d_info_queue->ClearStoredMessages();
 }
 
 static std::wstring FormatPreviewTime(double seconds)
@@ -395,6 +440,73 @@ static std::wstring FormatPreviewTime(double seconds)
     if (hours > 0) swprintf_s(text, L"%llu:%02llu:%02llu", hours, minutes, secs);
     else swprintf_s(text, L"%02llu:%02llu", minutes, secs);
     return text;
+}
+
+static void PositionPreviewFps()
+{
+    if (h.hwnd == nullptr || g_preview_fps_window == nullptr) return;
+    POINT origin = {16, 16};
+    ClientToScreen(h.hwnd, &origin);
+    SetWindowPos(g_preview_fps_window, HWND_TOP, origin.x, origin.y, 430, 58,
+                 SWP_NOACTIVATE | (g_preview_window_revealed && g_preview_fps_visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+}
+
+static void ShowPreviewFps(bool show)
+{
+    g_preview_fps_visible = show;
+    if (g_preview_buttons[7] != nullptr)
+        SetWindowTextW(g_preview_buttons[7], show ? L"Скрыть FPS" : L"Показать FPS");
+    if (g_preview_fps_window != nullptr)
+    {
+        if (show) PositionPreviewFps();
+        else ShowWindow(g_preview_fps_window, SW_HIDE);
+    }
+}
+
+static void WritePreviewTelemetry()
+{
+    if (g_preview_telemetry_file.empty()) return;
+    const fs::path temporary = g_preview_telemetry_file.wstring() + L".tmp";
+    char line[512] = {};
+    sprintf_s(line,
+              "media_seconds=%.6f real_fps=%.4f display_fps=%.4f real_frames=%llu presented_frames=%llu generated_frames=%llu\n",
+              CurrentPreviewSeconds(), g_preview_real_fps_live, g_preview_display_fps_live,
+              static_cast<unsigned long long>(g_preview_real_total_frames),
+              static_cast<unsigned long long>(g_preview_presented_total_frames),
+              static_cast<unsigned long long>(g_preview_presented_total_frames - g_preview_real_total_frames));
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) return;
+        output << line;
+        output.flush();
+        if (!output) return;
+    }
+    MoveFileExW(temporary.c_str(), g_preview_telemetry_file.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+}
+
+static void UpdatePreviewPerformance(uint32_t presented_frames)
+{
+    const auto now = BatchClock::now();
+    if (g_preview_fps_window_start.time_since_epoch().count() == 0)
+        g_preview_fps_window_start = now;
+    ++g_preview_real_window_frames;
+    g_preview_presented_window_frames += std::max(1u, presented_frames);
+    ++g_preview_real_total_frames;
+    g_preview_presented_total_frames += std::max(1u, presented_frames);
+    const double elapsed = std::chrono::duration<double>(now - g_preview_fps_window_start).count();
+    if (elapsed < 0.5) return;
+    g_preview_real_fps_live = g_preview_real_window_frames / elapsed;
+    g_preview_display_fps_live = g_preview_presented_window_frames / elapsed;
+    wchar_t label[256] = {};
+    swprintf_s(label, L"Текущий FPS: %.1f   |   Реальный FPS: %.1f\nMFG: %llu сгенерировано",
+               g_preview_display_fps_live, g_preview_real_fps_live,
+               static_cast<unsigned long long>(g_preview_presented_total_frames - g_preview_real_total_frames));
+    if (g_preview_fps_text != nullptr) SetWindowTextW(g_preview_fps_text, label);
+    WritePreviewTelemetry();
+    g_preview_real_window_frames = 0;
+    g_preview_presented_window_frames = 0;
+    g_preview_fps_window_start = now;
 }
 
 static void UpdatePreviewTimeline(uint64_t frame_index)
@@ -415,9 +527,9 @@ static void LayoutPreviewControls(HWND window)
 {
     RECT client = {};
     GetClientRect(window, &client);
-    const int count = 8;
+    const int count = 10;
     const int gap = 6;
-    const int button_width = 98;
+    const int button_width = std::clamp((client.right - 16 - (count - 1) * gap) / count, 68L, 104L);
     const int button_height = 36;
     const int total_width = count * button_width + (count - 1) * gap;
     const int left = std::max(8L, (client.right - total_width) / 2L);
@@ -455,8 +567,9 @@ static void PositionPreviewControls()
     const int height = static_cast<int>(std::min<long>(overlay_height, std::max(72L, client.bottom - client.top)));
     SetWindowPos(g_preview_controls_window, HWND_TOP, origin.x,
                  origin.y + std::max(0L, client.bottom - height), width, height,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                 SWP_NOACTIVATE | (g_preview_window_revealed && g_preview_controls_visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
     LayoutPreviewControls(g_preview_controls_window);
+    PositionPreviewFps();
 }
 
 static void ShowPreviewControls(bool show)
@@ -465,6 +578,11 @@ static void ShowPreviewControls(bool show)
     g_preview_control_activity = GetTickCount64();
     if (g_preview_controls_window != nullptr)
     {
+        if (!g_preview_window_revealed)
+        {
+            ShowWindow(g_preview_controls_window, SW_HIDE);
+            return;
+        }
         if (show)
         {
             PositionPreviewControls();
@@ -476,7 +594,7 @@ static void ShowPreviewControls(bool show)
 
 static void PositionPreviewFullscreen()
 {
-    if (h.hwnd == nullptr) return;
+    if (h.hwnd == nullptr || !g_preview_window_revealed) return;
     MONITORINFO monitor = { sizeof(monitor) };
     GetMonitorInfoW(MonitorFromWindow(h.hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
     const int monitor_width = monitor.rcMonitor.right - monitor.rcMonitor.left;
@@ -504,9 +622,29 @@ static void PositionPreviewFullscreen()
     SetFocus(h.hwnd);
 }
 
+static void RevealPreviewWindow()
+{
+    if (!g_preview_mode || !g_preview_direct || !g_show_window || g_preview_window_revealed || h.hwnd == nullptr)
+        return;
+    // The swap-chain is intentionally created and warmed while hidden.  A
+    // fullscreen black HWND during depth/DLSS prebuffering looks exactly like a
+    // failed MFG run.  Reveal only after a complete real frame has already been
+    // copied and presented, so the first visible compositor surface is video.
+    g_preview_window_revealed = true;
+    if (g_preview_fullscreen) PositionPreviewFullscreen();
+    else ShowWindow(h.hwnd, SW_SHOW);
+    SetForegroundWindow(h.hwnd);
+    SetFocus(h.hwnd);
+    ShowPreviewControls(g_preview_controls_visible);
+    PositionPreviewFps();
+    printf("HOST_PREVIEW_VISIBLE first_frame=1\n");
+    fflush(stdout);
+}
+
 static void TogglePreviewFullscreen(bool fullscreen)
 {
     if (h.hwnd == nullptr || fullscreen == g_preview_fullscreen) return;
+    SuspendStreamlineFrameGeneration("fullscreen transition");
     if (fullscreen)
     {
         GetWindowRect(h.hwnd, &g_preview_windowed_rect);
@@ -525,6 +663,7 @@ static void TogglePreviewFullscreen(bool fullscreen)
     if (g_preview_buttons[6] != nullptr)
         SetWindowTextW(g_preview_buttons[6], fullscreen ? L"В окно" : L"Во весь экран");
     ShowPreviewControls(true);
+    PositionPreviewFps();
 }
 
 static bool WritePreviewControl(const char *command)
@@ -567,6 +706,8 @@ static void RequestPreviewSeekAbsolute(double target)
 static void TogglePreviewPause()
 {
     g_preview_paused = !g_preview_paused;
+    if (g_preview_paused) SuspendStreamlineFrameGeneration("pause");
+    else if (g_streamline_fg_requested) g_streamline_fg_activate_after_present = true;
     if (g_preview_buttons[2] != nullptr)
         SetWindowTextW(g_preview_buttons[2], g_preview_paused ? L"Продолжить" : L"Пауза");
     char command[96] = {};
@@ -593,11 +734,13 @@ static void CreatePreviewControls(HWND parent)
         WS_POPUP | WS_CLIPCHILDREN, 0, 0, 960, 96, parent, nullptr,
         GetModuleHandleW(nullptr), nullptr);
     if (g_preview_controls_window == nullptr) return;
-    const wchar_t *labels[] = { L"-5 мин", L"-10 сек", L"Пауза", L"+10 сек", L"+5 мин", L"Без звука", L"Во весь экран", L"Закрыть" };
+    const wchar_t *labels[] = { L"-5 мин", L"-10 сек", L"Пауза", L"+10 сек", L"+5 мин", L"Без звука",
+                                L"Во весь экран", L"Показать FPS", L"Скрыть меню", L"Закрыть" };
     const int ids[] = { IDC_SEEK_BACK_BIG, IDC_SEEK_BACK, IDC_PAUSE, IDC_SEEK_FORWARD,
-                        IDC_SEEK_FORWARD_BIG, IDC_MUTE, IDC_FULLSCREEN, IDC_CLOSE_PLAYER };
+                        IDC_SEEK_FORWARD_BIG, IDC_MUTE, IDC_FULLSCREEN, IDC_TOGGLE_FPS,
+                        IDC_HIDE_MENU, IDC_CLOSE_PLAYER };
     HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    for (int i = 0; i < 8; ++i)
+    for (int i = 0; i < 10; ++i)
     {
         g_preview_buttons[i] = CreateWindowExW(0, L"BUTTON", labels[i],
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -615,8 +758,23 @@ static void CreatePreviewControls(HWND parent)
     if (g_preview_seekbar != nullptr) SendMessageW(g_preview_seekbar, TBM_SETRANGE, TRUE, MAKELPARAM(0, 10000));
     for (HWND label : {g_preview_time_current, g_preview_time_total})
         if (label != nullptr) SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+    g_preview_fps_window = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"dlss5feedhost", L"FPS",
+        WS_POPUP | WS_CLIPCHILDREN, 0, 0, 430, 58, parent, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    if (g_preview_fps_window != nullptr)
+    {
+        g_preview_fps_text = CreateWindowExW(0, L"STATIC",
+            L"Текущий FPS: —   |   Реальный FPS: —\nMFG: ожидание кадров",
+            WS_CHILD | WS_VISIBLE | SS_LEFT, 12, 8, 406, 44, g_preview_fps_window,
+            nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (g_preview_fps_text != nullptr)
+            SendMessageW(g_preview_fps_text, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    }
     PositionPreviewControls();
     ShowPreviewControls(true);
+    ShowPreviewFps(false);
 }
 
 static LRESULT CALLBACK WndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
@@ -626,11 +784,11 @@ static LRESULT CALLBACK WndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
         switch (m)
         {
         case WM_SIZE:
-            if (w == h.hwnd) PositionPreviewControls();
+            if (w == h.hwnd) { PositionPreviewControls(); PositionPreviewFps(); }
             else if (w == g_preview_controls_window) LayoutPreviewControls(w);
             return 0;
         case WM_MOUSEMOVE:
-            if (!g_preview_controls_visible) ShowPreviewControls(true);
+            if (!g_preview_controls_visible && !g_preview_controls_manually_hidden) ShowPreviewControls(true);
             else g_preview_control_activity = GetTickCount64();
             break;
         case WM_LBUTTONDBLCLK:
@@ -665,7 +823,13 @@ static LRESULT CALLBACK WndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             if (wp == VK_F11) { TogglePreviewFullscreen(!g_preview_fullscreen); return 0; }
-            if (wp == VK_F1 || wp == VK_TAB) { ShowPreviewControls(!g_preview_controls_visible); return 0; }
+            if (wp == VK_F1 || wp == VK_TAB)
+            {
+                g_preview_controls_manually_hidden = g_preview_controls_visible;
+                ShowPreviewControls(!g_preview_controls_visible);
+                return 0;
+            }
+            if (wp == VK_F2) { ShowPreviewFps(!g_preview_fps_visible); return 0; }
             if (wp == VK_SPACE) { TogglePreviewPause(); return 0; }
             if (wp == VK_LEFT) { RequestPreviewSeek(shift ? -300.0 : (control ? -60.0 : -10.0)); return 0; }
             if (wp == VK_RIGHT) { RequestPreviewSeek(shift ? 300.0 : (control ? 60.0 : 10.0)); return 0; }
@@ -690,6 +854,11 @@ static LRESULT CALLBACK WndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
             case IDC_SEEK_FORWARD_BIG: RequestPreviewSeek(300.0); return 0;
             case IDC_MUTE: TogglePreviewMute(); return 0;
             case IDC_FULLSCREEN: TogglePreviewFullscreen(!g_preview_fullscreen); return 0;
+            case IDC_TOGGLE_FPS: ShowPreviewFps(!g_preview_fps_visible); return 0;
+            case IDC_HIDE_MENU:
+                g_preview_controls_manually_hidden = true;
+                ShowPreviewControls(false);
+                return 0;
             case IDC_CLOSE_PLAYER: WritePreviewControl("CLOSE"); return 0;
             default: break;
             }
@@ -872,7 +1041,7 @@ static void InitBanner()
 }
 
 typedef HRESULT (WINAPI *PFN_D3D12CreateDevice_)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
-typedef HRESULT (WINAPI *PFN_CreateDXGIFactory1_)(REFIID, void **);
+typedef HRESULT (WINAPI *PFN_CreateDXGIFactory2_)(UINT, REFIID, void **);
 
 static bool InitStreamline()
 {
@@ -883,7 +1052,15 @@ static bool InitStreamline()
     const sl::Feature features[] = {sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeaturePCL};
     sl::Preferences preferences{};
     preferences.renderAPI = sl::RenderAPI::eD3D12;
-    preferences.flags |= sl::PreferenceFlags::eUseManualHooking;
+    // Preferences default to OTA opt-in.  Assign (rather than OR) the exact
+    // integration flags so the 2.12.129 driver-cache plugins cannot replace
+    // selected members of the portable 2.12.0 runtime.  Mixing those builds
+    // left the async DLSS-G swap-chain in DXGI_ERROR_INVALID_CALL after its
+    // first frame on the RTX 5080.
+    preferences.flags = sl::PreferenceFlags::eUseManualHooking;
+    // ReShade is an injected DXGI layer in this host.  Use an actual factory
+    // proxy instead of patching the third-party factory v-table in place.
+    preferences.flags |= sl::PreferenceFlags::eUseDXGIFactoryProxy;
     preferences.flags |= sl::PreferenceFlags::eUseFrameBasedResourceTagging;
     preferences.featuresToLoad = features;
     preferences.numFeaturesToLoad = static_cast<uint32_t>(_countof(features));
@@ -917,6 +1094,11 @@ static sl::float4x4 StreamlineIdentity()
     return matrix;
 }
 
+static void StreamlineAPIError(const sl::APIError &error)
+{
+    InterlockedExchange(&g_streamline_api_error, static_cast<LONG>(error.hres));
+}
+
 static bool EnableStreamlineFrameGeneration(UINT render_width, UINT render_height,
                                              UINT output_width, UINT output_height,
                                              bool dynamic_mfg,
@@ -926,15 +1108,21 @@ static bool EnableStreamlineFrameGeneration(UINT render_width, UINT render_heigh
     if (!g_streamline_initialized) return false;
     sl::ReflexOptions reflex{};
     reflex.mode = sl::ReflexMode::eLowLatency;
-    reflex.useMarkersToOptimize = true;
+    // This host is a single-stage video renderer.  It cannot overlap a game
+    // simulation stage with render submission like a conventional engine, so
+    // Reflex marker-based queue optimization is not applicable here.  Enabling
+    // it made the driver wait on an uninitialised (zero) internal fence after
+    // the first DLSS-G Present, after which the swap-chain returned
+    // DXGI_ERROR_INVALID_CALL and remained black.
+    reflex.useMarkersToOptimize = false;
     const sl::Result reflex_result = slReflexSetOptions(reflex);
 
     sl::DLSSGOptions options{};
     options.mode = dynamic_mfg ? sl::DLSSGMode::eDynamic : sl::DLSSGMode::eOn;
     options.numFramesToGenerate = std::clamp(generated_frames, 1u, 5u);
     options.dynamicTargetFrameRate = static_cast<float>(dynamic_target_fps);
-    options.flags |= sl::DLSSGFlags::eRetainResourcesWhenOff;
-    options.numBackBuffers = 2;
+    options.onErrorCallback = StreamlineAPIError;
+    options.numBackBuffers = 3;
     options.mvecDepthWidth = render_width;
     options.mvecDepthHeight = render_height;
     options.colorWidth = output_width;
@@ -967,9 +1155,14 @@ static bool EnableStreamlineFrameGeneration(UINT render_width, UINT render_heigh
                 options.numFramesToGenerate, state.numFramesToGenerateMax);
         return false;
     }
+    // Keep FG off until the first complete game frame has valid constants,
+    // depth, motion and HUD-less color.  Enabling it while the realtime guide
+    // queue is still prebuffering lets the Streamline swapchain interpolate
+    // the empty startup Presents, which produces a persistent black surface on
+    // some drivers.
     const sl::Result options_result = slDLSSGSetOptions(g_streamline_viewport, options);
     const sl::Result state_result = slDLSSGGetState(g_streamline_viewport, state, &options);
-    Log("[streamline] Reflex=%d DLSSG options=%d state=%d mode=%s target_fps=%u status=%u min=%u max_generated=%u dynamic=%d vram_mb=%llu",
+    Log("[streamline] Reflex=%d DLSSG staged=%d state=%d mode=%s target_fps=%u status=%u min=%u max_generated=%u dynamic=%d vram_mb=%llu",
         static_cast<int>(reflex_result), static_cast<int>(options_result), static_cast<int>(state_result),
         dynamic_mfg ? "dynamic" : "fixed", dynamic_target_fps,
         static_cast<unsigned>(state.status), state.minWidthOrHeight, state.numFramesToGenerateMax,
@@ -980,18 +1173,61 @@ static bool EnableStreamlineFrameGeneration(UINT render_width, UINT render_heigh
            options.numFramesToGenerate + 1, dynamic_target_fps, state.numFramesToGenerateMax,
            state.bIsDynamicMFGSupported == sl::Boolean::eTrue ? 1u : 0u);
     fflush(stdout);
-    g_streamline_fg_enabled = reflex_result == sl::Result::eOk &&
-                              options_result == sl::Result::eOk && state_result == sl::Result::eOk;
+    g_streamline_requested_options = options;
+    g_streamline_fg_requested = reflex_result == sl::Result::eOk &&
+                                options_result == sl::Result::eOk && state_result == sl::Result::eOk;
+    g_streamline_fg_enabled = g_streamline_fg_requested;
+    g_streamline_fg_activate_after_present = false;
+    return g_streamline_fg_requested;
+}
+
+static bool ActivateStreamlineFrameGeneration()
+{
+    if (!g_streamline_fg_requested || g_streamline_fg_enabled || g_preview_paused) return false;
+    const sl::Result options_result = slDLSSGSetOptions(g_streamline_viewport, g_streamline_requested_options);
+    sl::DLSSGState state{};
+    const sl::Result state_result = slDLSSGGetState(g_streamline_viewport, state, &g_streamline_requested_options);
+    g_streamline_fg_enabled = options_result == sl::Result::eOk && state_result == sl::Result::eOk;
+    g_streamline_fg_activate_after_present = !g_streamline_fg_enabled;
+    Log("[streamline] activation options=%d state=%d enabled=%d status=%u",
+        static_cast<int>(options_result), static_cast<int>(state_result),
+        g_streamline_fg_enabled ? 1 : 0, static_cast<unsigned>(state.status));
+    if (g_streamline_fg_enabled)
+    {
+        printf("HOST_DLSSG_ACTIVE mode=%s target_fps=%.0f\n",
+               g_streamline_requested_options.mode == sl::DLSSGMode::eDynamic ? "dynamic" : "fixed",
+               g_streamline_requested_options.dynamicTargetFrameRate);
+        fflush(stdout);
+    }
     return g_streamline_fg_enabled;
 }
 
-static bool PrepareStreamlineFrame(ID3D12Resource *backbuffer, ID3D12Resource *depth,
+static void SuspendStreamlineFrameGeneration(const char *reason)
+{
+    if (!g_streamline_fg_requested) return;
+    if (g_streamline_fg_enabled)
+    {
+        sl::DLSSGOptions disabled_options = g_streamline_requested_options;
+        disabled_options.mode = sl::DLSSGMode::eOff;
+        const sl::Result result = slDLSSGSetOptions(g_streamline_viewport, disabled_options);
+        Log("[streamline] suspended for %s -> %d", reason, static_cast<int>(result));
+        // SetOptions is consumed by the next Present.  Commit the off state
+        // before changing window mode or holding a paused frame, as required by
+        // the DLSS-G DXGI integration contract.
+        if (result == sl::Result::eOk && h.swap != nullptr) h.swap->Present(1, 0);
+    }
+    g_streamline_fg_enabled = false;
+    g_streamline_fg_activate_after_present = true;
+    g_streamline_last_present_count = 1;
+}
+
+static bool PrepareStreamlineFrame(ID3D12Resource *hudless, ID3D12Resource *depth,
                                    ID3D12Resource *motion, UINT render_width, UINT render_height,
                                    UINT output_width, UINT output_height, bool reset,
                                    sl::FrameToken *&token)
 {
     token = nullptr;
-    if (!g_streamline_fg_enabled || backbuffer == nullptr || depth == nullptr || motion == nullptr)
+    if (!g_streamline_fg_requested || hudless == nullptr || depth == nullptr || motion == nullptr)
         return false;
     const uint32_t frame_index = static_cast<uint32_t>(g_streamline_frame_index++);
     if (slGetNewFrameToken(token, &frame_index) != sl::Result::eOk || token == nullptr) return false;
@@ -1036,23 +1272,42 @@ static bool PrepareStreamlineFrame(ID3D12Resource *backbuffer, ID3D12Resource *d
                                 static_cast<uint32_t>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)};
     sl::Resource motion_resource{sl::ResourceType::eTex2d, motion, nullptr, nullptr,
                                  static_cast<uint32_t>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)};
-    sl::Resource hudless_resource{sl::ResourceType::eTex2d, backbuffer, nullptr, nullptr,
-                                  static_cast<uint32_t>(D3D12_RESOURCE_STATE_PRESENT)};
+    // Final color is intercepted from the proxy swap-chain automatically.  The
+    // HUD-less input must stay a separate scene-color resource; aliasing it to
+    // the proxy backbuffer makes DLSS-G sample its own off-screen presentation
+    // surface and can yield an all-black generated surface on recent drivers.
+    sl::Resource hudless_resource{sl::ResourceType::eTex2d, hudless, nullptr, nullptr,
+                                  static_cast<uint32_t>(D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
     sl::ResourceTag tags[] = {
         sl::ResourceTag{&depth_resource, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent, &render_extent},
         sl::ResourceTag{&motion_resource, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &render_extent},
         sl::ResourceTag{&hudless_resource, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent, &output_extent},
+        // The resource pointer is intentionally null because SL intercepts the
+        // final color itself.  Supplying the explicit full-frame extent avoids
+        // the 310.7 runtime's zero-extent path on proxy swap-chains.
         sl::ResourceTag{nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eValidUntilPresent, &output_extent},
     };
     return slSetTagForFrame(*token, g_streamline_viewport, tags, static_cast<uint32_t>(_countof(tags)), nullptr) ==
            sl::Result::eOk;
 }
 
-static void PresentStreamlineFrame(sl::FrameToken *token)
+static bool PresentStreamlineFrame(sl::FrameToken *token)
 {
     g_streamline_last_present_count = 1;
     if (token != nullptr) slPCLSetMarker(sl::PCLMarker::ePresentStart, *token);
-    h.swap->Present(0, 0);
+    // The display-only player is paced to the source clock and targets a
+    // compositor-backed window.  A tearing-style SyncInterval=0 caused the
+    // DLSS-G async pacer to reject its second Present with
+    // DXGI_ERROR_INVALID_CALL on the RTX 5080.  SyncInterval=1 is also the
+    // correct contract for x2 generation from a 30-fps real-frame stream to a
+    // 60-Hz presentation stream.
+    const HRESULT present_result = h.swap->Present(1, 0);
+    g_streamline_last_present_hresult = present_result;
+    if (FAILED(present_result))
+        Log("[streamline] Present failed 0x%08X", static_cast<unsigned>(present_result));
+    if (g_d3d_debug_enabled) DumpD3DDebugMessages("Present");
+    const HRESULT api_error = static_cast<HRESULT>(InterlockedExchange(&g_streamline_api_error, S_OK));
+    if (FAILED(api_error)) Log("[streamline] asynchronous DXGI callback 0x%08X", static_cast<unsigned>(api_error));
     if (token != nullptr) slPCLSetMarker(sl::PCLMarker::ePresentEnd, *token);
     if (token != nullptr)
     {
@@ -1060,13 +1315,33 @@ static void PresentStreamlineFrame(sl::FrameToken *token)
         if (slDLSSGGetState(g_streamline_viewport, state, nullptr) == sl::Result::eOk)
         {
             g_streamline_last_present_count = std::max(1u, state.numFramesActuallyPresented);
+            // This host reuses its color/depth/motion allocations every frame.
+            // Serialize the next client submission behind DLSS-G's input-copy
+            // completion fence; otherwise frame 0 succeeds and frame 1 races
+            // those same resources, causing PresentBefore to return
+            // DXGI_ERROR_INVALID_CALL and leaving the swap-chain black.
+            if (state.inputsProcessingCompletionFence != nullptr &&
+                state.lastPresentInputsProcessingCompletionFenceValue > 0 && h.fence_event != nullptr)
+            {
+                auto *inputs_fence = static_cast<ID3D12Fence *>(state.inputsProcessingCompletionFence);
+                const UINT64 input_value = state.lastPresentInputsProcessingCompletionFenceValue;
+                if (inputs_fence->GetCompletedValue() < input_value)
+                {
+                    const HRESULT event_result = inputs_fence->SetEventOnCompletion(input_value, h.fence_event);
+                    if (FAILED(event_result) || WaitForSingleObject(h.fence_event, 1000) != WAIT_OBJECT_0)
+                        Log("[streamline] input completion CPU wait failed value=%llu hr=0x%08X",
+                            static_cast<unsigned long long>(input_value), static_cast<unsigned>(event_result));
+                }
+            }
             if (g_streamline_frame_index <= 4 || state.status != sl::DLSSGStatus::eOk)
-                Log("[streamline] frame=%llu status=%u actually_presented=%u max_generated=%u",
+                Log("[streamline] frame=%llu status=%u actually_presented=%u max_generated=%u input_fence=%p input_value=%llu",
                     static_cast<unsigned long long>(g_streamline_frame_index - 1),
                     static_cast<unsigned>(state.status), state.numFramesActuallyPresented,
-                    state.numFramesToGenerateMax);
+                    state.numFramesToGenerateMax, state.inputsProcessingCompletionFence,
+                    static_cast<unsigned long long>(state.lastPresentInputsProcessingCompletionFenceValue));
         }
     }
+    return SUCCEEDED(present_result);
 }
 
 static void PumpPresent()
@@ -1077,8 +1352,14 @@ static void PumpPresent()
         g_preview_controls_visible &&
         g_preview_control_activity != 0 && GetTickCount64() - g_preview_control_activity > 5000)
         ShowPreviewControls(false);
+    // The old ReShade feed host used empty Presents while its add-on warmed up.
+    // A DLSS-G proxy swap-chain must never see those loading Presents: it can
+    // clone an uninitialised fake backbuffer before options/constants/tags exist
+    // and then keep presenting black even though later FG states report eOk.
+    // GPU-direct preview is presented only by SubmitBatchPreview after the
+    // complete real color/depth/motion frame has been submitted.
+    if (g_preview_mode && g_preview_direct) return;
     if (h.swap == nullptr) return;
-    if (g_preview_mode && g_preview_has_frame) return;
 
     // Paint the banner into the backbuffer (ReShade's overlay composites on top at Present).
     if (g_banner != nullptr && g_pump_list != nullptr && g_swap3 != nullptr)
@@ -1188,14 +1469,37 @@ static bool InitDisguise()
 {
     INITCOMMONCONTROLSEX common_controls = { sizeof(common_controls), ICC_BAR_CLASSES };
     InitCommonControlsEx(&common_controls);
-    // ReShade first: the app-directory dxgi.dll IS ReShade x64. Loading it before
-    // d3d12.dll means every later D3D12/DXGI entry point goes through its hooks --
-    // the same order a real game gets, and what lets the DLSS 5 add-on see us.
-    HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
-    HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
+    // ReShade is already loaded before Streamline so the neural-rendering add-on
+    // can register its NGX hooks. Create the native DXGI factory through the
+    // absolute System32 path: a portable build must not ship a renamed copy of
+    // an OS DLL (which can mismatch another user's Windows build).
+    wchar_t system_dir[MAX_PATH] = {};
+    wchar_t system_dxgi[MAX_PATH] = {};
+    wchar_t system_d3d12[MAX_PATH] = {};
+    if (GetSystemDirectoryW(system_dir, static_cast<UINT>(_countof(system_dir))) == 0) return false;
+    swprintf_s(system_dxgi, L"%ls\\dxgi.dll", system_dir);
+    swprintf_s(system_d3d12, L"%ls\\d3d12.dll", system_dir);
+    HMODULE dxgi = LoadLibraryW(system_dxgi);
+    HMODULE d3d12 = LoadLibraryW(system_d3d12);
     auto create_device  = d3d12 ? reinterpret_cast<PFN_D3D12CreateDevice_>(GetProcAddress(d3d12, "D3D12CreateDevice")) : nullptr;
-    auto create_factory = dxgi ? reinterpret_cast<PFN_CreateDXGIFactory1_>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
-    if (create_device == nullptr || create_factory == nullptr) { Log("[host] dxgi/d3d12 exports missing"); return false; }
+    auto create_factory = dxgi ? reinterpret_cast<PFN_CreateDXGIFactory2_>(GetProcAddress(dxgi, "CreateDXGIFactory2")) : nullptr;
+    g_d3d12_serialize_root_signature = d3d12 ?
+        reinterpret_cast<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE_>(GetProcAddress(d3d12, "D3D12SerializeRootSignature")) : nullptr;
+    if (create_device == nullptr || create_factory == nullptr || g_d3d12_serialize_root_signature == nullptr)
+    { Log("[host] dxgi/d3d12 exports missing"); return false; }
+    wchar_t debug_value[8] = {};
+    if (GetEnvironmentVariableW(L"DLSS5_D3D_DEBUG", debug_value, static_cast<DWORD>(_countof(debug_value))) > 0)
+    {
+        auto get_debug = reinterpret_cast<PFN_D3D12_GET_DEBUG_INTERFACE>(GetProcAddress(d3d12, "D3D12GetDebugInterface"));
+        ID3D12Debug *debug = nullptr;
+        if (get_debug != nullptr && SUCCEEDED(get_debug(__uuidof(ID3D12Debug), reinterpret_cast<void **>(&debug))) && debug != nullptr)
+        {
+            debug->EnableDebugLayer();
+            debug->Release();
+            g_d3d_debug_enabled = true;
+            Log("[d3d12-debug] debug layer enabled");
+        }
+    }
 
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(dxgi, exe, MAX_PATH);
@@ -1235,46 +1539,56 @@ static bool InitDisguise()
                              nullptr, nullptr, wc.hInstance, nullptr);
     if (h.hwnd == nullptr) { Log("[host] window creation failed"); return false; }
     if (g_preview_mode && g_preview_direct) CreatePreviewControls(h.hwnd);
-    if (g_preview_mode && g_preview_direct && g_preview_fullscreen) PositionPreviewFullscreen();
-    if (g_show_window)
+    if (g_show_window && !(g_preview_mode && g_preview_direct))
     {
-        ShowWindow(h.hwnd, g_preview_mode && g_preview_direct ? SW_SHOW : SW_SHOWNOACTIVATE);
-        if (g_preview_mode && g_preview_direct)
-        {
-            SetForegroundWindow(h.hwnd);
-            SetFocus(h.hwnd);
-        }
+        ShowWindow(h.hwnd, SW_SHOWNOACTIVATE);
     }
 
-    HRESULT hr = create_device(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
-                               reinterpret_cast<void **>(&h.dev));
+    HRESULT hr = S_OK;
+    ID3D12Device *queue_device = nullptr;
+    if (g_streamline_initialized)
+    {
+        // sl.interposer.lib is linked into this executable, therefore the
+        // imported creation entry point returns the SL proxy.  Keep that proxy
+        // only for hooked calls and use its native interface everywhere else.
+        hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
+                               reinterpret_cast<void **>(&g_streamline_device_proxy));
+        if (SUCCEEDED(hr) && g_streamline_device_proxy != nullptr)
+            slGetNativeInterface(g_streamline_device_proxy, reinterpret_cast<void **>(&h.dev));
+        queue_device = g_streamline_device_proxy;
+    }
+    else
+    {
+        hr = create_device(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
+                           reinterpret_cast<void **>(&h.dev));
+        queue_device = h.dev;
+    }
     if (FAILED(hr)) { Log("[host] D3D12CreateDevice failed 0x%08X", hr); return false; }
+    if (h.dev == nullptr || queue_device == nullptr) { Log("[host] D3D12 device proxy/native split failed"); return false; }
+    if (g_d3d_debug_enabled)
+    {
+        h.dev->QueryInterface(__uuidof(ID3D12InfoQueue), reinterpret_cast<void **>(&g_d3d_info_queue));
+        DumpD3DDebugMessages("CreateDevice");
+    }
 
-    ID3D12Device *queue_device = h.dev;
     if (g_streamline_initialized)
     {
         const sl::Result set_device = slSetD3DDevice(h.dev);
         Log("[streamline] slSetD3DDevice -> %d", static_cast<int>(set_device));
-        g_streamline_device_proxy = h.dev;
-        if (set_device != sl::Result::eOk ||
-            !UpgradeStreamlineInterface(reinterpret_cast<void **>(&g_streamline_device_proxy), "ID3D12Device"))
-            return false;
-        queue_device = g_streamline_device_proxy;
+        if (set_device != sl::Result::eOk) return false;
     }
 
     D3D12_COMMAND_QUEUE_DESC qd = {};
     qd.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-    ID3D12CommandQueue *pump_created = nullptr;
-    queue_device->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue), reinterpret_cast<void **>(&pump_created));
-    qd.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+    // Use one host graphics queue for both rendering and presentation.  The
+    // DLSS-G plugin creates its own asynchronous presentation queue.  Creating
+    // two indistinguishable host graphics queues before the swap-chain made
+    // the manual-hooking path associate the swap-chain with the wrong queue.
     ID3D12CommandQueue *queue_created = nullptr;
     HRESULT queue_hr = queue_device->CreateCommandQueue(
         &qd, __uuidof(ID3D12CommandQueue), reinterpret_cast<void **>(&queue_created));
-    if (FAILED(queue_hr) || queue_created == nullptr)
-    {
-        qd.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-        queue_device->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue), reinterpret_cast<void **>(&queue_created));
-    }
+    ID3D12CommandQueue *pump_created = queue_created;
+    if (pump_created != nullptr) pump_created->AddRef();
     if (g_streamline_initialized)
     {
         g_streamline_pump_proxy = pump_created;
@@ -1292,14 +1606,15 @@ static bool InitDisguise()
     if (h.pump_queue == nullptr || h.queue == nullptr) { Log("[host] queue creation failed"); return false; }
 
     IDXGIFactory2 *factory = nullptr;
-    hr = create_factory(__uuidof(IDXGIFactory2), reinterpret_cast<void **>(&factory));
-    if (FAILED(hr)) { Log("[host] CreateDXGIFactory1 failed 0x%08X", hr); return false; }
+    if (g_streamline_initialized)
+        hr = CreateDXGIFactory2(0, __uuidof(IDXGIFactory2), reinterpret_cast<void **>(&factory));
+    else
+        hr = create_factory(0, __uuidof(IDXGIFactory2), reinterpret_cast<void **>(&factory));
+    if (FAILED(hr)) { Log("[host] CreateDXGIFactory2 failed 0x%08X", hr); return false; }
     IDXGIFactory2 *swap_factory = factory;
     if (g_streamline_initialized)
     {
         g_streamline_factory_proxy = factory;
-        if (!UpgradeStreamlineInterface(reinterpret_cast<void **>(&g_streamline_factory_proxy), "IDXGIFactory2"))
-            return false;
         swap_factory = g_streamline_factory_proxy;
     }
 
@@ -1308,17 +1623,32 @@ static bool InitDisguise()
     sd.Height           = g_preview_mode ? g_preview_height : 540;
     sd.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.SampleDesc.Count = 1;
-    sd.BufferUsage      = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.BufferCount      = 2;
+    // DLSS-G samples the intercepted final color.  The reference Streamline
+    // D3D12 swap-chain enables both usages; RT-only buffers make the plugin's
+    // first Present fail with DXGI_ERROR_INVALID_CALL and leave a black surface.
+    sd.BufferUsage      = DXGI_USAGE_SHADER_INPUT | DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.BufferCount      = 3;
     sd.SwapEffect       = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    sd.Flags            = 0;
     ID3D12CommandQueue *swap_queue = nullptr;
     if (g_streamline_initialized)
         swap_queue = g_preview_direct ? g_streamline_queue_proxy : g_streamline_pump_proxy;
     else
         swap_queue = g_preview_direct ? h.queue : h.pump_queue;
-    hr = swap_factory->CreateSwapChainForHwnd(swap_queue, h.hwnd, &sd, nullptr, nullptr, &h.swap);
+    DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen_desc = {};
+    fullscreen_desc.Windowed = TRUE;
+    hr = swap_factory->CreateSwapChainForHwnd(swap_queue, h.hwnd, &sd, &fullscreen_desc, nullptr, &h.swap);
     if (!g_streamline_initialized) factory->Release();
     if (FAILED(hr)) { Log("[host] CreateSwapChainForHwnd failed 0x%08X", hr); return false; }
+    if (g_streamline_initialized)
+    {
+        IDXGISwapChain1 *native_swap = nullptr;
+        const sl::Result native_swap_result = slGetNativeInterface(
+            h.swap, reinterpret_cast<void **>(&native_swap));
+        Log("[streamline] native swap-chain -> %d (%p)",
+            static_cast<int>(native_swap_result), native_swap);
+        if (native_swap != nullptr) native_swap->Release();
+    }
     Log("[host] disguise up: hidden window + D3D12 swapchain (ReShade should be attached now)");
 
     for (int i = 0; i < 60; ++i) PumpPresent();   // let ReShade + the DLSS 5 add-on settle
@@ -1336,7 +1666,12 @@ static bool InitDisguise()
     if (h.list == nullptr || h.fence == nullptr) { Log("[host] list/fence creation failed"); return false; }
 
     if (g_preview_mode && g_preview_direct)
+    {
         h.swap->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void **>(&g_swap3));
+        // Let the DLSS-G proxy own flip-queue throttling.  Supplying the
+        // waitable-object flag here disables Streamline's own throttler and is
+        // not how NVIDIA's D3D12 sample creates its three-buffer swap-chain.
+    }
     else if (g_preview_mode)
         InitPumpObjects();
     else if (g_show_window) InitBanner();
@@ -1623,7 +1958,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
     signature.NumStaticSamplers = 1;
     signature.pStaticSamplers = &sampler;
     ID3DBlob *serialized = nullptr;
-    hr = D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors);
+    hr = g_d3d12_serialize_root_signature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors);
     if (FAILED(hr) || FAILED(h.dev->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
                                                        __uuidof(ID3D12RootSignature), reinterpret_cast<void **>(&fg.root))))
     {
@@ -2024,16 +2359,12 @@ static UINT64 SubmitBatchReadback(ID3D12Resource *output, LinearTransfer &readba
 // Display-only mode keeps the complete delivery path on the GPU.  The normal
 // recording path must read RGB back for NVENC, but a live viewer can copy the
 // Feature 18 output texture directly to the swapchain backbuffer.
-static UINT64 SubmitBatchPreview(ID3D12Resource *output, ID3D12Resource *depth = nullptr,
-                                 ID3D12Resource *motion = nullptr, UINT render_width = 0,
-                                 UINT render_height = 0, bool reset = false)
+static UINT64 CopyPreviewToSwapChain(ID3D12Resource *output, IDXGISwapChain3 *swap)
 {
-    MSG msg;
-    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
-    if (!g_preview_direct || h.swap == nullptr || g_swap3 == nullptr) return 0;
+    if (output == nullptr || swap == nullptr) return 0;
     ID3D12Resource *bb = nullptr;
-    if (FAILED(g_swap3->GetBuffer(g_swap3->GetCurrentBackBufferIndex(), __uuidof(ID3D12Resource),
-                                  reinterpret_cast<void **>(&bb))) || bb == nullptr)
+    if (FAILED(swap->GetBuffer(swap->GetCurrentBackBufferIndex(), __uuidof(ID3D12Resource),
+                               reinterpret_cast<void **>(&bb))) || bb == nullptr)
         return 0;
     if (!BeginCommands()) { bb->Release(); return 0; }
     Transition(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -2042,15 +2373,43 @@ static UINT64 SubmitBatchPreview(ID3D12Resource *output, ID3D12Resource *depth =
     Transition(bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     Transition(output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     const UINT64 fence = EndCommands();
-    sl::FrameToken *streamline_token = nullptr;
-    if (g_streamline_fg_enabled)
-        PrepareStreamlineFrame(bb, depth, motion, render_width, render_height,
-                               g_preview_width, g_preview_height, reset, streamline_token);
     bb->Release();
-    if (g_streamline_fg_enabled) PresentStreamlineFrame(streamline_token);
-    else h.swap->Present(0, 0);
-    g_preview_has_frame = true;
     return fence;
+}
+
+static UINT64 SubmitBatchPreview(ID3D12Resource *output, ID3D12Resource *depth = nullptr,
+                                 ID3D12Resource *motion = nullptr, UINT render_width = 0,
+                                 UINT render_height = 0, bool reset = false)
+{
+    MSG msg;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    if (!g_preview_direct || h.swap == nullptr || g_swap3 == nullptr) return 0;
+
+    const UINT64 fence = CopyPreviewToSwapChain(output, g_swap3);
+    if (fence == 0) return 0;
+    sl::FrameToken *streamline_token = nullptr;
+    const bool streamline_frame_ready = g_streamline_fg_requested &&
+        PrepareStreamlineFrame(output, depth, motion, render_width, render_height,
+                               g_preview_width, g_preview_height, reset, streamline_token);
+    if (g_streamline_fg_enabled && !streamline_frame_ready)
+        SuspendStreamlineFrameGeneration("invalid frame resources");
+    const bool present_ok = streamline_frame_ready ? PresentStreamlineFrame(streamline_token)
+                                                   : SUCCEEDED(h.swap->Present(0, 0));
+    if (streamline_frame_ready && !present_ok)
+    {
+        fprintf(stderr,
+                "HOST_DLSSG_FALLBACK reason=present_failed hresult=0x%08X backend=motion_gpu\n",
+                static_cast<unsigned>(g_streamline_last_present_hresult));
+        fflush(stderr);
+    }
+    // Never expose an empty/failed swap-chain. If DLSS-G rejects a present the
+    // parent player stays hidden and restarts through the MotionGPU fallback,
+    // instead of leaving a full-screen black window in front of the desktop.
+    if (present_ok) RevealPreviewWindow();
+    if (streamline_frame_ready && present_ok && g_streamline_fg_activate_after_present)
+        ActivateStreamlineFrameGeneration();
+    g_preview_has_frame = present_ok;
+    return present_ok ? fence : 0;
 }
 
 static bool CollectBatchOutput(
@@ -2577,7 +2936,7 @@ static int RunBatch(const BatchOptions &o)
             if (!UploadBatchInputs(color, depth, mv, bias, output_tex,
                                    color_up[slot_index], depth_up[slot_index], mv_up[slot_index], bias_up[slot_index],
                                    current.rgba, current.depth, current.motion, current.bias,
-                                   o.width, o.height, frame == 0))
+                                   o.width, o.height, frame == 0 && !o.fast_start))
                 throw std::runtime_error("GPU input upload failed");
             upload_ms += ElapsedMs(phase_begin);
             const int reset = (frame == 0 || current.reset || o.reset_every_frame) ? 1 : 0;
@@ -2643,6 +3002,7 @@ static int RunBatch(const BatchOptions &o)
                 readback_fence = SubmitBatchPreview(output_tex, depth, mv, o.width, o.height, reset != 0);
                 const auto presented_at = BatchClock::now();
                 UpdatePreviewTimeline(frame);
+                UpdatePreviewPerformance(g_streamline_fg_requested ? g_streamline_last_present_count : 1u);
                 if (preview_presented == 0)
                 {
                     preview_first_present = presented_at;
@@ -2651,8 +3011,8 @@ static int RunBatch(const BatchOptions &o)
                     WritePreviewControl(command);
                 }
                 preview_last_present = presented_at;
-                preview_presented += g_streamline_fg_enabled ? g_streamline_last_present_count : 1u;
-                if (g_streamline_fg_enabled)
+                preview_presented += g_streamline_fg_requested ? g_streamline_last_present_count : 1u;
+                if (g_streamline_fg_requested)
                     streamline_max_presented_per_render = std::max(streamline_max_presented_per_render,
                                                                    g_streamline_last_present_count);
                 if (o.motion_frame_generation && CopyMotionFrameHistory(frame_generation, output_tex) == 0)
@@ -3072,13 +3432,14 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--dlssg-generated-frames") == 0 && i + 1 < argc) batch.nvidia_generated_frames = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
         else if (strcmp(argv[i], "--dlssg-dynamic-target") == 0 && i + 1 < argc) batch.nvidia_dynamic_target_fps = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
         else if (strcmp(argv[i], "--control-file") == 0 && i + 1 < argc) batch.control_file = argv[++i];
+        else if (strcmp(argv[i], "--telemetry-file") == 0 && i + 1 < argc) batch.telemetry_file = argv[++i];
         else if (strcmp(argv[i], "--media-start-seconds") == 0 && i + 1 < argc) batch.media_start_seconds = strtod(argv[++i], nullptr);
         else if (strcmp(argv[i], "--media-duration-seconds") == 0 && i + 1 < argc) batch.media_duration_seconds = strtod(argv[++i], nullptr);
         else pid = static_cast<DWORD>(strtoul(argv[i], nullptr, 10));
     }
     if (!test && !batch.enabled && pid == 0)
     {
-        Log("usage: dlss5-video-host --test | --batch [--input in.rgb24 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--media-start-seconds N]");
+        Log("usage: dlss5-video-host --test | --batch [--input in.rgb24 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--telemetry-file path] [--media-start-seconds N]");
         return 1;
     }
     g_show_window = (!test && !batch.enabled && !hide) || batch.preview;
@@ -3086,6 +3447,7 @@ int main(int argc, char **argv)
     g_preview_direct = batch.preview_only;
     g_preview_fullscreen = batch.fullscreen;
     g_preview_control_file = batch.control_file;
+    g_preview_telemetry_file = batch.telemetry_file;
     g_preview_media_start_seconds = batch.media_start_seconds;
     g_preview_media_duration_seconds = batch.media_duration_seconds;
     g_preview_fps = std::max(1u, batch.fps);
@@ -3096,12 +3458,9 @@ int main(int argc, char **argv)
     }
 
     DetectRenodxAddon();   // must run BEFORE ReShade loads, so an EnableHooks write is read
-
     if (batch.nvidia_frame_generation)
     {
-        // Register the RenoDX add-on before Streamline loads its own NGX modules.
-        // No D3D/DXGI object is created here, so slInit still precedes every
-        // manual-hooked API while Feature 18 keeps its first chance to detour NGX.
+        // Register the neural-rendering add-on before Streamline loads NGX.
         if (LoadLibraryW(L"dxgi.dll") == nullptr || !InitStreamline())
         {
             Log("[streamline] NVIDIA DLSS Frame Generation is unavailable");

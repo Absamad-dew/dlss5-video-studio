@@ -141,7 +141,7 @@ $Xaml = @'
             <StackPanel>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                 <StackPanel><TextBlock Text="Профиль realtime"/><ComboBox x:Name="RealtimeQualityCombo"><ComboBoxItem Content="Ultra Fast" Tag="UltraFast"/><ComboBoxItem Content="Fast" Tag="Fast"/><ComboBoxItem Content="Medium" Tag="Medium"/><ComboBoxItem Content="Heavy" Tag="Heavy"/><ComboBoxItem Content="Maximum" Tag="Maximum"/><ComboBoxItem Content="Вручную" Tag="Custom"/></ComboBox></StackPanel>
-                <StackPanel Grid.Column="2"><TextBlock Text="Окно плеера"/><CheckBox x:Name="RealtimeFullscreenCheck" Content="Сразу на весь экран" IsChecked="True"/><CheckBox x:Name="RealtimeAudioCheck" Content="Синхронный звук" IsChecked="True"/></StackPanel>
+                <StackPanel Grid.Column="2"><TextBlock Text="Окно плеера"/><CheckBox x:Name="RealtimeFullscreenCheck" Content="Сразу на весь экран" IsChecked="True"/><CheckBox x:Name="RealtimeAudioCheck" Content="Синхронный звук" IsChecked="True"/><TextBlock Text="F1: меню · F2: текущий/реальный FPS" Foreground="#7F91AA" Margin="0,3,0,0"/></StackPanel>
               </Grid>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                 <StackPanel><TextBlock Text="Генерация кадров"/><ComboBox x:Name="FrameGenerationCombo"><ComboBoxItem Content="Dynamic MFG · цель по FPS" Tag="NvidiaDynamicMFG"/><ComboBoxItem Content="NVIDIA DLSS-G · x2" Tag="NvidiaDLSSGx2"/><ComboBoxItem Content="NVIDIA MFG · x3" Tag="NvidiaMFGx3"/><ComboBoxItem Content="NVIDIA MFG · x4" Tag="NvidiaMFGx4"/><ComboBoxItem Content="GPU Motion · x2 fallback" Tag="MotionGPU"/><ComboBoxItem Content="Без генерации" Tag="Off"/><ComboBoxItem Content="Blend · только совместимость" Tag="CompatibilityBlend"/></ComboBox></StackPanel>
@@ -816,7 +816,7 @@ $HelpText=[ordered]@{
     FrameGenerationCombo='Dynamic MFG целится в выбранный FPS; фиксированный MFG создаёт 2/3/4 кадра на один базовый. Поддержка проверяется через официальный Streamline API.'
     RealtimeTargetFpsCombo='Цель Dynamic MFG. 0 использует частоту текущего монитора; 72/90/120 полезны для шлемов и высокочастотных дисплеев.'
     RealtimeFullscreenCheck='Открывает GPU-direct плеер сразу без рамки на весь экран. F11 и двойной щелчок переключают режим во время просмотра.'
-    RealtimeAudioCheck='Запускает отдельный синхронизированный аудиопоток. Отключите только при диагностике задержки или если нужен немой просмотр.'
+    RealtimeAudioCheck='Аудиопоток сверяется с телеметрией самого видеоплеера. При заметном дрейфе или зависании он автоматически удерживается и перезапускается с текущей позиции.'
     RealtimeVolumeSlider='Громкость отдельного realtime-аудиопотока. На обработку кадров и запись не влияет.'
     RealtimeBufferSlider='Сколько секунд полностью подготовленных кадров накопить до старта. Больший запас лучше скрывает пики нагрузки, но увеличивает задержку запуска и расход SSD.'
     RealtimeChunkSlider='Размер независимого блока кадров. Малые блоки уменьшают задержку, большие снижают служебные расходы. Авто выбирается по VRAM и разрешению.'

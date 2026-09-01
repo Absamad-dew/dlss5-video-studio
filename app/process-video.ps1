@@ -680,6 +680,7 @@ try {
         ShowScreenshotMessage = '0'
         ShowForceLoadEffectsButton = '0'
         ShowPresetName = '0'
+        ShowPresetTransitionMessage = '0'
         ShowFPS = '0'
         ShowFrameTime = '0'
         ShowClock = '0'
@@ -738,7 +739,10 @@ try {
     if (-not $UseExternalUpscaler) { $HostArgs += '--fast-start' }
     if ($IsPreviewOnly) {
         $HostArgs += @('--preview-only','--media-start-seconds',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.######}',$StartSeconds)),'--media-duration-seconds',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.######}',$Duration)))
-        if ($RealtimeControlPath) { $HostArgs += @('--control-file',[IO.Path]::GetFullPath($RealtimeControlPath)) }
+        if ($RealtimeControlPath) {
+            $ResolvedControlPath = [IO.Path]::GetFullPath($RealtimeControlPath)
+            $HostArgs += @('--control-file',$ResolvedControlPath,'--telemetry-file',($ResolvedControlPath + '.telemetry'))
+        }
         if ($RealtimeFullscreen) { $HostArgs += '--fullscreen' }
         if ($RealtimeFrameGeneration -eq 'MotionGPU') { $HostArgs += '--frame-generation-motion' }
         if ($UseNvidiaDlssg) {

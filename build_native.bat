@@ -25,7 +25,7 @@ cl /nologo /std:c++20 /utf-8 /O2 /openmp /EHsc /W3 /MD /I"%SDK%\include" /I"%SL%
   /Fe:"%OUT%\dlss5-video-host.exe" ^
   /link "%SDK%\lib\Windows_x86_64\x64\nvsdk_ngx_d.lib" ^
   "%SL%\lib\x64\sl.interposer.lib" ^
-  version.lib kernel32.lib user32.lib gdi32.lib advapi32.lib ole32.lib comctl32.lib d3dcompiler.lib d3d12.lib
+  version.lib kernel32.lib user32.lib gdi32.lib advapi32.lib ole32.lib comctl32.lib d3dcompiler.lib
 set "RESULT=%ERRORLEVEL%"
 popd
 exit /b %RESULT%

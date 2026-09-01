@@ -1,2 +1,2 @@
-13.0.0-universal-profiles-dynamic-mfg-vr-fps-ui
-Universal Ultra Fast/Fast/Medium/Heavy/Maximum modes; Streamline-verified fixed and Dynamic MFG; 72/90/120 FPS VR output; URL source-resolution selection; optional preview pane; expanded explanations and hardware-adaptive scheduling.
+13.2.0-dlssg-vsync-avsync-player-osd
+Stable vsynced DLSS-G/MFG presentation; local Streamline runtime pinning; automatic non-black fallback; telemetry-locked audio; hideable controls and separate displayed/real FPS.

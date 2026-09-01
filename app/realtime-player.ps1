@@ -92,6 +92,8 @@ $ControlPath = [IO.Path]::GetFullPath($ControlPath)
 $ControlDirectory = [IO.Path]::GetDirectoryName($ControlPath)
 New-Item -ItemType Directory -Force -Path $ControlDirectory | Out-Null
 [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
+$TelemetryPath = $ControlPath + '.telemetry'
+if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
 
 $ResolvedInput = $InputVideo
 $HeadersPath = $null
@@ -121,6 +123,19 @@ $CurrentStart = [math]::Max(0.0,[math]::Min($Duration-0.05,$StartSeconds))
 $AudioProcess = $null
 $AudioMuted = $false
 $VideoPaused = $false
+# ffplay's process/decoder start is consistently about 1.24 s on both tested
+# machines.  Seek the audio clock ahead by that measured startup latency so
+# the first audible sample lines up with the already-presented video frame;
+# telemetry correction below still removes residual drift and handles stalls.
+$AudioStartupCompensationSeconds = 1.24
+$AudioClockMediaStart = 0.0
+$AudioClockWallStart = 0.0
+$LastAudioCorrectionWall = 0.0
+$LastTelemetryWall = 0.0
+$LastTelemetryFrame = -1L
+$AudioNeedsResync = $false
+$VideoPlaybackStarted = $false
+$LatestVideoPosition = $CurrentStart
 $InputHeaderBlock = $null
 if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) {
     $HeaderObject = Get-Content -LiteralPath $HeadersPath -Raw | ConvertFrom-Json
@@ -136,19 +151,54 @@ function Stop-Audio {
     }
 }
 
+function Get-MonotonicSeconds {
+    return [Diagnostics.Stopwatch]::GetTimestamp() / [double][Diagnostics.Stopwatch]::Frequency
+}
+
 function Start-Audio([double] $Position) {
     if (-not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused) { return }
     Stop-Audio
+    $SeekPosition = [math]::Max(0.0,[math]::Min($Duration-0.01,$Position + $AudioStartupCompensationSeconds))
     $AudioArgs=@('-nodisp','-autoexit','-loglevel','error','-volume',$Volume)
     if($InputTlsNoVerify){$AudioArgs+=@('-tls_verify','0')}
     if($InputHeaderBlock){$AudioArgs+=@('-headers',$InputHeaderBlock)}
-    $AudioArgs+=@('-ss',([string]::Format($Invariant,'{0:0.######}',$Position)),'-i',$ResolvedInput,'-vn','-sn')
+    $AudioArgs+=@('-ss',([string]::Format($Invariant,'{0:0.######}',$SeekPosition)),'-i',$ResolvedInput,
+        '-vn','-sn','-sync','audio','-af','aresample=async=1:min_hard_comp=0.100:first_pts=0')
     $Psi=[Diagnostics.ProcessStartInfo]::new();$Psi.FileName=$Ffplay
     $Psi.Arguments=(($AudioArgs|ForEach-Object{Quote-Argument([string]$_)})-join' ')
     $Psi.WorkingDirectory=$Root;$Psi.UseShellExecute=$false;$Psi.CreateNoWindow=$true
     $Psi.RedirectStandardOutput=$false;$Psi.RedirectStandardError=$false
     $script:AudioProcess=[Diagnostics.Process]::new();$script:AudioProcess.StartInfo=$Psi
-    if(-not $script:AudioProcess.Start()){$script:AudioProcess=$null}
+    if(-not $script:AudioProcess.Start()){$script:AudioProcess=$null;return}
+    $script:AudioClockMediaStart=$SeekPosition
+    $script:AudioClockWallStart=Get-MonotonicSeconds
+    $script:LastAudioCorrectionWall=$script:AudioClockWallStart
+    $script:AudioNeedsResync=$false
+}
+
+function Update-AudioClockFromTelemetry {
+    if (-not (Test-Path -LiteralPath $TelemetryPath -PathType Leaf)) { return }
+    try { $Telemetry = [IO.File]::ReadAllText($TelemetryPath,$Utf8NoBom).Trim() } catch { return }
+    if ($Telemetry -notmatch 'media_seconds=(?<p>[0-9.]+)\s+real_fps=(?<r>[0-9.]+)\s+display_fps=(?<d>[0-9.]+)\s+real_frames=(?<f>[0-9]+)') { return }
+    $Frame = [long]$Matches.f
+    if ($Frame -eq $script:LastTelemetryFrame) { return }
+    $Position = [double]::Parse($Matches.p,$Invariant)
+    $Now = Get-MonotonicSeconds
+    $script:LastTelemetryFrame = $Frame
+    $script:LastTelemetryWall = $Now
+    $script:LatestVideoPosition = $Position
+    if (-not $script:VideoPlaybackStarted -or -not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused) { return }
+    if ($script:AudioNeedsResync -or -not $script:AudioProcess -or $script:AudioProcess.HasExited) {
+        Start-Audio $Position
+        Write-Output ('STUDIO_PLAYER_AVSYNC action=resume position={0:0.###}' -f $Position)
+        return
+    }
+    $EstimatedAudioPosition = $script:AudioClockMediaStart + ($Now - $script:AudioClockWallStart)
+    $Drift = $Position - $EstimatedAudioPosition
+    if ([math]::Abs($Drift) -ge 0.35 -and ($Now - $script:LastAudioCorrectionWall) -ge 2.0) {
+        Start-Audio $Position
+        Write-Output ('STUDIO_PLAYER_AVSYNC action=correct drift_ms={0:0} position={1:0.###}' -f ($Drift*1000.0),$Position)
+    }
 }
 
 Write-Output ('STUDIO_PLAYER_READY ' + (@{
@@ -161,6 +211,9 @@ Write-Output ('STUDIO_PLAYER_READY ' + (@{
 
 while ($true) {
     [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
+    if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
+    $script:LastTelemetryWall=0.0;$script:LastTelemetryFrame=-1L;$script:AudioNeedsResync=$false
+    $script:VideoPlaybackStarted=$false;$script:LatestVideoPosition=$CurrentStart
     $ChildArgs = @(
         '-NoProfile','-ExecutionPolicy','Bypass','-File',$Runner,
         '-InputVideo',$ResolvedInput,'-ConfigPath',$ConfigPath,
@@ -207,20 +260,40 @@ while ($true) {
     $ActiveWork = $null
     $Action = $null
     $Target = $CurrentStart
+    $DlssgFallbackRequested = $false
 
     while ($true) {
-        while ($Stdout -and $Stdout.IsCompleted) {
+        $StdoutLines = 0
+        while ($Stdout -and $Stdout.IsCompleted -and $StdoutLines -lt 16) {
             $Line = $Stdout.Result
             if ($null -eq $Line) { $Stdout = $null; break }
             Write-Output $Line
             if ($Line -match '^STUDIO_WORK (?<p>.+)$') { $ActiveWork = $Matches.p }
+            if ($Line -match 'HOST_DLSSG_FALLBACK') { $DlssgFallbackRequested = $true }
             $Stdout = $Child.StandardOutput.ReadLineAsync()
+            ++$StdoutLines
         }
-        while ($Stderr -and $Stderr.IsCompleted) {
+        $StderrLines = 0
+        while ($Stderr -and $Stderr.IsCompleted -and $StderrLines -lt 16) {
             $Line = $Stderr.Result
             if ($null -eq $Line) { $Stderr = $null; break }
             Write-Output ('PLAYER_CHILD_ERROR: ' + $Line)
+            if ($Line -match 'HOST_DLSSG_FALLBACK') { $DlssgFallbackRequested = $true }
             $Stderr = $Child.StandardError.ReadLineAsync()
+            ++$StderrLines
+        }
+
+        Update-AudioClockFromTelemetry
+        $ClockNow = Get-MonotonicSeconds
+        if ($script:VideoPlaybackStarted -and -not $Child.HasExited -and
+            $EnableAudio -and -not $script:AudioMuted -and -not $script:VideoPaused -and
+            $script:AudioProcess -and -not $script:AudioProcess.HasExited -and
+            $script:LastTelemetryWall -gt 0 -and ($ClockNow-$script:LastTelemetryWall) -gt 1.25 -and
+            $script:LatestVideoPosition -lt ($Duration-1.0) -and
+            -not $script:AudioNeedsResync) {
+            Stop-Audio
+            $script:AudioNeedsResync=$true
+            Write-Output 'STUDIO_PLAYER_AVSYNC action=hold reason=video-stall'
         }
 
         try {
@@ -236,9 +309,15 @@ while ($true) {
                 } elseif ($Command -match '^PLAYING\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
                     $script:VideoPaused=$false
                     $Position=[double]::Parse($Matches.s,$Invariant)
-                    Start-Audio $Position
+                    $script:VideoPlaybackStarted=$true
+                    $AudioPosition=$Position
+                    if ($script:LatestVideoPosition -ge $Position -and ($script:LatestVideoPosition-$Position) -lt 5.0) {
+                        $AudioPosition=$script:LatestVideoPosition
+                    }
+                    Start-Audio $AudioPosition
                     Write-Output ('STUDIO_PLAYER_PLAYING ' + (@{
-                        position_seconds=[math]::Round($Position,3);audio=[bool]($EnableAudio -and -not $script:AudioMuted)
+                        position_seconds=[math]::Round($Position,3);audio_position_seconds=[math]::Round($AudioPosition,3)
+                        audio=[bool]($EnableAudio -and -not $script:AudioMuted)
                         audio_pid=if($script:AudioProcess){$script:AudioProcess.Id}else{$null};muted=[bool]$script:AudioMuted;volume=$Volume
                     }|ConvertTo-Json -Compress))
                 } elseif ($Command -match '^PAUSE\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
@@ -261,6 +340,7 @@ while ($true) {
         } catch {}
 
         if ($Action) {
+            $script:VideoPlaybackStarted=$false
             Stop-Audio
             Stop-ChildTree $Child
         }
@@ -269,8 +349,18 @@ while ($true) {
     }
 
     $ExitCode = $Child.ExitCode
+    $script:VideoPlaybackStarted=$false
     Stop-Audio
     $Child.Dispose()
+    if (-not $Action -and $DlssgFallbackRequested -and $FrameGeneration -match '^Nvidia') {
+        Remove-RealtimeWork $ActiveWork
+        if ($script:LatestVideoPosition -ge $CurrentStart -and $script:LatestVideoPosition -lt ($Duration-0.05)) {
+            $CurrentStart = $script:LatestVideoPosition
+        }
+        $FrameGeneration = 'MotionGPU'
+        Write-Output ('STUDIO_PLAYER_WARNING NVIDIA DLSSG presentation failed; restarting at {0:0.###} s with MotionGPU so the player cannot remain black.' -f $CurrentStart)
+        continue
+    }
     if ($Action -eq 'seek') {
         Remove-RealtimeWork $ActiveWork
         $CurrentStart = $Target
@@ -280,9 +370,11 @@ while ($true) {
     if ($Action -eq 'close') {
         Remove-RealtimeWork $ActiveWork
         if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) { Remove-Item -LiteralPath $HeadersPath -Force }
+        if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
         Write-Output 'STUDIO_PLAYER_CLOSED'
         exit 0
     }
     if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) { Remove-Item -LiteralPath $HeadersPath -Force }
+    if (Test-Path -LiteralPath $TelemetryPath) { Remove-Item -LiteralPath $TelemetryPath -Force }
     exit $ExitCode
 }
