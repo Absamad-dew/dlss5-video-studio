@@ -664,6 +664,10 @@ $GuideQualityFrames = 0
 $GuideLowConfidenceWeighted = 0.0
 $GuideDepthFrames = 0
 $GuideSceneCuts = 0
+$GuideDepthComputeSeconds = 0.0
+$GuideDepthWaitSeconds = 0.0
+$GuideDepthOverlapSeconds = 0.0
+$GuideDepthPrefetchDiscards = 0
 $DecoderSeconds = 0.0
 $UpscalerSeconds = 0.0
 $UpscalerResolvedVariant = $null
@@ -935,6 +939,10 @@ try {
                 $GuideLowConfidenceWeighted += [double]$GuideResult.low_confidence_fraction * [int]$GuideResult.frames
                 $GuideDepthFrames += [int]$GuideResult.depth_frames
                 $GuideSceneCuts += [int]$GuideResult.scene_cuts
+                $GuideDepthComputeSeconds += [double]$GuideResult.depth_infer_s
+                $GuideDepthWaitSeconds += [double]$GuideResult.depth_wait_s
+                $GuideDepthOverlapSeconds += [double]$GuideResult.depth_overlap_s
+                $GuideDepthPrefetchDiscards += [int]$GuideResult.depth_prefetch_discarded
             } catch {}
 
             $HostCommand = "CHUNK`t$ChunkIndex`t$ThisFrames`t$Raw`t$Motion`t$Depth`t$RgbTransportWidth`t$RgbTransportHeight"
@@ -1058,6 +1066,10 @@ try {
             $GuideLowConfidenceWeighted += [double]$GuideResult.low_confidence_fraction * [int]$GuideResult.frames
             $GuideDepthFrames += [int]$GuideResult.depth_frames
             $GuideSceneCuts += [int]$GuideResult.scene_cuts
+            $GuideDepthComputeSeconds += [double]$GuideResult.depth_infer_s
+            $GuideDepthWaitSeconds += [double]$GuideResult.depth_wait_s
+            $GuideDepthOverlapSeconds += [double]$GuideResult.depth_overlap_s
+            $GuideDepthPrefetchDiscards += [int]$GuideResult.depth_prefetch_discarded
             if ($ChunkIndex -eq 0) {
                 if ($null -ne $GuideResult.decode_s) {
                     $DecoderSeconds += [double]$GuideResult.decode_s
@@ -1439,6 +1451,10 @@ try {
         guide_low_confidence_fraction = if($GuideQualityFrames-gt 0){[double]($GuideLowConfidenceWeighted/$GuideQualityFrames)}else{$null}
         guide_depth_frames = [int]$GuideDepthFrames
         guide_scene_cuts = [int]$GuideSceneCuts
+        guide_depth_compute_seconds = [double]$GuideDepthComputeSeconds
+        guide_depth_wait_seconds = [double]$GuideDepthWaitSeconds
+        guide_depth_overlap_seconds = [double]$GuideDepthOverlapSeconds
+        guide_depth_prefetch_discards = [int]$GuideDepthPrefetchDiscards
         decoder_fps = [double]$DecoderFps
         host_delivery_fps = [double]$HostDeliveryFps
         estimated_steady_fps = [double]$SteadyFps

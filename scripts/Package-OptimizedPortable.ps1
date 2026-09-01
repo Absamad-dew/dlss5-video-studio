@@ -37,7 +37,7 @@ foreach ($Name in @('START.cmd','NVIDIA_RUNTIME_NOTICE.txt','THIRD_PARTY_NOTICES
 }
 Copy-Item -Path (Join-Path $Base 'licenses\*') -Destination (Join-Path $Target 'licenses') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $Base 'models\depth_anything_v2_small.onnx') -Destination (Join-Path $Target 'models') -Force
-Copy-Item -LiteralPath (Join-Path $Base 'tools\ffmpeg.exe'),(Join-Path $Base 'tools\ffprobe.exe') -Destination (Join-Path $Target 'tools') -Force
+Copy-Item -LiteralPath (Join-Path $Base 'tools\ffmpeg.exe'),(Join-Path $Base 'tools\ffprobe.exe'),(Join-Path $Base 'tools\ffplay.exe') -Destination (Join-Path $Target 'tools') -Force
 
 $PortablePython = Join-Path $DependencyRoot 'runtime\python\cpython-3.11.16-windows-x86_64-none'
 if (-not (Test-Path -LiteralPath (Join-Path $PortablePython 'Lib\site-packages\torch') -PathType Container)) {
@@ -123,12 +123,18 @@ foreach ($Name in @('dxgi.dll','renodx-dlss5.addon64','nvngx_dlss.dll','nvngx_dl
 }
 Copy-Item -LiteralPath (Join-Path $Build 'dist\engine\dlss5-video-host.exe') -Destination (Join-Path $Target 'engine') -Force
 Copy-Item -Path (Join-Path $Build 'dist\guidegen\*') -Destination (Join-Path $Target 'tools\guidegen') -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $Build 'app\process-video.ps1'),(Join-Path $Build 'app\studio.ps1') -Destination (Join-Path $Target 'app') -Force
+Copy-Item -LiteralPath `
+    (Join-Path $Build 'app\process-video.ps1'), `
+    (Join-Path $Build 'app\realtime-player.ps1'), `
+    (Join-Path $Build 'app\source-resolver.psm1'), `
+    (Join-Path $Build 'app\studio.ps1') `
+    -Destination (Join-Path $Target 'app') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'dist\DLSS5 Video Studio.exe') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'README_OPTIMIZED_RU.md') -Destination (Join-Path $Target 'README_RU.md') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'VERSION_OPTIMIZED.txt') -Destination (Join-Path $Target 'VERSION.txt') -Force
 
-& (Join-Path $Build 'scripts\New-PortableManifest.ps1') -PortableRoot $Target
+$PackageVersion = (Get-Content -LiteralPath (Join-Path $Build 'VERSION_OPTIMIZED.txt') -First 1).Trim()
+& (Join-Path $Build 'scripts\New-PortableManifest.ps1') -PortableRoot $Target -Version $PackageVersion
 & (Join-Path $Build 'scripts\Test-PortableManifest.ps1') -PortableRoot $Target
 
 Write-Output "OPTIMIZED_PORTABLE_OK $Target"

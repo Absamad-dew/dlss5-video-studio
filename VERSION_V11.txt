@@ -1,2 +1,2 @@
-13.5.0-gpu-compact-realtime
-Feature 18 now loads in every mode; compact RGB stays at source resolution in shared memory, while D3D12 expands RGB and compact motion/depth directly on the GPU for substantially faster high-resolution realtime playback.
+13.6.0-parallel-guide-stable-audio
+Depth inference now overlaps motion/postprocessing without changing refresh frames, guide kernels use allocation-light OpenCV paths, and pause/rebuffer resumes the same audio process instead of reopening and reseeking the stream.

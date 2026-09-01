@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import math
 import mmap
@@ -283,9 +284,11 @@ def flow_confidence(
     map_y = yy + flow[..., 1]
     in_bounds = (map_x >= 0) & (map_x <= width - 1) & (map_y >= 0) & (map_y <= height - 1)
     warped = cv2.remap(previous, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-    error = np.abs(warped.astype(np.float32) - current.astype(np.float32)) / 255.0
-    confidence = np.exp(-6.0 * error).astype(np.float32)
-    return confidence, in_bounds
+    # absdiff works directly on uint8 and avoids two full float conversions.
+    error = cv2.absdiff(warped, current).astype(np.float32) * (1.0 / 255.0)
+    cv2.multiply(error, -6.0, error)
+    cv2.exp(error, error)
+    return error, in_bounds
 
 
 def stabilize_flow(
@@ -305,9 +308,16 @@ def stabilize_flow(
         cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_REPLICATE,
     )
-    acceleration = np.linalg.norm(flow - previous_warped, axis=2)
-    history = 0.22 * confidence * np.exp(-acceleration / 1.5)
-    return flow * (1.0 - history[..., None]) + previous_warped * history[..., None]
+    delta = flow - previous_warped
+    acceleration = cv2.magnitude(delta[..., 0], delta[..., 1])
+    cv2.multiply(acceleration, -1.0 / 1.5, acceleration)
+    cv2.exp(acceleration, acceleration)
+    cv2.multiply(acceleration, confidence, acceleration)
+    acceleration *= 0.22
+    # Algebraically identical to flow*(1-history)+previous*history, but it
+    # avoids three full guide-sized temporaries on every frame.
+    flow -= delta * acceleration[..., None]
+    return flow
 
 
 def occlusion_aware_confidence(
@@ -327,8 +337,11 @@ def occlusion_aware_confidence(
             np.abs(cv2.Sobel(flow[..., 1], cv2.CV_32F, 0, 1, ksize=3)),
         ),
     )
-    boundary = np.exp(-0.18 * grad)
-    return np.where(valid, confidence * boundary, 0.0).astype(np.float32)
+    cv2.multiply(grad, -0.18, grad)
+    cv2.exp(grad, grad)
+    cv2.multiply(confidence, grad, confidence)
+    confidence[~valid] = 0.0
+    return confidence
 
 
 def align_depth_to_history(
@@ -416,7 +429,7 @@ class DisMotion:
             previous = cv2.cvtColor(previous_color, cv2.COLOR_RGB2GRAY)
         for index, current in enumerate(grays):
             if previous is not None:
-                flows[index] = self.dis.calc(current, previous, None).astype(np.float32)
+                flows[index] = self.dis.calc(current, previous, None).astype(np.float32, copy=False)
             previous = current
         return flows
 
@@ -543,6 +556,8 @@ def generate_chunk(
     depth_scales: list[float] = []
     started = time.perf_counter()
     depth_infer_s = 0.0
+    depth_wait_s = 0.0
+    depth_prefetch_discarded = 0
     write_s = 0.0
     commit_s = 0.0
 
@@ -558,6 +573,37 @@ def generate_chunk(
         guide_colors, state.previous_color, guide_grays, state.previous_gray
     )
     flow_prepare_s = time.perf_counter() - flow_started
+
+    # Depth is independent of motion/history alignment until its target frame
+    # is reached.  Start the next known periodic inference while the CPU builds
+    # motion/confidence maps for the intervening frames.  The same model and
+    # exact target frames are used, so this removes a serial wait without
+    # changing the rendered result.
+    depth_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="guide-depth"
+    )
+    depth_future: concurrent.futures.Future | None = None
+    depth_future_index = -1
+
+    def infer_timed(local_index: int) -> tuple[np.ndarray, float]:
+        infer_started = time.perf_counter()
+        inferred = infer_depth(
+            runtime, np.asarray(frames[local_index]), geom.width, geom.height
+        )
+        return inferred, time.perf_counter() - infer_started
+
+    def schedule_depth(local_index: int) -> None:
+        nonlocal depth_future, depth_future_index
+        if 0 <= local_index < frames_count:
+            depth_future_index = local_index
+            depth_future = depth_executor.submit(infer_timed, local_index)
+
+    first_periodic_index = 0
+    if state.previous_depth is not None:
+        first_periodic_index = max(
+            0, max(0, args.depth_interval - 1) - state.frames_since_depth
+        )
+    schedule_depth(first_periodic_index)
 
     try:
         with motion_partial.open("wb") as motion_stream, depth_partial.open("wb") as depth_stream:
@@ -589,7 +635,6 @@ def generate_chunk(
                 frame = np.asarray(frames[local_index])
                 guide_color = guide_colors[local_index]
                 gray = guide_grays[local_index]
-                records.fill(0)
                 scene_cut = False
                 flow = None
                 confidence = None
@@ -598,14 +643,12 @@ def generate_chunk(
                 p95_motion = 0.0
 
                 if state.previous_gray is not None:
-                    scene_mae = float(
-                        np.mean(np.abs(gray.astype(np.float32) - state.previous_gray.astype(np.float32)))
-                        / 255.0
-                    )
+                    scene_mae = float(cv2.mean(cv2.absdiff(gray, state.previous_gray))[0] / 255.0)
                     scene_cut = scene_mae >= args.scene_cut_threshold
                     if scene_cut:
                         scene_cuts += 1
                         state.previous_flow = None
+                        records.fill(0)
                     else:
                         flow = prepared_flows[local_index]
                         if flow is None:
@@ -632,12 +675,12 @@ def generate_chunk(
                             p95_motion = float(np.quantile(magnitude[::2, ::2], 0.95))
                         records["dx"] = np.clip(
                             flow[..., 0] * (args.width / geom.width), -32752, 32752
-                        ).astype(np.float16)
+                        )
                         records["dy"] = np.clip(
                             flow[..., 1] * (args.height / geom.height), -32752, 32752
-                        ).astype(np.float16)
-                        records["valid"] = valid.astype(np.uint8)
-                        records["confidence"] = np.rint(np.clip(confidence, 0, 1) * 255).astype(np.uint8)
+                        )
+                        records["valid"] = valid
+                        records["confidence"] = np.rint(np.clip(confidence, 0, 1) * 255)
                         low_confidence_pixels += int(np.count_nonzero(confidence < 0.55))
                         motion_pixels += int(confidence.size)
                         if state.previous_depth is not None:
@@ -648,6 +691,8 @@ def generate_chunk(
                                 cv2.INTER_LINEAR,
                                 borderMode=cv2.BORDER_REPLICATE,
                             )
+                else:
+                    records.fill(0)
 
                 periodic_due = state.frames_since_depth >= max(0, args.depth_interval - 1)
                 adaptive_due = False
@@ -658,9 +703,31 @@ def generate_chunk(
                     )
                 needs_depth = state.previous_depth is None or scene_cut or periodic_due or adaptive_due
                 if needs_depth:
-                    depth_started = time.perf_counter()
-                    depth = infer_depth(runtime, frame, geom.width, geom.height)
-                    depth_infer_s += time.perf_counter() - depth_started
+                    if depth_future is not None and depth_future_index != local_index:
+                        # A scene cut or adaptive refresh arrived before the
+                        # predictable periodic refresh.  Finish the single
+                        # in-flight model call before reusing the stateful
+                        # runtime, then reschedule from the new refresh point.
+                        wait_started = time.perf_counter()
+                        _, discarded_compute = depth_future.result()
+                        depth_wait_s += time.perf_counter() - wait_started
+                        depth_infer_s += discarded_compute
+                        depth_prefetch_discarded += 1
+                        depth_future = None
+                        depth_future_index = -1
+                    if depth_future is not None and depth_future_index == local_index:
+                        wait_started = time.perf_counter()
+                        depth, depth_compute = depth_future.result()
+                        depth_wait_s += time.perf_counter() - wait_started
+                        depth_infer_s += depth_compute
+                        depth_future = None
+                        depth_future_index = -1
+                    else:
+                        depth_started = time.perf_counter()
+                        depth = infer_depth(runtime, frame, geom.width, geom.height)
+                        depth_compute = time.perf_counter() - depth_started
+                        depth_wait_s += depth_compute
+                        depth_infer_s += depth_compute
                     depth_frames += 1
                     if adaptive_due and not periodic_due and not scene_cut:
                         adaptive_frames += 1
@@ -671,6 +738,7 @@ def generate_chunk(
                         blend = np.clip(args.temporal_depth * confidence, 0, 0.75)
                         depth = depth * (1.0 - blend) + warped_depth * blend
                         refresh_deltas.append(float(np.mean(np.abs(depth - warped_depth))))
+                    schedule_depth(local_index + max(1, args.depth_interval))
                 elif warped_depth is not None:
                     depth = warped_depth
                     state.frames_since_depth += 1
@@ -708,6 +776,7 @@ def generate_chunk(
         depth_partial.unlink(missing_ok=True)
         raise
     finally:
+        depth_executor.shutdown(wait=True, cancel_futures=True)
         del frames
 
     elapsed = time.perf_counter() - started
@@ -730,9 +799,12 @@ def generate_chunk(
         "elapsed_s": elapsed,
         "flow_prepare_s": flow_prepare_s,
         "depth_infer_s": depth_infer_s,
+        "depth_wait_s": depth_wait_s,
+        "depth_overlap_s": max(0.0, depth_infer_s - depth_wait_s),
+        "depth_prefetch_discarded": depth_prefetch_discarded,
         "write_s": write_s,
         "commit_s": commit_s,
-        "cpu_post_s": max(0.0, elapsed - flow_prepare_s - depth_infer_s - write_s - commit_s),
+        "cpu_post_s": max(0.0, elapsed - flow_prepare_s - depth_wait_s - write_s - commit_s),
         "fps": frames_count / elapsed,
     }
 

@@ -10,11 +10,13 @@ The repository contains source code and dependency installers. It intentionally 
 - five universal profiles — Ultra Fast, Fast, Medium, Heavy, and Maximum — with automatic adaptation by VRAM, resolution, and CPU capacity;
 - true multi-chunk prebuffering, adjustable 3–30 second startup buffer and chunk size, plus measured underrun diagnostics;
 - exact live buffer telemetry in seconds with refill FPS/rate, optional maximum-speed pause filling, and synchronized audio/video rebuffer recovery instead of audio drift or catch-up playback;
+- pause and short rebuffer events now suspend/resume one persistent audio decoder/device at the exact media position; only a real seek or failed decoder reopens the stream;
 - unconditional loading and log validation of the adjacent ReShade/DLSS5 add-on, so Feature 18 is active even when NVIDIA Frame Generation is disabled;
 - source-resolution RGB transport through pagefile-backed shared memory, followed by a single D3D12 cubic expansion pass that also reconstructs compact motion/depth guides;
 - an isolated portable Python runtime, preventing a user-level CPU-only ONNX Runtime from shadowing the bundled DirectML provider;
 - official fixed DLSS-G/MFG x2, x3, and x4 plus Dynamic MFG targets of 60/72/90/120 FPS, with capability checks reported by Streamline instead of silent fallback;
 - persistent upload mappings and hardware-sized guide worker/batch scheduling, removing repeated map/unmap and undersized-batch overhead without changing image processing;
+- periodic neural-depth inference is prefetched on the GPU while CPU motion/confidence maps are built, preserving the same depth frames and quality while removing most of the serial DML wait;
 - portable GPU motion-compensated x2 fallback when DLSS-G is unavailable;
 - Depth Anything V2 Small, Video Depth Anything Small, and Depth Anything 3 Small/Base;
 - true depth-warped stereoscopic VR output after the DLSS5 pass, with SBS/Over-Under layouts, 72/90/120 FPS output, bounded disparity, occlusion fill, edge feathering, depth gamma, temporal stabilization, and eye swapping;
@@ -30,6 +32,8 @@ Dynamic MFG is used only when Streamline reports support. Fixed x3/x4 is likewis
 Validation on the high-VRAM test PC (1080p output, external VSR off) reported 217.85 displayed FPS for fixed x4 from a 49 FPS source. Dynamic MFG on a 15 FPS source reported 89.32 displayed FPS for a 90 FPS target, with 85 generated frames across 20 rendered frames after startup adaptation. A separate DepthSBS smoke test produced a verified 1280×720, 72 FPS HEVC VR file after the DLSS5 pass.
 
 The 13.5 high-resolution path was also validated on the RTX 5080 with a 2880×1620 DLSS input and 3840×2160 display output. With genuine Feature 18 active, the native stage reached 84.55 FPS, guide generation 40.45 FPS, persistent decode 653.74 FPS, and the paced display held 30.14 FPS with zero buffer underruns. Compared with the previous full-resolution CPU transport, the estimated steady pipeline rose from 18.39 to 27.36 FPS and the planned shared RGB reserve fell from 2402.7 MB to 118.7 MB for the test source.
+
+Version 13.6 pipelines the next scheduled depth inference with the intervening motion/postprocessing work. On the RTX 4060 Laptop, an identical 240-frame 2880×1620 guide workload increased from 57.27 to 93.89 FPS (1.64×); 1.61 of 2.02 seconds of DML work was overlapped. The heavier portrait 302×540 guide grid reached 62.36 FPS after allocation-light confidence and flow kernels. A complete pause/resume test confirmed one audio start and the same decoder PID before and after the pause. Repeating the 4K RTX 5080 test raised guide throughput from 40.45 to 63.95 FPS and estimated steady throughput from 27.36 to 34.49 FPS; 4K display held 30.21 FPS with zero underruns.
 
 ## Build prerequisites
 

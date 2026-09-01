@@ -1,2 +1,2 @@
-8.0.0-realtime-player
-Fullscreen/pause/seeking controls, configurable 3-30 second realtime buffer, unlimited realtime playback, and the Temporal Stability 7 motion/depth pipeline.
+13.6.0-parallel-guide-stable-audio
+Depth inference now overlaps motion/postprocessing without changing refresh frames, guide kernels use allocation-light OpenCV paths, and pause/rebuffer resumes the same audio process instead of reopening and reseeking the stream.
