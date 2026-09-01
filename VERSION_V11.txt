@@ -1,2 +1,2 @@
-12.0.0-realtime-queue-url-recording-vr-tabs
-Separate Realtime, Recording and VR workspaces; true multi-chunk realtime buffering; isolated DirectML runtime for RTX 5080; URL recording; offline guide overrides; SBS/Over-Under VR with occlusion and temporal controls.
+13.0.0-universal-profiles-dynamic-mfg-vr-fps-ui
+Universal Ultra Fast/Fast/Medium/Heavy/Maximum modes; Streamline-verified fixed and Dynamic MFG; 72/90/120 FPS VR output; URL source-resolution selection; optional preview pane; expanded explanations and hardware-adaptive scheduling.

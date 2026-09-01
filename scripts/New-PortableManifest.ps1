@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PortableRoot,
     [string]$Product = 'DLSS5 Video Studio Realtime Recording VR Portable',
-    [string]$Version = '12.0.0'
+    [string]$Version = '13.0.0'
 )
 
 $ErrorActionPreference = 'Stop'

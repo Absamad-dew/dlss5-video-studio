@@ -1,24 +1,30 @@
-# DLSS5 Video Studio 12
+# DLSS5 Video Studio 13
 
 Windows video player/processor that reconstructs motion and depth from ordinary video, evaluates NVIDIA NGX through a D3D12 host, and can present the result with official NVIDIA DLSS Frame Generation through Streamline + Reflex.
 
 The repository contains source code and dependency installers. It intentionally excludes proprietary NVIDIA DLLs, the user's custom `nvngx_dlssnr.dll`, FFmpeg binaries, ReShade binaries, portable Python, and very large optional model weights. A small open-licensed core model pack for an existing V11 portable folder is available from [GitHub Releases](https://github.com/Absamad-dew/dlss5-video-studio/releases).
 
-## Version 12 highlights
+## Version 13 highlights
 
 - three dedicated workspaces: Realtime, Recording, and VR / 3D;
-- hardware-aware realtime profiles: RTX laptop 1080p/1440p and RTX 5080 4K;
+- five universal profiles — Ultra Fast, Fast, Medium, Heavy, and Maximum — with automatic adaptation by VRAM, resolution, and CPU capacity;
 - true multi-chunk prebuffering, adjustable 3–30 second startup buffer and chunk size, plus measured underrun diagnostics;
 - an isolated portable Python runtime, preventing a user-level CPU-only ONNX Runtime from shadowing the bundled DirectML provider;
-- official DLSS-G x2 presentation with frame-aligned depth, motion, HUD-less color, common constants, and Reflex markers;
+- official fixed DLSS-G/MFG x2, x3, and x4 plus Dynamic MFG targets of 60/72/90/120 FPS, with capability checks reported by Streamline instead of silent fallback;
+- persistent upload mappings and hardware-sized guide worker/batch scheduling, removing repeated map/unmap and undersized-batch overhead without changing image processing;
 - portable GPU motion-compensated x2 fallback when DLSS-G is unavailable;
 - Depth Anything V2 Small, Video Depth Anything Small, and Depth Anything 3 Small/Base;
-- true depth-warped stereoscopic VR output with SBS/Over-Under layouts, occlusion fill, edge feathering, depth gamma, temporal stabilization, and eye swapping;
+- true depth-warped stereoscopic VR output after the DLSS5 pass, with SBS/Over-Under layouts, 72/90/120 FPS output, bounded disparity, occlusion fill, edge feathering, depth gamma, temporal stabilization, and eye swapping;
 - local files and supported network video URLs, buffering, audio, fullscreen, pause, and seeking;
+- selectable source-stream resolution for network URLs and an optional right-hand preview pane;
 - H.264/H.265 recording from local files or supported page URLs, with automatic output names;
 - fine recording and VR overrides for guide resolution, depth cadence, adaptive thresholds, scene cuts, DIS/RAFT motion, RAFT updates, and chunk size.
 
-The RTX 5080 4K profile renders at 2560x1440 and presents at 3840x2160. A 120-frame validation run with official DLSS-G x2 sustained 30.49 display FPS from a 15 FPS source, used the bundled DirectML provider, and reported zero buffer underruns. RAFT Quality sustained 30.53 display FPS in the same presentation configuration; DIS remains the faster motion option.
+The program no longer exposes GPU-model-specific profiles. `Auto` classifies available VRAM internally, while the five user-facing levels control the accuracy/cadence of guide, motion, and depth generation. Output geometry and the internal DLSS render preset remain independent controls.
+
+Dynamic MFG is used only when Streamline reports support. Fixed x3/x4 is likewise rejected when `numFramesToGenerateMax` is too low, so the UI never labels an ordinary blend as NVIDIA MFG. VR recording at 72/90/120 FPS uses bidirectional motion-compensated interpolation after DLSS5 and stereo synthesis; it is separate from display-only MFG.
+
+Validation on the high-VRAM test PC (1080p output, external VSR off) reported 217.85 displayed FPS for fixed x4 from a 49 FPS source. Dynamic MFG on a 15 FPS source reported 89.32 displayed FPS for a 90 FPS target, with 85 generated frames across 20 rendered frames after startup adaptation. A separate DepthSBS smoke test produced a verified 1280×720, 72 FPS HEVC VR file after the DLSS5 pass.
 
 ## Build prerequisites
 

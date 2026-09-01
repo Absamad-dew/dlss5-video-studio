@@ -75,6 +75,7 @@ def main() -> int:
     parser.add_argument("--occlusion-fill", type=float, default=0.65)
     parser.add_argument("--edge-feather", type=float, default=2.0)
     parser.add_argument("--temporal-smoothing", type=float, default=0.55)
+    parser.add_argument("--max-disparity-percent", type=float, default=2.4)
     parser.add_argument("--eye-swap", action="store_true")
     parser.add_argument("--codec", choices=["h264", "h265"], default="h265")
     parser.add_argument("--quality", type=int, default=18)
@@ -155,7 +156,8 @@ def main() -> int:
             # About 1.2% screen-width maximum disparity at strength 1.0.  The
             # convergence plane stays fixed, while foreground/background move
             # in opposite directions for genuine binocular parallax.
-            disparity_px = (depth[0, 0] - args.convergence) * (width * 0.024 * args.eye_separation)
+            disparity_limit = width * (min(5.0, max(0.5, args.max_disparity_percent)) / 100.0)
+            disparity_px = (depth[0, 0] - args.convergence) * (disparity_limit * args.eye_separation)
             disparity_norm = disparity_px * (2.0 / max(1, width - 1))
             left_grid = torch.stack((grid_x - disparity_norm, grid_y), dim=-1).unsqueeze(0)
             right_grid = torch.stack((grid_x + disparity_norm, grid_y), dim=-1).unsqueeze(0)

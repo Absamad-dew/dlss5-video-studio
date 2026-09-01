@@ -98,6 +98,9 @@ struct BatchOptions
     bool fullscreen = false;
     bool motion_frame_generation = false;
     bool nvidia_frame_generation = false;
+    bool nvidia_dynamic_mfg = false;
+    uint32_t nvidia_generated_frames = 1;
+    uint32_t nvidia_dynamic_target_fps = 0;
     fs::path input, output, encode_mp4, encode_chunks_dir, motion, depth;
     fs::path control_file;
     std::string codec = "h264";
@@ -915,7 +918,10 @@ static sl::float4x4 StreamlineIdentity()
 }
 
 static bool EnableStreamlineFrameGeneration(UINT render_width, UINT render_height,
-                                            UINT output_width, UINT output_height)
+                                             UINT output_width, UINT output_height,
+                                             bool dynamic_mfg,
+                                             uint32_t generated_frames,
+                                             uint32_t dynamic_target_fps)
 {
     if (!g_streamline_initialized) return false;
     sl::ReflexOptions reflex{};
@@ -924,8 +930,9 @@ static bool EnableStreamlineFrameGeneration(UINT render_width, UINT render_heigh
     const sl::Result reflex_result = slReflexSetOptions(reflex);
 
     sl::DLSSGOptions options{};
-    options.mode = sl::DLSSGMode::eOn;
-    options.numFramesToGenerate = 1;
+    options.mode = dynamic_mfg ? sl::DLSSGMode::eDynamic : sl::DLSSGMode::eOn;
+    options.numFramesToGenerate = std::clamp(generated_frames, 1u, 5u);
+    options.dynamicTargetFrameRate = static_cast<float>(dynamic_target_fps);
     options.flags |= sl::DLSSGFlags::eRetainResourcesWhenOff;
     options.numBackBuffers = 2;
     options.mvecDepthWidth = render_width;
@@ -936,13 +943,43 @@ static bool EnableStreamlineFrameGeneration(UINT render_width, UINT render_heigh
     options.mvecBufferFormat = static_cast<uint32_t>(DXGI_FORMAT_R16G16_FLOAT);
     options.depthBufferFormat = static_cast<uint32_t>(DXGI_FORMAT_R32_FLOAT);
     options.hudLessBufferFormat = static_cast<uint32_t>(DXGI_FORMAT_R8G8B8A8_UNORM);
-    const sl::Result options_result = slDLSSGSetOptions(g_streamline_viewport, options);
     sl::DLSSGState state{};
+    const sl::Result capability_result = slDLSSGGetState(g_streamline_viewport, state, &options);
+    const bool dynamic_supported = state.bIsDynamicMFGSupported == sl::Boolean::eTrue;
+    if (capability_result != sl::Result::eOk)
+    {
+        Log("[streamline] DLSSG capability query failed: %d", static_cast<int>(capability_result));
+        return false;
+    }
+    if (dynamic_mfg && !dynamic_supported)
+    {
+        Log("[streamline] Dynamic MFG target %u FPS requested but unsupported (max_generated=%u)",
+            dynamic_target_fps, state.numFramesToGenerateMax);
+        fprintf(stderr, "HOST_DLSSG_UNSUPPORTED dynamic=1 target_fps=%u max_generated=%u\n",
+                dynamic_target_fps, state.numFramesToGenerateMax);
+        return false;
+    }
+    if (!dynamic_mfg && options.numFramesToGenerate > state.numFramesToGenerateMax)
+    {
+        Log("[streamline] fixed MFG x%u requested but this system supports at most x%u",
+            options.numFramesToGenerate + 1, state.numFramesToGenerateMax + 1);
+        fprintf(stderr, "HOST_DLSSG_UNSUPPORTED requested_generated=%u max_generated=%u\n",
+                options.numFramesToGenerate, state.numFramesToGenerateMax);
+        return false;
+    }
+    const sl::Result options_result = slDLSSGSetOptions(g_streamline_viewport, options);
     const sl::Result state_result = slDLSSGGetState(g_streamline_viewport, state, &options);
-    Log("[streamline] Reflex=%d DLSSG options=%d state=%d status=%u min=%u max_generated=%u vram_mb=%llu",
+    Log("[streamline] Reflex=%d DLSSG options=%d state=%d mode=%s target_fps=%u status=%u min=%u max_generated=%u dynamic=%d vram_mb=%llu",
         static_cast<int>(reflex_result), static_cast<int>(options_result), static_cast<int>(state_result),
+        dynamic_mfg ? "dynamic" : "fixed", dynamic_target_fps,
         static_cast<unsigned>(state.status), state.minWidthOrHeight, state.numFramesToGenerateMax,
+        state.bIsDynamicMFGSupported == sl::Boolean::eTrue ? 1 : 0,
         static_cast<unsigned long long>(state.estimatedVRAMUsageInBytes / (1024 * 1024)));
+    printf("HOST_DLSSG_READY mode=%s generated=%u multiplier=%u target_fps=%u max_generated=%u dynamic_supported=%u\n",
+           dynamic_mfg ? "dynamic" : "fixed", options.numFramesToGenerate,
+           options.numFramesToGenerate + 1, dynamic_target_fps, state.numFramesToGenerateMax,
+           state.bIsDynamicMFGSupported == sl::Boolean::eTrue ? 1u : 0u);
+    fflush(stdout);
     g_streamline_fg_enabled = reflex_result == sl::Result::eOk &&
                               options_result == sl::Result::eOk && state_result == sl::Result::eOk;
     return g_streamline_fg_enabled;
@@ -1852,6 +1889,7 @@ private:
 struct LinearTransfer
 {
     ID3D12Resource *buffer = nullptr;
+    uint8_t *persistent_map = nullptr;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
     UINT rows = 0;
     UINT64 row_size = 0;
@@ -1880,6 +1918,13 @@ static LinearTransfer MakeTransfer(ID3D12Resource *texture, D3D12_HEAP_TYPE heap
         &hp, D3D12_HEAP_FLAG_NONE, &bd, state, nullptr, __uuidof(ID3D12Resource),
         reinterpret_cast<void **>(&t.buffer));
     if (FAILED(hr) || t.buffer == nullptr) throw std::runtime_error("transfer buffer allocation failed");
+    if (heap_type == D3D12_HEAP_TYPE_UPLOAD)
+    {
+        const D3D12_RANGE no_read = {0, 0};
+        if (FAILED(t.buffer->Map(0, &no_read, reinterpret_cast<void **>(&t.persistent_map))) ||
+            t.persistent_map == nullptr)
+            throw std::runtime_error("persistent upload mapping failed");
+    }
     return t;
 }
 
@@ -1899,10 +1944,8 @@ static void FillUpload(LinearTransfer &t, const void *source, size_t source_row_
 {
     if (rows != t.rows || source_row_bytes > t.footprint.Footprint.RowPitch)
         throw std::runtime_error("upload footprint mismatch");
-    uint8_t *mapped = nullptr;
-    const D3D12_RANGE empty = {0, 0};
-    if (FAILED(t.buffer->Map(0, &empty, reinterpret_cast<void **>(&mapped))) || mapped == nullptr)
-        throw std::runtime_error("upload map failed");
+    uint8_t *mapped = t.persistent_map;
+    if (mapped == nullptr) throw std::runtime_error("upload buffer is not persistently mapped");
     const uint8_t *src = static_cast<const uint8_t *>(source);
     uint8_t *dst = mapped + t.footprint.Offset;
     #pragma omp parallel for schedule(static)
@@ -1912,8 +1955,6 @@ static void FillUpload(LinearTransfer &t, const void *source, size_t source_row_
         memcpy(dst + static_cast<size_t>(y) * t.footprint.Footprint.RowPitch,
                src + static_cast<size_t>(y) * source_row_bytes, source_row_bytes);
     }
-    const D3D12_RANGE written = {0, static_cast<SIZE_T>(t.total)};
-    t.buffer->Unmap(0, &written);
 }
 
 static void CopyUploadToTexture(LinearTransfer &upload, ID3D12Resource *texture)
@@ -2307,7 +2348,10 @@ static int RunBatch(const BatchOptions &o)
         if (!CreateFeature(o.width, o.height, flags, &create_result, target_width, target_height))
             throw std::runtime_error("genuine DLSS feature creation failed");
         if (o.nvidia_frame_generation &&
-            !EnableStreamlineFrameGeneration(o.width, o.height, target_width, target_height))
+            !EnableStreamlineFrameGeneration(o.width, o.height, target_width, target_height,
+                                             o.nvidia_dynamic_mfg,
+                                             o.nvidia_generated_frames,
+                                             o.nvidia_dynamic_target_fps))
             throw std::runtime_error("NVIDIA DLSS Frame Generation initialization failed; inspect sl.log");
         if (o.stream)
         {
@@ -2350,7 +2394,8 @@ static int RunBatch(const BatchOptions &o)
         double preview_pacing_ms = 0.0;
         BatchClock::time_point preview_start = {};
         BatchClock::time_point preview_first_present = {}, preview_last_present = {};
-        uint32_t preview_presented = 0;
+        uint64_t preview_presented = 0;
+        uint32_t streamline_max_presented_per_render = 0;
         std::vector<uint8_t> encode_nv12;
         std::exception_ptr writer_error;
         std::jthread writer_thread;
@@ -2607,6 +2652,9 @@ static int RunBatch(const BatchOptions &o)
                 }
                 preview_last_present = presented_at;
                 preview_presented += g_streamline_fg_enabled ? g_streamline_last_present_count : 1u;
+                if (g_streamline_fg_enabled)
+                    streamline_max_presented_per_render = std::max(streamline_max_presented_per_render,
+                                                                   g_streamline_last_present_count);
                 if (o.motion_frame_generation && CopyMotionFrameHistory(frame_generation, output_tex) == 0)
                     throw std::runtime_error("frame-generation history update failed");
             }
@@ -2707,9 +2755,28 @@ static int RunBatch(const BatchOptions &o)
                 readback_gpu_ms / frames, readback_pack_ms / frames,
                 write_ms / frames);
         }
+        if (o.nvidia_frame_generation)
+        {
+            const uint64_t generated = preview_presented > o.frames ? preview_presented - o.frames : 0;
+            const double actual_multiplier = o.frames > 0
+                ? static_cast<double>(preview_presented) / static_cast<double>(o.frames) : 0.0;
+            printf("HOST_DLSSG_STATS real_frames=%u presented=%llu generated=%llu actual_multiplier=%.4f max_per_render=%u\n",
+                   o.frames, static_cast<unsigned long long>(preview_presented),
+                   static_cast<unsigned long long>(generated), actual_multiplier,
+                   streamline_max_presented_per_render);
+            fflush(stdout);
+            Log("[streamline] aggregate real=%u presented=%llu generated=%llu multiplier=%.4f max_per_render=%u",
+                o.frames, static_cast<unsigned long long>(preview_presented),
+                static_cast<unsigned long long>(generated), actual_multiplier,
+                streamline_max_presented_per_render);
+        }
 
         for (int i = 0; i < kPipeline; ++i)
         {
+            if (color_up[i].persistent_map != nullptr) color_up[i].buffer->Unmap(0, nullptr);
+            if (depth_up[i].persistent_map != nullptr) depth_up[i].buffer->Unmap(0, nullptr);
+            if (mv_up[i].persistent_map != nullptr) mv_up[i].buffer->Unmap(0, nullptr);
+            if (bias_up[i].persistent_map != nullptr) bias_up[i].buffer->Unmap(0, nullptr);
             color_up[i].buffer->Release();
             depth_up[i].buffer->Release();
             mv_up[i].buffer->Release();
@@ -3001,6 +3068,9 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--fullscreen") == 0) batch.fullscreen = true;
         else if (strcmp(argv[i], "--frame-generation-motion") == 0) batch.motion_frame_generation = true;
         else if (strcmp(argv[i], "--frame-generation-nvidia") == 0) batch.nvidia_frame_generation = true;
+        else if (strcmp(argv[i], "--dlssg-dynamic") == 0) batch.nvidia_dynamic_mfg = true;
+        else if (strcmp(argv[i], "--dlssg-generated-frames") == 0 && i + 1 < argc) batch.nvidia_generated_frames = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
+        else if (strcmp(argv[i], "--dlssg-dynamic-target") == 0 && i + 1 < argc) batch.nvidia_dynamic_target_fps = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
         else if (strcmp(argv[i], "--control-file") == 0 && i + 1 < argc) batch.control_file = argv[++i];
         else if (strcmp(argv[i], "--media-start-seconds") == 0 && i + 1 < argc) batch.media_start_seconds = strtod(argv[++i], nullptr);
         else if (strcmp(argv[i], "--media-duration-seconds") == 0 && i + 1 < argc) batch.media_duration_seconds = strtod(argv[++i], nullptr);
@@ -3008,7 +3078,7 @@ int main(int argc, char **argv)
     }
     if (!test && !batch.enabled && pid == 0)
     {
-        Log("usage: dlss5-video-host --test | --batch [--input in.rgb24 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia] [--control-file path] [--media-start-seconds N]");
+        Log("usage: dlss5-video-host --test | --batch [--input in.rgb24 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--media-start-seconds N]");
         return 1;
     }
     g_show_window = (!test && !batch.enabled && !hide) || batch.preview;

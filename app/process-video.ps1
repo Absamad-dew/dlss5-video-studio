@@ -6,8 +6,8 @@ param(
     [ValidateSet('H264','H265')] [string] $Codec = 'H265',
     [ValidateRange(0,51)] [int] $Quality = 18,
     [ValidateSet('Source','Same','4K','2160p','1440p','1080p','720p','540p')] [string] $OutputMode = 'Source',
-    [ValidateSet('Quality','Balanced','Turbo','Realtime')] [string] $PerformanceProfile = 'Turbo',
-    [ValidateSet('Auto','Laptop8GB','RTX5080')] [string] $HardwareProfile = 'Auto',
+    [ValidateSet('UltraFast','Fast','Medium','Heavy','Maximum')] [string] $PerformanceProfile = 'Medium',
+    [ValidateSet('Auto','Standard','HighVram')] [string] $HardwareProfile = 'Auto',
     [ValidateSet('Auto','Native','Quality','Balanced','Performance')] [string] $RealtimeRenderPreset = 'Auto',
     [ValidateSet('DA2Small','VideoDepthSmall','DA3Small','DA3Base')] [string] $DepthModelProfile = 'DA2Small',
     [ValidateSet('None','NanoVSR','AnimeSR','FlashVSR','DLoRAL')] [string] $Upscaler = 'None',
@@ -22,6 +22,8 @@ param(
     [ValidateRange(0.0,1.0)] [double] $VROcclusionFill = 0.65,
     [ValidateRange(0.0,24.0)] [double] $VREdgeFeather = 2.0,
     [ValidateRange(0.0,0.95)] [double] $VRTemporalSmoothing = 0.55,
+    [ValidateRange(0.5,5.0)] [double] $VRMaxDisparityPercent = 2.4,
+    [ValidateSet(0,72,90,120)] [int] $VRTargetFps = 0,
     [switch] $VREyeSwap,
     [double] $StartSeconds = 0,
     [int] $FrameCount = 8,
@@ -44,9 +46,11 @@ param(
     [ValidateSet('quality','balanced','realtime')] [string] $RealtimeMotionPreset = 'realtime',
     [ValidateSet('dis','raft')] [string] $RealtimeMotionBackend = 'dis',
     [ValidateRange(1,12)] [int] $RealtimeRaftUpdates = 4,
-    [ValidateSet('Source','Double','60')] [string] $RealtimeFpsMode = 'Source',
-    [ValidateSet('Off','MotionGPU','CompatibilityBlend','NvidiaDLSSG','NvidiaOpticalFlow','Rife')] [string] $RealtimeFrameGeneration = 'Off',
-    [ValidateSet(720,1080,1440,2160)] [int] $NetworkMaxHeight = 2160,
+    [ValidateSet('Source','Double','60','72','90','120')] [string] $RealtimeFpsMode = 'Source',
+    [ValidateSet('Off','MotionGPU','CompatibilityBlend','NvidiaDLSSG','NvidiaDLSSGx2','NvidiaMFGx3','NvidiaMFGx4','NvidiaDynamicMFG','NvidiaOpticalFlow','Rife')] [string] $RealtimeFrameGeneration = 'Off',
+    [ValidateSet(0,60,72,90,120)] [int] $RealtimeTargetFps = 0,
+    [ValidateRange(0,16)] [int] $GuideWorkerThreads = 0,
+    [ValidateSet(0,540,720,1080,1440,2160,4320)] [int] $NetworkMaxHeight = 2160,
     [ValidateSet('None','chrome','edge','firefox')] [string] $NetworkCookiesBrowser = 'None',
     [switch] $FineGuideSettings,
     [ValidateRange(256,1024)] [int] $GuideWidthOverride = 480,
@@ -162,10 +166,10 @@ function Resolve-HardwareProfile([string] $Requested) {
         $GpuLine = (& $Smi.Source --query-gpu=name,memory.total --format=csv,noheader,nounits 2>$null | Select-Object -First 1)
         if ($GpuLine -match '^(?<name>.*),\s*(?<memory>[0-9]+)\s*$') {
             $MemoryMiB = [int]$Matches.memory
-            if ($Matches.name -match 'RTX\s*5080' -or $MemoryMiB -ge 14000) { return 'RTX5080' }
+            if ($MemoryMiB -ge 12000) { return 'HighVram' }
         }
     } catch {}
-    return 'Laptop8GB'
+    return 'Standard'
 }
 
 function Resolve-RealtimeRenderScale([string] $Preset, [string] $ResolvedHardware, [int] $TargetWidth, [int] $TargetHeight) {
@@ -174,11 +178,12 @@ function Resolve-RealtimeRenderScale([string] $Preset, [string] $ResolvedHardwar
     if ($Preset -eq 'Balanced') { return 2.0 / 3.0 }
     if ($Preset -eq 'Performance') { return 0.5 }
 
-    # Auto targets the actual machines this package is built for. Detect 4K by
+    # Auto targets the available VRAM tier, without exposing GPU-specific
+    # profiles. Detect 4K by
     # width as well as height so 3840x1600/1640 ultrawide sources do not fall
     # into the much heavier 1440p profile merely because they are letterboxed.
     # These are DLSS inputs, not an extra post-resize filter.
-    if ($ResolvedHardware -eq 'RTX5080') {
+    if ($ResolvedHardware -eq 'HighVram') {
         if ($TargetWidth -ge 3600 -or $TargetHeight -ge 2000) { return 2.0 / 3.0 }
         return 0.75
     }
@@ -250,13 +255,16 @@ if ($DepthModelProfile -in @('DA3Small','DA3Base')) { $RequiredDirectories += $D
 if (-not $IsNetworkSource) { $RequiredFiles += $InputVideo }
 if (-not [string]::IsNullOrWhiteSpace($InputHeadersPath)) { $RequiredFiles += $InputHeadersPath }
 if ($Upscaler -ne 'None') { $RequiredFiles += @($UpscalerPython,$UpscalerWorker) }
-if ($PerformanceProfile -eq 'Realtime') { $RequiredFiles += @($UpscalerPython,$GuideGeneratorScript) }
+if ($PreviewOnly) { $RequiredFiles += @($UpscalerPython,$GuideGeneratorScript) }
 if ($DepthModelProfile -ne 'DA2Small') {
     $RequiredFiles += @($UpscalerPython,$GuideGeneratorScript)
     $RequiredDirectories += $DepthCodeRoot
 }
-if (($PerformanceProfile -eq 'Realtime' -and $RealtimeMotionBackend -eq 'raft') -or
-    ($FineGuideSettings -and $MotionBackendOverride -eq 'raft')) { $RequiredFiles += $RaftWeights }
+if (($PreviewOnly -and $RealtimeMotionBackend -eq 'raft') -or
+    ($FineGuideSettings -and $MotionBackendOverride -eq 'raft') -or
+    (-not $PreviewOnly -and -not $FineGuideSettings -and $PerformanceProfile -in @('Heavy','Maximum'))) {
+    $RequiredFiles += $RaftWeights
+}
 if ($VRMode -ne 'Off') { $RequiredFiles += @($UpscalerPython,$SpatialMediaTool) }
 if ($VRMode -eq 'DepthSBS') { $RequiredFiles += $VRDepthWorker }
 foreach ($Path in $RequiredFiles) {
@@ -288,12 +296,14 @@ if ($InputHeadersPath) {
 $NetworkInputOptions = @()
 if ($InputTlsNoVerify) { $NetworkInputOptions += @('-tls_verify','0') }
 if ($InputHeaderBlock) { $NetworkInputOptions += @('-headers',$InputHeaderBlock) }
-$IsPreviewOnly = [bool]$PreviewOnly -or $PerformanceProfile -eq 'Realtime'
+$IsPreviewOnly = [bool]$PreviewOnly
+$UseNvidiaDlssg = $RealtimeFrameGeneration -in @('NvidiaDLSSG','NvidiaDLSSGx2','NvidiaMFGx3','NvidiaMFGx4','NvidiaDynamicMFG')
+$ResolvedRealtimeTargetFps = $RealtimeTargetFps
 if (-not $IsPreviewOnly -and $RealtimeFrameGeneration -ne 'Off') { throw 'Realtime frame generation is available only in display mode.' }
 if ($RealtimeFrameGeneration -in @('NvidiaOpticalFlow','Rife')) {
     throw "$RealtimeFrameGeneration is not active in this build yet; use MotionGPU or CompatibilityBlend."
 }
-if ($RealtimeFrameGeneration -eq 'NvidiaDLSSG') {
+if ($UseNvidiaDlssg) {
     foreach ($RequiredStreamlineFile in @('sl.interposer.dll','sl.common.dll','sl.dlss_g.dll','sl.reflex.dll','sl.pcl.dll','nvngx_dlssg.dll')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Engine $RequiredStreamlineFile))) {
             throw "NVIDIA DLSS-G runtime is incomplete: $RequiredStreamlineFile is missing from engine."
@@ -305,7 +315,7 @@ elseif ($PipelineOrder -eq 'DLSSOnly') { throw 'DLSSOnly cannot be combined with
 if ($IsPreviewOnly -and $PipelineOrder -eq 'DLSSThenVSR') { throw 'DLSSThenVSR is an offline recording order; realtime display requires VSRThenDLSS.' }
 if ($IsPreviewOnly -and $VRMode -ne 'Off') { throw 'VR packaging requires a recorded video and is unavailable in display-only mode.' }
 if (-not $IsPreviewOnly -and [string]::IsNullOrWhiteSpace($OutputVideo)) {
-    throw 'OutputVideo is required for Quality and Balanced recording profiles.'
+    throw 'OutputVideo is required in recording mode.'
 }
 if ($IsPreviewOnly) {
     $LivePreview = $true
@@ -341,6 +351,8 @@ $Fps = if ($OverrideFps -gt 0) {
     [int][math]::Round([math]::Min(60.0,$SourceRate*2.0))
 } elseif ($UseCompatibilityInterpolation -and $RealtimeFpsMode -eq '60') {
     60
+} elseif ($UseCompatibilityInterpolation -and $RealtimeFpsMode -in @('72','90','120')) {
+    [int]$RealtimeFpsMode
 } else {
     [int][math]::Round($SourceRate)
 }
@@ -369,6 +381,13 @@ $OutputGeometry = Fit-Geometry $SourceWidth $SourceHeight $TargetBox[0] $TargetB
 $OutputWidth = $OutputGeometry[0]
 $OutputHeight = $OutputGeometry[1]
 $ResolvedHardwareProfile = Resolve-HardwareProfile $HardwareProfile
+$ResolvedGuideWorkerThreads = if ($GuideWorkerThreads -gt 0) {
+    $GuideWorkerThreads
+} elseif ($ResolvedHardwareProfile -eq 'HighVram') {
+    [math]::Max(2,[math]::Min(8,[int][math]::Ceiling([Environment]::ProcessorCount/2.0)))
+} else {
+    [math]::Max(2,[math]::Min(4,[int][math]::Ceiling([Environment]::ProcessorCount/4.0)))
+}
 $UseExternalUpscaler = $Upscaler -ne 'None'
 $VsrBeforeDlss = $UseExternalUpscaler -and $PipelineOrder -eq 'VSRThenDLSS'
 $VsrAfterDlss = $UseExternalUpscaler -and $PipelineOrder -eq 'DLSSThenVSR'
@@ -406,16 +425,10 @@ if ($VRMode -eq 'Equirect360' -and [math]::Abs(($OutputWidth/[double]$OutputHeig
 
 $SceneCutThreshold = 0.12
 switch ($PerformanceProfile) {
-    'Quality' {
-        $GuideWidth = 640; $DepthInterval = 1; $DepthMinInterval = 1
-        $AdaptiveConfidence = 0.55; $AdaptiveMotion = 6.0; $TemporalDepth = 0.25
-        $MotionPreset = 'quality'; $ChunkSize = if ($RenderWidth -ge 3000) { 32 } else { 64 }
-    }
-    'Realtime' {
-        # Realtime stability profile: DML depth refreshes often enough to stop
-        # long optical-flow drift, while adaptive refresh catches difficult
-        # motion between regular keyframes. The guide generator performs affine
-        # depth alignment, edge-aware refinement and confidence masking.
+    { $IsPreviewOnly } {
+        # Realtime gets its exact values from the dedicated player controls.
+        # The universal profile remains in the report and UI, but does not
+        # silently overwrite a manual/custom guide configuration.
         $GuideWidth = $RealtimeGuideWidth
         $DepthInterval = $RealtimeDepthInterval
         $DepthMinInterval = [math]::Min($RealtimeDepthMinInterval,$RealtimeDepthInterval)
@@ -425,8 +438,25 @@ switch ($PerformanceProfile) {
         $SceneCutThreshold = $RealtimeSceneCutThreshold
         $MotionPreset = $RealtimeMotionPreset
         $ChunkSize = if ($RenderWidth -ge 3000) { 48 } elseif ($RenderWidth -ge 1900) { 64 } else { 96 }
+        break
     }
-    'Turbo' {
+    'Heavy' {
+        $GuideWidth = 640; $DepthInterval = 1; $DepthMinInterval = 1
+        $AdaptiveConfidence = 0.55; $AdaptiveMotion = 6.0; $TemporalDepth = 0.25
+        $MotionPreset = 'quality'; $ChunkSize = if ($RenderWidth -ge 3000) { 32 } else { 64 }
+    }
+    'Maximum' {
+        $GuideWidth = 768; $DepthInterval = 1; $DepthMinInterval = 1
+        $AdaptiveConfidence = 0.50; $AdaptiveMotion = 5.0; $TemporalDepth = 0.20
+        $MotionPreset = 'quality'; $ChunkSize = if ($RenderWidth -ge 3000) { 24 } else { 48 }
+    }
+    'Fast' {
+        $GuideWidth = 384; $DepthInterval = 4; $DepthMinInterval = 2
+        $AdaptiveConfidence = 0.58; $AdaptiveMotion = 12.0; $TemporalDepth = 0.48
+        $MotionPreset = 'balanced'
+        $ChunkSize = if ($RenderWidth -ge 3000) { 48 } elseif ($RenderWidth -ge 1900) { 64 } else { 96 }
+    }
+    'UltraFast' {
         # Real motion and neural depth stay enabled, but the guide grid and
         # depth refresh cadence are tuned for throughput. Feature 18 still
         # evaluates every full-resolution frame.
@@ -435,7 +465,7 @@ switch ($PerformanceProfile) {
         $MotionPreset = 'realtime'
         $ChunkSize = if ($RenderWidth -ge 3000) { 48 } elseif ($RenderWidth -ge 1900) { 72 } else { 128 }
     }
-    default {
+    default { # Medium
         $GuideWidth = 480; $DepthInterval = 2; $DepthMinInterval = 2
         $AdaptiveConfidence = 0.45; $AdaptiveMotion = 10.0; $TemporalDepth = 0.35
         $MotionPreset = 'balanced'; $ChunkSize = if ($RenderWidth -ge 3000) { 48 } elseif ($RenderWidth -ge 1900) { 72 } else { 96 }
@@ -456,11 +486,27 @@ if ($FineGuideSettings -and -not $IsPreviewOnly) {
     $MotionPreset = $MotionPresetOverride
     if ($ChunkFramesOverride -gt 0) { $ChunkSize = $ChunkFramesOverride }
 }
-$SelectedMotionBackend = if ($IsPreviewOnly) { $RealtimeMotionBackend } elseif ($FineGuideSettings) { $MotionBackendOverride } else { 'dis' }
-$SelectedRaftUpdates = if ($IsPreviewOnly) { $RealtimeRaftUpdates } else { $RaftUpdatesOverride }
+$SelectedMotionBackend = if ($IsPreviewOnly) {
+    $RealtimeMotionBackend
+} elseif ($FineGuideSettings) {
+    $MotionBackendOverride
+} elseif ($PerformanceProfile -in @('Heavy','Maximum')) {
+    'raft'
+} else {
+    'dis'
+}
+$SelectedRaftUpdates = if ($IsPreviewOnly) {
+    $RealtimeRaftUpdates
+} elseif ($FineGuideSettings) {
+    $RaftUpdatesOverride
+} elseif ($PerformanceProfile -eq 'Maximum') {
+    8
+} else {
+    4
+}
 
 if ($IsPreviewOnly) {
-    $AutoRealtimeChunk = if ($ResolvedHardwareProfile -eq 'RTX5080') {
+    $AutoRealtimeChunk = if ($ResolvedHardwareProfile -eq 'HighVram') {
         if ($RenderWidth -ge 3000) { 32 } elseif ($RenderWidth -ge 1900) { 48 } else { 64 }
     } else {
         if ($RenderWidth -ge 1900) { 48 } else { 64 }
@@ -505,8 +551,8 @@ $HostEncodedChunkDirectory = if ($VsrAfterDlss) { Join-Path $Work 'encoded-dlss'
 $DlssIntermediate = Join-Path $Work 'dlss-intermediate.mp4'
 $FlatOutput = if ($VRMode -eq 'Off') { $OutputVideo } else { Join-Path $Work 'flat-output.mp4' }
 $VrEncoded = Join-Path $Work 'vr-encoded.mp4'
-# On RTX 4060 the continuous NVENC pipe contends with Feature 18 and is much
-# slower than short post-chunk encode bursts. Keep the paths isolated.
+# A continuous NVENC pipe can contend with Feature 18 on bandwidth-limited
+# systems, so keep recording and display paths isolated.
 $DirectEncode = $false
 if (-not $IsPreviewOnly) {
     New-Item -ItemType Directory -Force -Path $EncodedChunkDirectory | Out-Null
@@ -517,7 +563,7 @@ New-Item -ItemType Directory -Force -Path $DepthCache | Out-Null
 
 $RealtimeBufferFrames = if ($IsPreviewOnly) { [int][math]::Max(1,[math]::Ceiling($Fps*$RealtimeBufferSeconds)) } else { 0 }
 $StartupChunkSize = if (-not $IsPreviewOnly -and -not $UseExternalUpscaler -and $TotalFrames -gt 1) {
-    if ($PerformanceProfile -eq 'Turbo') { 2 } elseif ($PerformanceProfile -eq 'Quality') { 4 } else { 8 }
+    if ($PerformanceProfile -eq 'UltraFast') { 2 } elseif ($PerformanceProfile -in @('Heavy','Maximum')) { 4 } else { 8 }
 } else { $ChunkSize }
 $ChunkFrameCounts = New-Object 'Collections.Generic.List[int]'
 $RemainingFrames = $TotalFrames
@@ -587,6 +633,8 @@ $Plan = [ordered]@{
     vr_occlusion_fill=if($VRMode-eq'DepthSBS'){$VROcclusionFill}else{$null}
     vr_edge_feather=if($VRMode-eq'DepthSBS'){$VREdgeFeather}else{$null}
     vr_temporal_smoothing=if($VRMode-eq'DepthSBS'){$VRTemporalSmoothing}else{$null}
+    vr_max_disparity_percent=if($VRMode-eq'DepthSBS'){$VRMaxDisparityPercent}else{$null}
+    vr_target_fps=if($VRMode-ne'Off' -and $VRTargetFps-gt 0){$VRTargetFps}else{$null}
     vr_eye_swap=if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
     realtime_buffer_seconds=if($IsPreviewOnly){$RealtimeBufferSeconds}else{$null}
     realtime_buffer_frames=if($IsPreviewOnly){$RealtimeBufferFrames}else{$null}
@@ -609,6 +657,8 @@ $Plan = [ordered]@{
         motion_backend=$SelectedMotionBackend; raft_updates=$SelectedRaftUpdates
         fps_mode=$RealtimeFpsMode
         frame_generation=$RealtimeFrameGeneration
+        target_fps=if($UseNvidiaDlssg){$ResolvedRealtimeTargetFps}else{$null}
+        guide_worker_threads=$ResolvedGuideWorkerThreads
     }}else{$null}
 }
 Write-Output ('STUDIO_PLAN '+($Plan|ConvertTo-Json -Compress -Depth 4))
@@ -665,9 +715,10 @@ try {
     )
     if ($DepthCodeRoot) { $GuideArgs += @('--depth-code-root',$DepthCodeRoot) }
     if ($SelectedMotionBackend -eq 'raft') {
-        $GuideArgs += @('--raft-weights',$RaftWeights,'--raft-updates',$SelectedRaftUpdates,'--raft-batch-size','4')
+        $RaftBatchSize = if ($ResolvedHardwareProfile -eq 'HighVram') { 8 } else { 4 }
+        $GuideArgs += @('--raft-weights',$RaftWeights,'--raft-updates',$SelectedRaftUpdates,'--raft-batch-size',$RaftBatchSize)
     }
-    if ($IsPreviewOnly) { $GuideArgs += @('--opencv-threads','2') }
+    $GuideArgs += @('--opencv-threads',$ResolvedGuideWorkerThreads)
     if (-not $VsrBeforeDlss) {
         $GuideArgs += @(
             '--decode-video',$InputVideo,'--ffmpeg',$Ffmpeg,
@@ -690,7 +741,17 @@ try {
         if ($RealtimeControlPath) { $HostArgs += @('--control-file',[IO.Path]::GetFullPath($RealtimeControlPath)) }
         if ($RealtimeFullscreen) { $HostArgs += '--fullscreen' }
         if ($RealtimeFrameGeneration -eq 'MotionGPU') { $HostArgs += '--frame-generation-motion' }
-        if ($RealtimeFrameGeneration -eq 'NvidiaDLSSG') { $HostArgs += '--frame-generation-nvidia' }
+        if ($UseNvidiaDlssg) {
+            $GeneratedFrames = switch ($RealtimeFrameGeneration) {
+                'NvidiaMFGx3' { 2 }
+                'NvidiaMFGx4' { 3 }
+                default { 1 }
+            }
+            $HostArgs += @('--frame-generation-nvidia','--dlssg-generated-frames',$GeneratedFrames)
+            if ($RealtimeFrameGeneration -eq 'NvidiaDynamicMFG') {
+                $HostArgs += @('--dlssg-dynamic','--dlssg-dynamic-target',$ResolvedRealtimeTargetFps)
+            }
+        }
     }
     elseif ($DirectEncode) { $HostArgs += @('--encode-mp4',$VideoOnly) }
     else { $HostArgs += @('--encode-chunks-dir',$HostEncodedChunkDirectory) }
@@ -703,8 +764,8 @@ try {
     if ($LivePreview -and -not $IsPreviewOnly -and -not $VsrAfterDlss) { $HostArgs += '--preview' }
     # One current runtime serves realtime, recording and VR.  -s is essential
     # in portable builds: otherwise a user's global onnxruntime package can
-    # shadow bundled DirectML (this happened on the RTX 5080 and silently
-    # moved depth inference to the CPU).  Keeping the old frozen exe here also
+    # shadow bundled DirectML and silently move depth inference to the CPU.
+    # Keeping the old frozen exe here also
     # made offline mode reject newer motion/depth controls.
     $GuideProcess = Start-ProtocolProcess $UpscalerPython (@('-s','-B',$GuideGeneratorScript)+$GuideArgs) $Root
     if ($VsrBeforeDlss) {
@@ -1022,7 +1083,14 @@ try {
             $SpatialStereo = if ($VRSbsLayout -in @('HalfOU','FullOU')) { 'top-bottom' } else { 'left-right' }
             $VrArgs=@('-y','-v','error','-i',$FlatOutput,'-filter_complex',$VrFilter,'-map','[v]','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$CodecTag+@('-c:a','copy','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrEncoded)
             Run-Tool $Ffmpeg $VrArgs 'VR SBS encoding failed'
-            Run-Tool $UpscalerPython @('-s','-B',$SpatialMediaTool,'-i','--v2','--projection','none','--stereo',$SpatialStereo,$VrEncoded,$OutputVideo) 'VR stereo metadata injection failed'
+            $VrMetadataInput = $VrEncoded
+            if ($VRTargetFps -gt 0) {
+                $VrRateEncoded = Join-Path $Work 'vr-target-fps.mp4'
+                $VrRateFilter = "minterpolate=fps=$($VRTargetFps):mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
+                Run-Tool $Ffmpeg (@('-y','-v','error','-i',$VrEncoded,'-vf',$VrRateFilter,'-map','0:v:0','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$CodecTag+@('-c:a','copy','-shortest','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrRateEncoded)) 'VR target frame-rate synthesis failed'
+                $VrMetadataInput = $VrRateEncoded
+            }
+            Run-Tool $UpscalerPython @('-s','-B',$SpatialMediaTool,'-i','--v2','--projection','none','--stereo',$SpatialStereo,$VrMetadataInput,$OutputVideo) 'VR stereo metadata injection failed'
         } elseif ($VRMode -eq 'DepthSBS') {
             Stage 7 8 'Creating depth-warped stereoscopic 3D VR views'
             Emit-Progress '3D VR' 'Synthesizing distinct left/right views from neural depth' 95 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
@@ -1040,6 +1108,7 @@ try {
                 '--occlusion-fill',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VROcclusionFill)),
                 '--edge-feather',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VREdgeFeather)),
                 '--temporal-smoothing',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRTemporalSmoothing)),
+                '--max-disparity-percent',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRMaxDisparityPercent)),
                 '--codec',$CodecNameVr,'--quality',$Quality
             )
             if ($VREyeSwap) { $VrDepthArgs += '--eye-swap' }
@@ -1047,11 +1116,29 @@ try {
             $StereoMetadata = if ($VRSbsLayout -in @('HalfOU','FullOU')) { 'top_bottom' } else { 'left_right' }
             $SpatialStereo = if ($VRSbsLayout -in @('HalfOU','FullOU')) { 'top-bottom' } else { 'left-right' }
             Run-Tool $Ffmpeg @('-y','-v','error','-i',$VrDepthVideoOnly,'-i',$FlatOutput,'-map','0:v:0','-map','1:a?','-c','copy','-shortest','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrEncoded) 'Depth VR audio mux failed'
-            Run-Tool $UpscalerPython @('-s','-B',$SpatialMediaTool,'-i','--v2','--projection','none','--stereo',$SpatialStereo,$VrEncoded,$OutputVideo) 'Depth VR metadata injection failed'
+            $VrMetadataInput = $VrEncoded
+            if ($VRTargetFps -gt 0) {
+                $VrRateEncoded = Join-Path $Work 'vr-target-fps.mp4'
+                $Encoder = if ($Codec -eq 'H265') { 'hevc_nvenc' } else { 'h264_nvenc' }
+                $CodecTag = if ($Codec -eq 'H265') { @('-tag:v','hvc1') } else { @() }
+                $VrRateFilter = "minterpolate=fps=$($VRTargetFps):mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
+                Run-Tool $Ffmpeg (@('-y','-v','error','-i',$VrEncoded,'-vf',$VrRateFilter,'-map','0:v:0','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$CodecTag+@('-c:a','copy','-shortest','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrRateEncoded)) 'Depth VR target frame-rate synthesis failed'
+                $VrMetadataInput = $VrRateEncoded
+            }
+            Run-Tool $UpscalerPython @('-s','-B',$SpatialMediaTool,'-i','--v2','--projection','none','--stereo',$SpatialStereo,$VrMetadataInput,$OutputVideo) 'Depth VR metadata injection failed'
         } elseif ($VRMode -eq 'Equirect360') {
             Stage 7 8 'Injecting spherical-video v2 metadata'
             Emit-Progress 'VR 360' 'Injecting equirectangular sv3d metadata' 97 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
-            Run-Tool $UpscalerPython @('-s','-B',$SpatialMediaTool,'-i','--v2','--projection','equirectangular','--stereo','none',$FlatOutput,$OutputVideo) 'VR 360 metadata injection failed'
+            $VrMetadataInput = $FlatOutput
+            if ($VRTargetFps -gt 0) {
+                $VrRateEncoded = Join-Path $Work 'vr-target-fps.mp4'
+                $Encoder = if ($Codec -eq 'H265') { 'hevc_nvenc' } else { 'h264_nvenc' }
+                $CodecTag = if ($Codec -eq 'H265') { @('-tag:v','hvc1') } else { @() }
+                $VrRateFilter = "minterpolate=fps=$($VRTargetFps):mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
+                Run-Tool $Ffmpeg (@('-y','-v','error','-i',$FlatOutput,'-vf',$VrRateFilter,'-map','0:v:0','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$CodecTag+@('-c:a','copy','-shortest','-movflags','+faststart',$VrRateEncoded)) 'VR 360 target frame-rate synthesis failed'
+                $VrMetadataInput = $VrRateEncoded
+            }
+            Run-Tool $UpscalerPython @('-s','-B',$SpatialMediaTool,'-i','--v2','--projection','equirectangular','--stereo','none',$VrMetadataInput,$OutputVideo) 'VR 360 metadata injection failed'
         }
     }
     $ProcessingElapsedSeconds = $PipelineWatch.Elapsed.TotalSeconds
@@ -1077,6 +1164,7 @@ try {
     $TotalTimingMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\stotal_ms=(?<total>[0-9.]+)')
     $EncodeTimingMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\schunk_encode_ms=(?<encode>[0-9.]+)')
     $PreviewFpsMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\spreview_present_fps=(?<fps>[0-9.]+)')
+    $MfgStatsMatch = [regex]::Match($HostText, '(?:HOST_DLSSG_STATS real_frames=|\[streamline\] aggregate real=)(?<real>[0-9]+) presented=(?<presented>[0-9]+) generated=(?<generated>[0-9]+) (?:actual_)?multiplier=(?<multiplier>[0-9.]+) max_per_render=(?<max>[0-9]+)')
     $UnderrunMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\sbuffer_underruns=(?<count>[0-9]+)')
     $MaxStreamWaitMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\sbuffer_underrun_max_ms=(?<ms>[0-9.]+)')
     $HostDeliveryFps = if ($TotalTimingMatch.Success -and $EncodeTimingMatch.Success) {
@@ -1094,7 +1182,7 @@ try {
     $WallFps = if ($ProcessingElapsedSeconds -gt 0) { $TotalFrames / $ProcessingElapsedSeconds } else { 0.0 }
     $DisplayFps = if ($PreviewFpsMatch.Success) { [double]::Parse($PreviewFpsMatch.Groups['fps'].Value, [Globalization.CultureInfo]::InvariantCulture) } else { 0.0 }
     $Result = [ordered]@{
-        schema = 'dlss5-video-studio-run/6'
+        schema = 'dlss5-video-studio-run/7'
         status = 'ok'
         input_video = if ($IsNetworkSource) { '[network stream]' } else { $InputVideo }
         source_kind = if ($IsNetworkSource) { 'network' } else { 'file' }
@@ -1124,6 +1212,8 @@ try {
         vr_occlusion_fill = if($VRMode-eq'DepthSBS'){$VROcclusionFill}else{$null}
         vr_edge_feather = if($VRMode-eq'DepthSBS'){$VREdgeFeather}else{$null}
         vr_temporal_smoothing = if($VRMode-eq'DepthSBS'){$VRTemporalSmoothing}else{$null}
+        vr_max_disparity_percent = if($VRMode-eq'DepthSBS'){$VRMaxDisparityPercent}else{$null}
+        vr_target_fps = if($VRMode-ne'Off' -and $VRTargetFps-gt 0){$VRTargetFps}else{$null}
         vr_eye_swap = if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
         output_mode = $Mode
         depth_backend = $DepthProvider
@@ -1151,6 +1241,13 @@ try {
         source_fps = $SourceRate
         realtime_fps_mode = if($IsPreviewOnly){$RealtimeFpsMode}else{$null}
         realtime_frame_generation = if($IsPreviewOnly){$RealtimeFrameGeneration}else{$null}
+        realtime_target_fps = if($IsPreviewOnly -and $UseNvidiaDlssg){$ResolvedRealtimeTargetFps}else{$null}
+        mfg_presented_frames = if($MfgStatsMatch.Success){[long]$MfgStatsMatch.Groups['presented'].Value}else{$null}
+        mfg_generated_frames = if($MfgStatsMatch.Success){[long]$MfgStatsMatch.Groups['generated'].Value}else{$null}
+        mfg_actual_multiplier = if($MfgStatsMatch.Success){[double]::Parse($MfgStatsMatch.Groups['multiplier'].Value,[Globalization.CultureInfo]::InvariantCulture)}else{$null}
+        mfg_max_presented_per_render = if($MfgStatsMatch.Success){[int]$MfgStatsMatch.Groups['max'].Value}else{$null}
+        mfg_actually_generated = if($MfgStatsMatch.Success){[long]$MfgStatsMatch.Groups['generated'].Value -gt 0}else{$null}
+        guide_worker_threads = [int]$ResolvedGuideWorkerThreads
         start_seconds = $StartSeconds
         frames = $TotalFrames
         chunks = $Chunks

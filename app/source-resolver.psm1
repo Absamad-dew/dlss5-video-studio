@@ -44,7 +44,7 @@ function Resolve-OnlineVideoSource {
     param(
         [Parameter(Mandatory)] [string] $PageUrl,
         [Parameter(Mandatory)] [string] $YtDlpPath,
-        [ValidateSet(720,1080,1440,2160)] [int] $MaxHeight = 1080,
+        [ValidateSet(0,540,720,1080,1440,2160,4320)] [int] $MaxHeight = 1080,
         [ValidateSet('None','chrome','edge','firefox')] [string] $CookiesBrowser = 'None',
         [Parameter(Mandatory)] [string] $HeadersPath
     )
@@ -53,7 +53,11 @@ function Resolve-OnlineVideoSource {
 
     # Prefer one progressive HTTPS stream: it starts faster and provides
     # deterministic random access for the player's restart-on-seek model.
-    $Format = "best[height<=$MaxHeight][protocol=https]/best[height<=$MaxHeight]/best"
+    $Format = if ($MaxHeight -gt 0) {
+        "best[height<=$MaxHeight][protocol=https]/best[height<=$MaxHeight]/best"
+    } else {
+        'best[protocol=https]/best'
+    }
     $Args = @('--no-playlist','--no-warnings','--dump-single-json','-f',$Format)
     if ($CookiesBrowser -ne 'None') { $Args += @('--cookies-from-browser',$CookiesBrowser) }
     $Args += @('--',$PageUrl)

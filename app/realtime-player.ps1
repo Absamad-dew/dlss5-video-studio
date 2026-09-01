@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory)] [string] $ConfigPath,
     [Parameter(Mandatory)] [string] $ControlPath,
     [ValidateSet('Source','Same','4K','2160p','1440p','1080p','720p','540p')] [string] $OutputMode = 'Source',
-    [ValidateSet('Auto','Laptop8GB','RTX5080')] [string] $HardwareProfile = 'Auto',
+    [ValidateSet('UltraFast','Fast','Medium','Heavy','Maximum')] [string] $PerformanceProfile = 'Medium',
+    [ValidateSet('Auto','Standard','HighVram')] [string] $HardwareProfile = 'Auto',
     [ValidateSet('Auto','Native','Quality','Balanced','Performance')] [string] $RenderPreset = 'Auto',
     [ValidateSet('DA2Small','VideoDepthSmall','DA3Small','DA3Base')] [string] $DepthModelProfile = 'DA2Small',
     [ValidateSet('None','NanoVSR','AnimeSR','FlashVSR','DLoRAL')] [string] $Upscaler = 'None',
@@ -15,7 +16,7 @@ param(
     [ValidateRange(3,30)] [int] $BufferSeconds = 5,
     [ValidateRange(0,192)] [int] $ChunkFrames = 0,
     [double] $StartSeconds = 0,
-    [ValidateSet(720,1080,1440,2160)] [int] $NetworkMaxHeight = 1080,
+    [ValidateSet(0,540,720,1080,1440,2160,4320)] [int] $NetworkMaxHeight = 1080,
     [ValidateSet('None','chrome','edge','firefox')] [string] $CookiesBrowser = 'None',
     [ValidateRange(256,768)] [int] $GuideWidth = 320,
     [ValidateRange(1,24)] [int] $DepthInterval = 24,
@@ -27,8 +28,10 @@ param(
     [ValidateSet('quality','balanced','realtime')] [string] $MotionPreset = 'realtime',
     [ValidateSet('dis','raft')] [string] $MotionBackend = 'dis',
     [ValidateRange(1,12)] [int] $RaftUpdates = 4,
-    [ValidateSet('Source','Double','60')] [string] $FpsMode = 'Source',
-    [ValidateSet('Off','MotionGPU','CompatibilityBlend','NvidiaDLSSG','NvidiaOpticalFlow','Rife')] [string] $FrameGeneration = 'Off',
+    [ValidateSet('Source','Double','60','72','90','120')] [string] $FpsMode = 'Source',
+    [ValidateSet('Off','MotionGPU','CompatibilityBlend','NvidiaDLSSG','NvidiaDLSSGx2','NvidiaMFGx3','NvidiaMFGx4','NvidiaDynamicMFG','NvidiaOpticalFlow','Rife')] [string] $FrameGeneration = 'Off',
+    [ValidateSet(0,60,72,90,120)] [int] $TargetFps = 0,
+    [ValidateRange(0,16)] [int] $GuideWorkerThreads = 0,
     [switch] $EnableAudio,
     [ValidateRange(0,100)] [int] $Volume = 80,
     [switch] $Fullscreen
@@ -152,7 +155,7 @@ Write-Output ('STUDIO_PLAYER_READY ' + (@{
     duration_seconds=[math]::Round($Duration,3);buffer_seconds=$BufferSeconds;chunk_frames=$ChunkFrames;fullscreen=[bool]$Fullscreen
     source_kind=if($IsOnline){'network'}else{'file'};guide_width=$GuideWidth;depth_interval=$DepthInterval
     motion_backend=$MotionBackend;fps_mode=$FpsMode;frame_generation=$FrameGeneration;audio=[bool]$EnableAudio;volume=$Volume
-    hardware_profile=$HardwareProfile;render_preset=$RenderPreset
+    performance_profile=$PerformanceProfile;hardware_profile=$HardwareProfile;render_preset=$RenderPreset;target_fps=$TargetFps;guide_worker_threads=$GuideWorkerThreads
     depth_model_profile=$DepthModelProfile
 }|ConvertTo-Json -Compress))
 
@@ -161,7 +164,7 @@ while ($true) {
     $ChildArgs = @(
         '-NoProfile','-ExecutionPolicy','Bypass','-File',$Runner,
         '-InputVideo',$ResolvedInput,'-ConfigPath',$ConfigPath,
-        '-OutputMode',$OutputMode,'-PerformanceProfile','Realtime',
+        '-OutputMode',$OutputMode,'-PerformanceProfile',$PerformanceProfile,
         '-HardwareProfile',$HardwareProfile,'-RealtimeRenderPreset',$RenderPreset,
         '-DepthModelProfile',$DepthModelProfile,
         '-Upscaler',$Upscaler,'-UpscalerVariant',$UpscalerVariant,
@@ -177,7 +180,8 @@ while ($true) {
         '-RealtimeTemporalDepth',([string]::Format($Invariant,'{0:0.###}',$TemporalDepth)),
         '-RealtimeSceneCutThreshold',([string]::Format($Invariant,'{0:0.###}',$SceneCutThreshold)),
         '-RealtimeMotionPreset',$MotionPreset,'-RealtimeMotionBackend',$MotionBackend,'-RealtimeRaftUpdates',$RaftUpdates,
-        '-RealtimeFpsMode',$FpsMode,'-RealtimeFrameGeneration',$FrameGeneration
+        '-RealtimeFpsMode',$FpsMode,'-RealtimeFrameGeneration',$FrameGeneration,
+        '-RealtimeTargetFps',$TargetFps,'-GuideWorkerThreads',$GuideWorkerThreads
     )
     if ($HeadersPath) { $ChildArgs += @('-InputHeadersPath',$HeadersPath) }
     if ($InputTlsNoVerify) { $ChildArgs += '-InputTlsNoVerify' }

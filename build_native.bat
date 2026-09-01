@@ -8,7 +8,16 @@ set "OUT=%DLSS5_BUILD_OUT%"
 
 if not exist "%OUT%" mkdir "%OUT%"
 
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+set "VSROOT="
+if exist "%VSWHERE%" for /f "usebackq tokens=*" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%I"
+if defined VSROOT set "VCVARS=%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+if not defined VCVARS set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+if not exist "%VCVARS%" (
+  echo Visual C++ x64 build tools were not found.
+  exit /b 1
+)
+call "%VCVARS%" >nul
 if errorlevel 1 exit /b 1
 
 pushd "%SRC%"
