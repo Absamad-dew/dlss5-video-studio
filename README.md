@@ -1,10 +1,10 @@
-# DLSS5 Video Studio 16
+# DLSS5 Video Studio 19
 
 Windows video player/processor that reconstructs motion and depth from ordinary video, evaluates NVIDIA NGX through a D3D12 host, and can present the result with official NVIDIA DLSS Frame Generation through Streamline + Reflex.
 
 The repository contains source code and dependency installers. It intentionally excludes proprietary NVIDIA DLLs, the user's custom `nvngx_dlssnr.dll`, FFmpeg binaries, ReShade binaries, portable Python, and very large optional model weights. A small open-licensed core model pack for an existing V11 portable folder is available from [GitHub Releases](https://github.com/Absamad-dew/dlss5-video-studio/releases).
 
-## Version 16 highlights
+## Version 19 highlights
 
 - three dedicated workspaces: Realtime, Recording, and VR / 3D;
 - five universal profiles — Ultra Fast, Fast, Medium, Heavy, and Maximum — with automatic adaptation by VRAM, resolution, and CPU capacity;
@@ -20,7 +20,7 @@ The repository contains source code and dependency installers. It intentionally 
 - portable GPU motion-compensated x2 fallback when DLSS-G is unavailable;
 - Depth Anything V2 Small, Video Depth Anything Small, and Depth Anything 3 Small/Base/Large;
 - true depth-warped stereoscopic VR output after the DLSS5 pass, with fast inverse warp, layered z-splat, and a new gradient-aware Temporal LDI renderer that reconstructs a far background plate and repairs disocclusions spatially and across time;
-- optional official M2SVid full-attention second-eye generation: Temporal LDI exports a geometric reprojection plus disocclusion mask, while one-step diffusion reconstructs hidden content in overlapping windows of up to 25 frames; Hybrid and Full blending are exposed separately;
+- Temporal Atlas 2K/4K stereo repair: sparse bidirectional motion/depth checks recover hidden background from past and future frames, accepted RGB is sampled at native resolution, and MI-GAN runs only on at most two grouped residual ROIs per eye; Moebius and M2SVid remain separate experiments;
 - robust percentile depth normalization, temporally stabilized depth range, subject/comfort/manual convergence, cinematic/comfort/linear disparity curves, independent foreground/background parallax, configurable 2–12 LDI layers, edge protection, comfort limiting, and repaired-region sharpening;
 - explicit VR DLSS5 policy: one genuine Feature 18 pass before stereo, or a maximum-quality mode that splits the generated stereo view and performs a second genuine DLSS5 pass independently for each eye before restacking;
 - headset-safe H.264 High and HEVC Main/Main10 export, exact video-frame-preserving audio muxing, and a mandatory decode/profile check that rejects the HEVC Rext/GBR combination responsible for black playback;
@@ -50,13 +50,13 @@ Version 14 rebuilds DepthSBS output around a motion-stabilized layered renderer.
 
 Version 15 adds Temporal LDI and three VR presets. A laptop end-to-end smoke test completed source decoding, guide generation, genuine Feature 18, stereo synthesis, audio mux, metadata injection, and first-frame validation for all eight requested frames. The direct 604×540 Full-SBS Temporal LDI stage measured 19.19 FPS including both generated eyes. A separate test verified the maximum path with three genuine Feature 18 evaluations: one before stereo and one independently for each eye; the resulting HEVC Main/yuv420p file contained every requested frame and decoded successfully.
 
-Version 17 adds the official M2SVid full-attention checkpoint as an optional generative VR backend. The Windows adapter uses native PyTorch 2 SDPA in place of xFormers, converts the conditioning autoencoders to the same supported path, casts the model before its CUDA transfer to avoid a transient FP32 VRAM spike, keeps it resident between windows, and blends overlaps. Run `INSTALL_VR_MODELS.cmd` to add the roughly 9 GB official M2SVid and OpenCLIP weights; ordinary Temporal LDI remains the zero-download fallback.
+Version 19 replaces per-frame diffusion as the default VR repair with Temporal Atlas. GAPW emits strict left/right visibility masks; the worker uses sparse lookaround distances, bidirectional RAFT/DIS consistency, photometric rejection, background-biased depth checks, and scene boundaries before copying real neighbouring-frame pixels at native resolution. Only the residual mask reaches the compact MI-GAN ONNX pipeline, grouped into at most two DirectML launches per eye. `INSTALL_VR_MODELS.cmd` downloads the verified resumable 28 MB model; Moebius and M2SVid remain optional experiments.
 
-The final RTX 4060 Laptop validation processed a six-frame clip through two overlapping windows, preserved every frame and both color eyes in the HEVC Full-SBS output, and reached 0.50 generated frames/s after warm-up at the 384 internal setting. A cold two-frame window measured 0.24 frames/s, so this backend is explicitly an offline maximum-quality option rather than a realtime preset.
+Laptop validation on a moving 40-frame person clip recovered 66.96% of disocclusion pixels from real frames and left 32.22% for neural filling. Full-SBS 810x1440 Atlas ran at 0.85 FPS. A true UHD portrait-eye test (2160x3840 per eye, 4320x3840 container) ran at 0.56 FPS; its GAPW stage reached 3.21 FPS. Bounded ROI grouping improved the smaller control case from 0.23 to 1.23 FPS.
 
 Version 16 removes the recurring audio hold/release loop. A 25-second laptop playback kept one prewarmed audio PID and produced no forced holds; the stricter sampled-clock regression measured at most 51 ms steady drift. Three pause/resume cycles preserved the same device and the paused sample clock moved by at most 38 ms. Recording and DepthSBS smoke tests used shared RGB memory, completed every requested frame, and decoded successfully. The adaptive Temporal LDI test reports its actual scene/motion stereo scale in progress telemetry rather than silently changing strength.
 
-The model and renderer trade-offs, including DepthCrafter, StereoCrafter, and M2SVid, are documented in VR_RESEARCH_RU.md.
+The model and renderer trade-offs, including Moebius, DepthCrafter, StereoCrafter, and experimental M2SVid, are documented in VR_RESEARCH_RU.md.
 
 ## Build prerequisites
 
@@ -68,9 +68,9 @@ The model and renderer trade-offs, including DepthCrafter, StereoCrafter, and M2
 
 Build the native host with `build_native.bat` and the WPF launcher with `build_ui.bat`. `scripts/Install-DepthModels.ps1` downloads the open depth checkpoints into a prepared portable runtime.
 
-## Core model pack
+## Main model pack
 
-Extract DLSS5_VIDEO_STUDIO_CORE_MODELS_V11.zip directly into the program folder. It installs DA2 Small, DA3 Small, and TorchVision RAFT Small into their exact runtime paths. DA3 Large is optional and is installed separately because its local snapshot is about 1.5 GB. See MODEL_PACK_CORE_RU.md for the included profiles and verification command. The archive supplements an existing portable build; it is not the application or NVIDIA runtime.
+Extract `DLSS5_VIDEO_STUDIO_MAIN_MODELS_V19.zip` directly into the program folder. It installs DA2 Small, DA3 Small, TorchVision RAFT Small, and MI-GAN for Temporal Atlas into their exact paths. Run `VERIFY_MAIN_MODELS.cmd` after extraction. DA3 Large, Moebius, and M2SVid remain separate. See `MODEL_PACK_MAIN_RU.md`; the archive supplements an existing portable build and does not contain the application or proprietary NVIDIA runtime.
 
 ## Important limitations
 

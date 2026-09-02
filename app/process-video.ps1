@@ -24,11 +24,11 @@ param(
     [ValidateRange(0.0,24.0)] [double] $VREdgeFeather = 2.0,
     [ValidateRange(0.0,0.95)] [double] $VRTemporalSmoothing = 0.55,
     [ValidateRange(0.5,5.0)] [double] $VRMaxDisparityPercent = 2.4,
-    [ValidateSet('Inverse','Layered','TemporalLDI')] [string] $VRStereoMethod = 'TemporalLDI',
+    [ValidateSet('Inverse','Layered','TemporalLDI','GAPW')] [string] $VRStereoMethod = 'GAPW',
     [ValidateSet('PreStereo','PreAndPerEye')] [string] $VRDLSSMode = 'PreStereo',
-    [ValidateSet('Off','M2SVidHybrid','M2SVidFull')] [string] $VRGenerativeBackend = 'Off',
-    [ValidateSet('Auto','384','512','640','768')] [string] $VRGenerativeResolution = 'Auto',
-    [ValidateRange(0,25)] [int] $VRGenerativeChunkFrames = 0,
+    [ValidateSet('Off','TemporalAtlas','MoebiusSparse','M2SVidHybrid','M2SVidFull')] [string] $VRGenerativeBackend = 'Off',
+    [ValidateSet('Auto','384','512','640','768','1024','1536')] [string] $VRGenerativeResolution = 'Auto',
+    [ValidateRange(0,30)] [int] $VRGenerativeChunkFrames = 0,
     [ValidateRange(0,8)] [int] $VRGenerativeOverlapFrames = 2,
     [ValidateRange(0.0,1.0)] [double] $VRGenerativeHoleStrength = 1.0,
     [ValidateRange(0.0,1.0)] [double] $VRGenerativeRefineStrength = 0.30,
@@ -147,11 +147,20 @@ $UpscalerThirdParty = Join-Path $Root 'third_party'
 $RaftWeights = Join-Path $Root 'models\motion\raft_small_C_T_V2-01064c6d.pth'
 $SpatialMediaTool = Join-Path $Tools 'spatialmedia\__main__.py'
 $VRDepthWorker = Join-Path $Tools 'vr_depth\vr_depth_worker.py'
+$TemporalAtlasWorker = Join-Path $Tools 'vr_generative\temporal_atlas_worker.py'
+$MiganModel = Join-Path $Root 'models\vr\migan\migan_pipeline_v2.onnx'
 $M2SVidWorker = Join-Path $Tools 'vr_generative\m2svid_worker.py'
 $M2SVidRepository = Join-Path $Root 'third_party\m2svid'
 $M2SVidCheckpoint = Join-Path $Root 'models\vr\m2svid\m2svid_weights.pt'
 $M2SVidOpenClip = Join-Path $Root 'models\vr\m2svid\open_clip_pytorch_model.bin'
 $M2SVidInstallStatus = Join-Path $Root 'models\vr\m2svid\install.json'
+$MoebiusWorker = Join-Path $Tools 'vr_generative\moebius_worker.py'
+$MoebiusRepository = Join-Path $Root 'third_party\moebius'
+$MoebiusModelRoot = Join-Path $Root 'models\vr\moebius'
+$MoebiusCheckpoint = Join-Path $MoebiusModelRoot 'ft_places2\diffusion_pytorch_model.bin'
+$MoebiusVae = Join-Path $MoebiusModelRoot 'vae'
+$MoebiusSitePackages = Join-Path $MoebiusModelRoot 'site-packages'
+$MoebiusInstallStatus = Join-Path $MoebiusModelRoot 'install.json'
 $SourceResolver = Join-Path $PSScriptRoot 'source-resolver.psm1'
 $YtDlp = Join-Path $Tools 'yt-dlp.exe'
 
@@ -194,6 +203,45 @@ function Run-Tool([string] $File, [object[]] $Arguments, [string] $Failure) {
     try {
         $ErrorActionPreference = 'Continue'
         & $File @Arguments 2>&1 | ForEach-Object { Write-Output ([string]$_) }
+        $NativeExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorAction
+    }
+    if ($NativeExitCode -ne 0) { throw "$Failure (exit code $NativeExitCode)" }
+}
+
+function Run-TemporalAtlasTool([string] $File, [object[]] $Arguments, [string] $Failure) {
+    $PreviousErrorAction = $ErrorActionPreference
+    $NativeExitCode = 1
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $File @Arguments 2>&1 | ForEach-Object {
+            $Line = [string]$_
+            Write-Output $Line
+            if ($Line -match '^TEMPORAL_ATLAS_PROGRESS (?<json>.+)$') {
+                try {
+                    $AtlasProgress = $Matches.json | ConvertFrom-Json
+                    $Done = [int]$AtlasProgress.frames
+                    $All = [math]::Max(1,[int]$AtlasProgress.total)
+                    $Ratio = [math]::Max(0.0,[math]::Min(1.0,$Done/[double]$All))
+                    $Elapsed = [double]$AtlasProgress.frames/[math]::Max(0.001,[double]$AtlasProgress.fps)
+                    $Eta = [math]::Max(0.0,($All-$Done)/[math]::Max(0.001,[double]$AtlasProgress.fps))
+                    $Payload = [ordered]@{
+                        phase='Temporal Atlas VR'
+                        message=('Real frames {0:P0} | neural residual {1:P0}' -f [double]$AtlasProgress.atlas_coverage,[double]$AtlasProgress.residual_fraction)
+                        percent=[math]::Round(96.0+2.5*$Ratio,3)
+                        processed_frames=$Done;total_frames=$All
+                        elapsed_seconds=[math]::Round($PipelineWatch.Elapsed.TotalSeconds,3)
+                        eta_seconds=[math]::Round($Eta+2.0,3)
+                        phase_fps=[math]::Round([double]$AtlasProgress.fps,4)
+                    }
+                    Write-Output ('STUDIO_PROGRESS_JSON '+($Payload|ConvertTo-Json -Compress))
+                } catch {}
+            } elseif ($Line -match '^TEMPORAL_ATLAS_DONE (?<json>.+)$') {
+                try { $script:TemporalAtlasMetrics = $Matches.json | ConvertFrom-Json } catch {}
+            }
+        }
         $NativeExitCode = $LASTEXITCODE
     }
     finally {
@@ -463,18 +511,35 @@ if (($PreviewOnly -and $RealtimeMotionBackend -eq 'raft') -or
 }
 if ($VRMode -ne 'Off') { $RequiredFiles += @($UpscalerPython,$SpatialMediaTool) }
 if ($VRMode -eq 'DepthSBS') { $RequiredFiles += $VRDepthWorker }
-if ($VRMode -eq 'DepthSBS' -and $VRGenerativeBackend -ne 'Off') {
+if ($VRMode -eq 'DepthSBS' -and $VRGenerativeBackend -eq 'TemporalAtlas') {
+    $RequiredFiles += @($TemporalAtlasWorker,$RaftWeights,$MiganModel)
+}
+if ($VRMode -eq 'DepthSBS' -and $VRGenerativeBackend -in @('M2SVidHybrid','M2SVidFull')) {
     $RequiredFiles += @(
         $M2SVidWorker,$M2SVidCheckpoint,$M2SVidOpenClip,$M2SVidInstallStatus,
         (Join-Path $M2SVidRepository 'configs\m2svid.yaml'),
         (Join-Path $M2SVidRepository 'm2svid\models_for_sgm\m2svid_model.py')
     )
 }
-if ($VRMode -eq 'DepthSBS' -and $VRGenerativeBackend -ne 'Off' -and
+if ($VRMode -eq 'DepthSBS' -and $VRGenerativeBackend -in @('M2SVidHybrid','M2SVidFull') -and
     (-not (Test-Path -LiteralPath $M2SVidInstallStatus -PathType Leaf) -or
      -not (Test-Path -LiteralPath $M2SVidCheckpoint -PathType Leaf) -or
      -not (Test-Path -LiteralPath $M2SVidOpenClip -PathType Leaf))) {
-    throw 'Generative VR requires M2SVid and OpenCLIP weights. Run INSTALL_VR_MODELS.cmd in the program folder, then restart Studio.'
+    throw 'Experimental M2SVid requires its full checkpoint and OpenCLIP weights. Run INSTALL_M2SVID_EXPERIMENTAL.cmd in the program folder, then restart Studio.'
+}
+if ($VRMode -eq 'DepthSBS' -and $VRGenerativeBackend -eq 'MoebiusSparse') {
+    $RequiredFiles += @(
+        $MoebiusWorker,$MoebiusCheckpoint,$MoebiusInstallStatus,
+        (Join-Path $MoebiusVae 'config.json'),
+        (Join-Path $MoebiusVae 'diffusion_pytorch_model.bin'),
+        (Join-Path $MoebiusRepository 'config\model_cfg\moebius.yaml'),
+        (Join-Path $MoebiusRepository 'removal\v1_2\pipeline.py')
+    )
+    $RequiredDirectories += $MoebiusSitePackages
+    if (-not (Test-Path -LiteralPath $MoebiusInstallStatus -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $MoebiusCheckpoint -PathType Leaf)) {
+        throw 'Moebius Sparse Temporal is not installed. Run INSTALL_MOEBIUS_EXPERIMENTAL.cmd in the program folder, then restart Studio.'
+    }
 }
 foreach ($Path in $RequiredFiles) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Required file is missing: $Path" }
@@ -925,6 +990,7 @@ $UpscalerGpu = $null
 $UpscalerLoadSeconds = 0.0
 $UpscalerPeakVramMb = 0
 $UpscalerReservedVramMb = 0
+$script:TemporalAtlasMetrics = $null
 $DepthProvider = 'unknown'
 $MotionProvider = $null
 $RealtimeAffinityPartition = if ($IsPreviewOnly) { Get-RealtimeAffinityPartition } else { $null }
@@ -1649,13 +1715,18 @@ try {
             $VrDepthVideoOnly = Join-Path $Work 'vr-depth-video-only.mp4'
             $LayoutName = switch ($VRSbsLayout) { 'FullSBS' {'full-sbs'} 'HalfOU' {'half-ou'} 'FullOU' {'full-ou'} default {'half-sbs'} }
             $UseGenerativeVr = $VRGenerativeBackend -ne 'Off'
-            # M2SVid must see an undistorted, full-resolution left anchor and
-            # right-eye reprojection. Final Half-SBS/Half-OU packing happens
-            # only after the model has reconstructed the second view.
-            $VrWorkerLayout = if ($UseGenerativeVr) { 'full-sbs' } else { $LayoutName }
-            $VrWorkerEyeAnchor = if ($UseGenerativeVr) { 'left' } else { $VREyeAnchor.ToLowerInvariant() }
+            $UseTemporalAtlas = $VRGenerativeBackend -eq 'TemporalAtlas'
+            # Generative backends must see an undistorted, full-resolution
+            # left anchor and right-eye reprojection. Final headset packing
+            # happens only after the second view has been reconstructed.
+            # Temporal Atlas is different: it repairs both symmetrically
+            # rendered eyes and therefore keeps the requested final packing.
+            $VrWorkerLayout = if ($UseGenerativeVr -and -not $UseTemporalAtlas) { 'full-sbs' } else { $LayoutName }
+            $VrWorkerEyeAnchor = if ($UseTemporalAtlas) { 'symmetric' } elseif ($UseGenerativeVr) { 'left' } else { $VREyeAnchor.ToLowerInvariant() }
             $VrRightSeed = Join-Path $Work 'vr-right-seed.mkv'
             $VrRightMask = Join-Path $Work 'vr-right-disocclusion-mask.mkv'
+            $VrRightComposeMask = Join-Path $Work 'vr-right-compose-mask.mkv'
+            $VrLeftComposeMask = Join-Path $Work 'vr-left-compose-mask.mkv'
             $CodecNameVr = if ($Codec -eq 'H265') { 'h265' } else { 'h264' }
             $VrDepthPixelFormat = if($Codec-eq'H265' -and $VRPixelFormat-eq'HEVC10Bit'){'p010le'}else{'yuv420p'}
             $VrStereoMethodName = if($VRStereoMethod-eq'TemporalLDI'){'temporal-ldi'}else{$VRStereoMethod.ToLowerInvariant()}
@@ -1695,28 +1766,123 @@ try {
                 '--pixel-format',$VrDepthPixelFormat,
                 '--codec',$CodecNameVr,'--quality',$Quality
             )
-            if ($UseGenerativeVr) {
+            if ($UseTemporalAtlas) {
+                $VrDepthArgs += @('--right-compose-mask-output',$VrRightComposeMask,'--left-compose-mask-output',$VrLeftComposeMask)
+            } elseif ($UseGenerativeVr) {
                 $VrDepthArgs += @('--right-seed-output',$VrRightSeed,'--right-mask-output',$VrRightMask)
+                $VrDepthArgs += @('--right-compose-mask-output',$VrRightComposeMask)
             } elseif ($VREyeSwap) {
                 $VrDepthArgs += '--eye-swap'
             }
             Run-Tool $UpscalerPython $VrDepthArgs 'Depth-warped VR synthesis failed'
             if ($UseGenerativeVr) {
-                Emit-Progress 'Generative VR' 'M2SVid is reconstructing and refining the second eye' 96 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
-                $M2SVidGenerated = Join-Path $Work 'vr-m2svid-generated.mkv'
-                $M2MaxSide = if ($VRGenerativeResolution -eq 'Auto') { 0 } else { [int]$VRGenerativeResolution }
-                $M2Args = @(
-                    '-s','-B',$M2SVidWorker,'--ffmpeg',$Ffmpeg,
-                    '--repository',$M2SVidRepository,'--checkpoint',$M2SVidCheckpoint,'--open-clip',$M2SVidOpenClip,
-                    '--input-video',$FlatOutput,'--reprojected-video',$VrRightSeed,'--mask-video',$VrRightMask,
-                    '--output-video',$M2SVidGenerated,'--width',$OutputWidth,'--height',$OutputHeight,
-                    '--frames',$TotalFrames,'--fps',$Fps,'--max-side',$M2MaxSide,
-                    '--chunk-frames',$VRGenerativeChunkFrames,'--overlap-frames',$VRGenerativeOverlapFrames
-                )
-                Run-Tool $UpscalerPython $M2Args 'M2SVid generative second-eye reconstruction failed'
+                if ($UseTemporalAtlas) {
+                    Emit-Progress 'Temporal Atlas VR' 'Recovering hidden background from past and future source frames; AI handles only the residual mask' 96 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
+                    $AtlasOutput = Join-Path $Work 'vr-temporal-atlas.mp4'
+                    $AtlasResidualMask = Join-Path $Work 'vr-temporal-atlas-residual.mkv'
+                    $AtlasFlowMaxSide = if ($VRGenerativeResolution -ne 'Auto') {
+                        [int]$VRGenerativeResolution
+                    } else {
+                        switch ($PerformanceProfile) {
+                            'UltraFast' { 384 }
+                            'Fast' { 480 }
+                            'Heavy' { 640 }
+                            'Maximum' { 768 }
+                            default { 512 }
+                        }
+                    }
+                    $AtlasLookaround = if ($VRGenerativeChunkFrames -gt 0) {
+                        [math]::Min(30,$VRGenerativeChunkFrames)
+                    } else {
+                        switch ($PerformanceProfile) {
+                            'UltraFast' { 2 }
+                            'Fast' { 4 }
+                            'Heavy' { 8 }
+                            'Maximum' { 12 }
+                            default { 6 }
+                        }
+                    }
+                    $AtlasFlowBackend = if ($PerformanceProfile -in @('UltraFast','Fast')) { 'dis' } else { 'raft' }
+                    $AtlasRaftUpdates = if ($VRGenerativeOverlapFrames -gt 0) {
+                        [math]::Max(2,[math]::Min(8,$VRGenerativeOverlapFrames))
+                    } elseif ($PerformanceProfile -in @('Heavy','Maximum')) { 6 } else { 4 }
+                    $AtlasMinimumConfidence = [math]::Max(0.20,0.50-0.20*$VRGenerativeHoleStrength)
+                    $AtlasPhotometric = [math]::Min(0.30,0.16+0.08*$VRGenerativeRefineStrength)
+                    $AtlasDepthTolerance = [math]::Min(0.24,0.10+0.08*$VRGenerativeHoleStrength)
+                    # Bound DirectML dispatches per eye. At 2K/4K, grouping
+                    # nearby residuals is dramatically faster than launching
+                    # MI-GAN once for every thin silhouette fragment.
+                    $AtlasMaxNeuralRegions = if ($PerformanceProfile -in @('UltraFast','Fast')) { 1 } else { 2 }
+                    $AtlasArgs = @(
+                        '-s','-B',$TemporalAtlasWorker,'--ffmpeg',$Ffmpeg,
+                        '--source-video',$FlatOutput,'--stereo-video',$VrDepthVideoOnly,
+                        '--left-mask-video',$VrLeftComposeMask,'--right-mask-video',$VrRightComposeMask,
+                        '--depth-directory',$ChunkDirectory,'--output-video',$AtlasOutput,
+                        '--residual-mask-output',$AtlasResidualMask,
+                        '--width',$OutputWidth,'--height',$OutputHeight,'--frames',$TotalFrames,'--fps',$Fps,
+                        '--layout',$LayoutName,'--flow-backend',$AtlasFlowBackend,
+                        '--flow-max-side',$AtlasFlowMaxSide,'--lookaround-frames',$AtlasLookaround,
+                        '--minimum-confidence',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$AtlasMinimumConfidence)),
+                        '--photometric-threshold',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$AtlasPhotometric)),
+                        '--depth-tolerance',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$AtlasDepthTolerance)),
+                        '--scene-cut-threshold',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$SceneCutThreshold)),
+                        '--migan-model',$MiganModel,'--migan-provider','dml','--max-neural-regions',$AtlasMaxNeuralRegions,
+                        '--codec',$CodecNameVr,'--quality',$Quality
+                    )
+                    if ($AtlasFlowBackend -eq 'raft') {
+                        $AtlasArgs += @('--raft-weights',$RaftWeights,'--raft-updates',$AtlasRaftUpdates)
+                    }
+                    Run-TemporalAtlasTool $UpscalerPython $AtlasArgs 'Temporal Atlas multi-frame VR reconstruction failed'
+                    $VrDepthVideoOnly = $AtlasOutput
+                    Write-Output ('VR_GENERATIVE_COMPOSITE_JSON '+([ordered]@{
+                        backend='TemporalAtlas';flow_backend=$AtlasFlowBackend;flow_max_side=$AtlasFlowMaxSide
+                        lookaround_frames=$AtlasLookaround;raft_updates=$AtlasRaftUpdates
+                        max_neural_regions=$AtlasMaxNeuralRegions
+                        source_geometry='GAPW';eye_anchor='Symmetric';layout=$VRSbsLayout;output=$VrDepthVideoOnly
+                    }|ConvertTo-Json -Compress))
+                } else {
+                    $GeneratedRightEye = Join-Path $Work 'vr-generative-right-eye.mkv'
+                    if ($VRGenerativeBackend -eq 'MoebiusSparse') {
+                    Emit-Progress 'Generative VR' 'Moebius is filling only residual disocclusion ROIs at native resolution' 96 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
+                    $MoebiusRoiSide = if ($VRGenerativeResolution -eq 'Auto') { 0 } else { [int]$VRGenerativeResolution }
+                    $MoebiusTileOverlap = if ($VRGenerativeOverlapFrames -le 0) { 0 } else { $VRGenerativeOverlapFrames * 32 }
+                    $MoebiusCandidates = switch ($PerformanceProfile) {
+                        'Maximum' { 4 }
+                        'Heavy' { 3 }
+                        'Medium' { 2 }
+                        default { 1 }
+                    }
+                    $MoebiusArgs = @(
+                        '-s','-B',$MoebiusWorker,'--ffmpeg',$Ffmpeg,
+                        '--repository',$MoebiusRepository,'--checkpoint',$MoebiusCheckpoint,
+                        '--vae',$MoebiusVae,'--site-packages',$MoebiusSitePackages,
+                        '--reprojected-video',$VrRightSeed,'--mask-video',$VrRightMask,
+                        '--compose-mask-video',$VrRightComposeMask,
+                        '--motion-directory',$ChunkDirectory,'--output-video',$GeneratedRightEye,
+                        '--width',$OutputWidth,'--height',$OutputHeight,'--frames',$TotalFrames,'--fps',$Fps,
+                        '--roi-side',$MoebiusRoiSide,'--steps',$VRGenerativeChunkFrames,
+                        '--tile-overlap',$MoebiusTileOverlap,'--hole-strength','1',
+                        '--denoise-strength','0.99','--guidance-scale','4.5',
+                        '--structure-strength','1','--detail-strength','0.45',
+                        '--candidates',$MoebiusCandidates,'--reveal-side','right'
+                    )
+                    Run-Tool $UpscalerPython $MoebiusArgs 'Moebius sparse temporal second-eye reconstruction failed'
+                } else {
+                    Emit-Progress 'Generative VR' 'M2SVid is reconstructing and refining the complete second eye' 96 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
+                    $M2MaxSide = if ($VRGenerativeResolution -eq 'Auto') { 0 } else { [int]$VRGenerativeResolution }
+                    $M2Args = @(
+                        '-s','-B',$M2SVidWorker,'--ffmpeg',$Ffmpeg,
+                        '--repository',$M2SVidRepository,'--checkpoint',$M2SVidCheckpoint,'--open-clip',$M2SVidOpenClip,
+                        '--input-video',$FlatOutput,'--reprojected-video',$VrRightSeed,'--mask-video',$VrRightMask,
+                        '--output-video',$GeneratedRightEye,'--width',$OutputWidth,'--height',$OutputHeight,
+                        '--frames',$TotalFrames,'--fps',$Fps,'--max-side',$M2MaxSide,
+                        '--chunk-frames',$VRGenerativeChunkFrames,'--overlap-frames',$VRGenerativeOverlapFrames
+                    )
+                    Run-Tool $UpscalerPython $M2Args 'M2SVid generative second-eye reconstruction failed'
+                }
 
                 $VrGenerativeStereo = Join-Path $Work 'vr-generative-stereo.mp4'
-                $GenerativeRefine = if ($VRGenerativeBackend -eq 'M2SVidFull') { 1.0 } else { $VRGenerativeRefineStrength }
+                $GenerativeRefine = if ($VRGenerativeBackend -eq 'M2SVidFull') { 1.0 } elseif ($VRGenerativeBackend -eq 'MoebiusSparse') { 0.0 } else { $VRGenerativeRefineStrength }
                 $GenerativeHoles = if ($VRGenerativeBackend -eq 'M2SVidFull') { 1.0 } else { $VRGenerativeHoleStrength }
                 $RefineText = [string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.####}',$GenerativeRefine)
                 $HoleText = [string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.####}',$GenerativeHoles)
@@ -1725,7 +1891,15 @@ try {
                 # the gray mask format for the entire graph and silently turn
                 # both eyes monochrome. Keep the image legs planar RGB while
                 # the third leg remains an 8-bit mask.
-                $EyeFilterPrefix = "[0:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[seed];[1:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[gen];[seed][gen]blend=all_expr='A*(1-$RefineText)+B*$RefineText'[refined];[2:v]scale=$($OutputWidth):$($OutputHeight):flags=neighbor,format=gray,lut=y='val*$HoleText'[mask];[refined][gen][mask]maskedmerge[right];[3:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[left];"
+                $EyeFilterPrefix = if ($VRGenerativeBackend -eq 'MoebiusSparse') {
+                    # The sparse worker already composites each generated ROI
+                    # with a source-resolution feathered mask. Applying the
+                    # binary mask a second time here recreated the hard seam
+                    # that the worker had removed.
+                    "[1:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[right];[3:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[left];"
+                } else {
+                    "[0:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[seed];[1:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[gen];[seed][gen]blend=all_expr='A*(1-$RefineText)+B*$RefineText'[refined];[2:v]scale=$($OutputWidth):$($OutputHeight):flags=neighbor,format=gray,lut=y='val*$HoleText'[mask];[refined][gen][mask]maskedmerge[right];[3:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[left];"
+                }
                 $FirstEye = if ($VREyeSwap) { 'right' } else { 'left' }
                 $SecondEye = if ($VREyeSwap) { 'left' } else { 'right' }
                 $PackFilter = switch ($VRSbsLayout) {
@@ -1737,15 +1911,17 @@ try {
                 $VrCodecArguments = Get-VrCodecArguments $Codec $VRPixelFormat
                 $VrEncoder = if ($Codec -eq 'H265') { 'hevc_nvenc' } else { 'h264_nvenc' }
                 Run-Tool $Ffmpeg (@(
-                    '-y','-v','error','-i',$VrRightSeed,'-i',$M2SVidGenerated,'-i',$VrRightMask,'-i',$FlatOutput,
+                    '-y','-v','error','-i',$VrRightSeed,'-i',$GeneratedRightEye,'-i',$VrRightComposeMask,'-i',$FlatOutput,
                     '-filter_complex',($EyeFilterPrefix+$PackFilter),'-map','[v]','-frames:v',$TotalFrames,
                     '-c:v',$VrEncoder,'-preset','p2','-rc','constqp','-qp',$Quality
                 )+$VrCodecArguments+@('-movflags','+faststart',$VrGenerativeStereo)) 'Generative VR eye compositing failed'
-                $VrDepthVideoOnly = $VrGenerativeStereo
-                Write-Output ('VR_GENERATIVE_COMPOSITE_JSON '+([ordered]@{
-                    backend=$VRGenerativeBackend;hole_strength=$GenerativeHoles;refine_strength=$GenerativeRefine
-                    source_geometry='TemporalLDI';eye_anchor='Left';layout=$VRSbsLayout;output=$VrDepthVideoOnly
-                }|ConvertTo-Json -Compress))
+                    $VrDepthVideoOnly = $VrGenerativeStereo
+                    Write-Output ('VR_GENERATIVE_COMPOSITE_JSON '+([ordered]@{
+                        backend=$VRGenerativeBackend;hole_strength=$GenerativeHoles;refine_strength=$GenerativeRefine
+                        compose_mask='directional-background-only'
+                        source_geometry='TemporalLDI';eye_anchor='Left';layout=$VRSbsLayout;output=$VrDepthVideoOnly
+                    }|ConvertTo-Json -Compress))
+                }
             }
             if ($VRDLSSMode -eq 'PreAndPerEye') {
                 Emit-Progress '3D VR + DLSS5' 'Running a real DLSS5 refinement pass for each eye' 97 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
@@ -1821,10 +1997,14 @@ try {
     if ($UseExternalUpscaler -and $SteadyFps -gt 0 -and $UpscalerFps -gt 0) {
         $SteadyFps = 1.0 / (1.0 / $SteadyFps + 1.0 / $UpscalerFps)
     }
+    $TemporalAtlasFps = if($script:TemporalAtlasMetrics){[double]$script:TemporalAtlasMetrics.fps}else{0.0}
+    if ($TemporalAtlasFps -gt 0 -and $SteadyFps -gt 0) {
+        $SteadyFps = 1.0 / (1.0 / $SteadyFps + 1.0 / $TemporalAtlasFps)
+    }
     $WallFps = if ($ProcessingElapsedSeconds -gt 0) { $TotalFrames / $ProcessingElapsedSeconds } else { 0.0 }
     $DisplayFps = if ($PreviewFpsMatch.Success) { [double]::Parse($PreviewFpsMatch.Groups['fps'].Value, [Globalization.CultureInfo]::InvariantCulture) } else { 0.0 }
     $Result = [ordered]@{
-        schema = 'dlss5-video-studio-run/8'
+        schema = 'dlss5-video-studio-run/9'
         status = 'ok'
         input_video = if ($IsNetworkSource) { '[network stream]' } else { $InputVideo }
         source_kind = if ($IsNetworkSource) { 'network' } else { 'file' }
@@ -1959,6 +2139,9 @@ try {
         guide_depth_prefetch_hits = [int]$GuideDepthPrefetchHits
         decoder_fps = [double]$DecoderFps
         host_delivery_fps = [double]$HostDeliveryFps
+        temporal_atlas_fps = if($script:TemporalAtlasMetrics){[double]$script:TemporalAtlasMetrics.fps}else{$null}
+        temporal_atlas_real_coverage = if($script:TemporalAtlasMetrics){[double]$script:TemporalAtlasMetrics.atlas_coverage}else{$null}
+        temporal_atlas_neural_residual = if($script:TemporalAtlasMetrics){[double]$script:TemporalAtlasMetrics.neural_residual_fraction}else{$null}
         estimated_steady_fps = [double]$SteadyFps
         end_to_end_fps = [double]$WallFps
         elapsed_seconds = [double]$ProcessingElapsedSeconds

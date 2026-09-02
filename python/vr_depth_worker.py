@@ -210,6 +210,20 @@ def shape_disparity_delta(delta: torch.Tensor, curve: str, comfort: float) -> to
     return work
 
 
+def eye_shift_factors(anchor: str) -> tuple[float, float]:
+    """Map one physical eye baseline across the selected camera anchor.
+
+    `disparity` already represents the full left-to-right separation.  The old
+    factors used +/-1 for symmetric and -2 for a left anchor, accidentally
+    doubling parallax, disocclusion width and VR discomfort.
+    """
+    if anchor == "left":
+        return 0.0, -1.0
+    if anchor == "right":
+        return 1.0, 0.0
+    return 0.5, -0.5
+
+
 def motion_quality(motion_np: np.ndarray | None) -> tuple[float, float]:
     """Return mean confidence and robust full-frame motion in pixels."""
     if motion_np is None:
@@ -258,7 +272,8 @@ def forward_splat(
     sign: float,
     z_strength: float,
     ldi_layers: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    return_uncertain: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     _, channels, height, width = frame.shape
     device = frame.device
     work_frame = frame[0].float()
@@ -268,20 +283,143 @@ def forward_splat(
     fraction = target - x0
     layers = max(2, min(12, ldi_layers))
     priority_depth = torch.round(work_depth * (layers - 1)) / float(layers - 1)
-    z_weight = torch.exp2((priority_depth - 0.5) * max(0.0, z_strength)).clamp_(0.03125, 32.0)
-    accum = torch.zeros((channels, height * width), device=device, dtype=torch.float32)
-    weights = torch.zeros((height * width,), device=device, dtype=torch.float32)
-    flat_rgb = work_frame.reshape(channels, -1)
+    # A soft exponential z weight used to average foreground and background
+    # colours at depth discontinuities.  On real footage that creates the
+    # characteristic torn/transparent halo around people.  Resolve visibility
+    # first and only accumulate contributors from the nearest discrete layer.
+    # Bilinear weights are retained inside that winning layer.
+    flat_priority = priority_depth.reshape(-1)
+    nearest = torch.full(
+        (height * width,), -torch.inf, device=device, dtype=torch.float32
+    )
+    farthest = torch.full(
+        (height * width,), torch.inf, device=device, dtype=torch.float32
+    )
+    contribution_geometry: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
     for offset, bilinear in ((0, 1.0 - fraction), (1, fraction)):
         target_x = x0.to(torch.int64) + offset
-        valid = (target_x >= 0) & (target_x < width)
+        valid = (target_x >= 0) & (target_x < width) & (bilinear > 1.0e-4)
         index = (rows + target_x.clamp(0, width - 1)).reshape(-1)
-        weight = (bilinear * z_weight * valid).reshape(-1)
+        priority = torch.where(valid.reshape(-1), flat_priority, -torch.inf)
+        nearest.scatter_reduce_(0, index, priority, reduce="amax", include_self=True)
+        far_priority = torch.where(valid.reshape(-1), flat_priority, torch.inf)
+        farthest.scatter_reduce_(0, index, far_priority, reduce="amin", include_self=True)
+        contribution_geometry.append((index, valid.reshape(-1), bilinear.reshape(-1)))
+
+    accum = torch.zeros((channels, height * width), device=device, dtype=torch.float32)
+    weights = torch.zeros((height * width,), device=device, dtype=torch.float32)
+    back_accum = torch.zeros((channels, height * width), device=device, dtype=torch.float32)
+    back_weights = torch.zeros((height * width,), device=device, dtype=torch.float32)
+    flat_rgb = work_frame.reshape(channels, -1)
+    layer_step = 1.0 / float(max(1, layers - 1))
+    z_tolerance = layer_step * max(0.06, min(0.45, 0.95 / max(1.0, z_strength)))
+    for index, valid, bilinear in contribution_geometry:
+        winning_layer = flat_priority >= (nearest[index] - z_tolerance)
+        weight = bilinear * valid * winning_layer
         weights.scatter_add_(0, index, weight)
         accum.scatter_add_(1, index[None].expand(channels, -1), flat_rgb * weight)
+        backing_layer = flat_priority <= (farthest[index] + z_tolerance)
+        back_weight = bilinear * valid * backing_layer
+        back_weights.scatter_add_(0, index, back_weight)
+        back_accum.scatter_add_(
+            1, index[None].expand(channels, -1), flat_rgb * back_weight
+        )
     visible = weights.reshape(1, 1, height, width)
     view = (accum / weights.clamp_min(1.0e-5)[None]).reshape(1, channels, height, width)
-    return view, visible >= 0.02
+    # At a depth edge, a foreground sample can cover only a fraction of the
+    # target pixel. Preserve z ownership for fully covered pixels, but use the
+    # far layer for the uncovered sub-pixel area. This is a one-pixel analytic
+    # antialias, not the old wide exponential blend that produced ghost halos.
+    back_view = (
+        back_accum / back_weights.clamp_min(1.0e-5)[None]
+    ).reshape(1, channels, height, width)
+    coverage = weights.reshape(1, 1, height, width).clamp_(0.0, 1.0)
+    has_two_layers = (
+        torch.isfinite(nearest)
+        & torch.isfinite(farthest)
+        & ((nearest - farthest) > layer_step * 0.55)
+        & (back_weights > 1.0e-4)
+    ).reshape(1, 1, height, width)
+    subpixel_edge = has_two_layers & (coverage < 0.999)
+    antialiased = view * coverage + back_view * (1.0 - coverage)
+    view = torch.where(subpixel_edge, antialiased, view)
+    valid_view = visible >= 0.02
+    if not return_uncertain:
+        return view, valid_view
+    collision = has_two_layers
+    return view, valid_view, collision
+
+
+def reprojection_guard_mask(
+    holes: torch.Tensor,
+    depth_collisions: torch.Tensor,
+    effective_disparity: torch.Tensor,
+) -> torch.Tensor:
+    """Give the inpainting model context around unstable disocclusions."""
+    disparity = effective_disparity.float()
+    horizontal_edge = torch.zeros_like(disparity, dtype=torch.bool)
+    horizontal_edge[:, 1:] = (disparity[:, 1:] - disparity[:, :-1]).abs() > 0.75
+    horizontal_edge[:, :-1] |= horizontal_edge[:, 1:]
+    edge = horizontal_edge[None, None]
+    robust_shift = float(torch.quantile(disparity.abs().reshape(-1), 0.995).item())
+    horizontal_radius = max(2, min(14, int(math.ceil(robust_shift * 0.16))))
+    # One-pixel gaps are a normal consequence of quantized forward splatting
+    # and the fast push/pull plate handles them better than a diffusion model.
+    # Select only dense disocclusions, then add collision/edge pixels that are
+    # connected to such a region.  This prevents every sign and pavement seam
+    # from becoming a generative ROI.
+    density = F.avg_pool2d(holes.float(), kernel_size=5, stride=1, padding=2)
+    dense_holes = density >= 0.24
+    near_dense_hole = F.max_pool2d(
+        dense_holes.float(),
+        kernel_size=(5, horizontal_radius * 4 + 1),
+        stride=1,
+        padding=(2, horizontal_radius * 2),
+    ) > 0.0
+    base = dense_holes | ((depth_collisions | edge) & near_dense_hole)
+    # This is a conditioning mask, not a final compositing mask. Moebius needs
+    # a wider view of the boundary to reconstruct coherent background.
+    return F.max_pool2d(
+        base.float(),
+        kernel_size=(5, horizontal_radius * 2 + 1),
+        stride=1,
+        padding=(2, horizontal_radius),
+    ) > 0.0
+
+
+def directional_compose_mask(
+    holes: torch.Tensor,
+    conditioning_mask: torch.Tensor,
+    effective_disparity: torch.Tensor,
+) -> torch.Tensor:
+    """Make a continuous background-side band without crossing foreground.
+
+    Forward splatting leaves sub-pixel pinholes along a moving silhouette. A
+    binary paste of those individual pixels produces coloured glitter. Join
+    them vertically, then grow only opposite the image-space shift (the side
+    on which hidden background becomes visible) and clip to the wider model
+    conditioning mask.
+    """
+    disparity = effective_disparity.float()
+    robust_shift = float(torch.quantile(disparity.abs().reshape(-1), 0.995).item())
+    # Keep final compositing close to the actual uncovered pixels. The old
+    # 8-18px growth turned a valid inpaint into a conspicuous vertical patch on
+    # detailed signs and faces. The large semantic context is exported through
+    # `conditioning_mask`; this mask has a different job and stays narrow.
+    radius = max(1, min(6, int(math.ceil(robust_shift * 0.10))))
+    joined = F.max_pool2d(holes.float(), kernel_size=(5, 1), stride=1, padding=(2, 0))
+    # A negative right-eye shift reveals background to the right.  Asymmetric
+    # padding makes max-pooling a one-sided dilation while retaining size.
+    median_shift = float(torch.median(disparity.reshape(-1)).item())
+    if median_shift <= 0.0:
+        expanded = F.max_pool2d(
+            F.pad(joined, (radius, 0, 0, 0)), (1, radius + 1), stride=1
+        )
+    else:
+        expanded = F.max_pool2d(
+            F.pad(joined, (0, radius, 0, 0)), (1, radius + 1), stride=1
+        )
+    return (expanded > 0.0) & conditioning_mask
 
 
 def sparse_push_pull_fill(
@@ -373,6 +511,144 @@ def inverse_warp(
     return view, float(outside.float().mean().item())
 
 
+def directional_nearest_indices(
+    valid: torch.Tensor,
+    prefer_right: bool,
+) -> torch.Tensor:
+    """Return a background-biased source column for every target pixel."""
+    width = valid.shape[-1]
+    columns = torch.arange(width, device=valid.device, dtype=torch.int64)
+    columns = columns[None, None, None].expand_as(valid)
+    left = torch.cummax(torch.where(valid, columns, -1), dim=-1).values
+    right_candidates = torch.where(valid, columns, width)
+    right = torch.flip(
+        torch.cummin(torch.flip(right_candidates, dims=(-1,)), dim=-1).values,
+        dims=(-1,),
+    )
+    if prefer_right:
+        selected = torch.where(right < width, right, left)
+    else:
+        selected = torch.where(left >= 0, left, right)
+    return selected.clamp_(0, width - 1)
+
+
+def directional_background_fill(
+    view: torch.Tensor,
+    valid: torch.Tensor,
+    prefer_right: bool,
+    safety_margin: int = 2,
+    mirror_texture: bool = True,
+) -> torch.Tensor:
+    """Mirror real background texture into narrow disocclusion bands.
+
+    A nearest copy creates a conspicuous flat stripe. Mirroring continues the
+    local background gradient and, unlike generic inpainting, can never pull
+    foreground colour across the depth edge.
+    """
+    width = view.shape[-1]
+    columns = torch.arange(width, device=view.device, dtype=torch.int64)
+    columns = columns[None, None, None].expand_as(valid)
+    boundary = directional_nearest_indices(valid, prefer_right)
+    margin = max(0, min(8, int(safety_margin)))
+    if prefer_right:
+        source = boundary + margin
+        if mirror_texture:
+            source = source + (boundary - columns - 1).clamp_min(0)
+    else:
+        source = boundary - margin
+        if mirror_texture:
+            source = source - (columns - boundary - 1).clamp_min(0)
+    source = source.clamp_(0, width - 1)
+    gathered = torch.gather(view, -1, source.expand(-1, view.shape[1], -1, -1))
+    return torch.where(valid, view, gathered)
+
+
+def gradient_aware_parallax_warp(
+    frame: torch.Tensor,
+    depth: torch.Tensor,
+    disparity_px: torch.Tensor,
+    grid_x: torch.Tensor,
+    grid_y: torch.Tensor,
+    splat_x: torch.Tensor,
+    splat_rows: torch.Tensor,
+    sign: float,
+    z_strength: float,
+    ldi_layers: int,
+    background_expansion: int,
+    sharpen: float,
+) -> tuple[torch.Tensor, float, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Clean stereo warp inspired by DreamStereo GAPW.
+
+    Forward splatting is retained only to resolve visibility and target-view
+    disparity. RGB is reconstructed by backward sampling, eliminating the
+    fly-pixels and partially covered colour fragments that appear around hair,
+    shoulders and thin geometry in a forward RGB splat. Missing target pixels
+    receive local background from the reveal side only.
+    """
+    source_disparity = disparity_px[None, None].float()
+    target_disparity, target_valid, collisions = forward_splat(
+        source_disparity,
+        depth,
+        disparity_px,
+        splat_x,
+        splat_rows,
+        sign,
+        z_strength,
+        ldi_layers,
+        return_uncertain=True,
+    )
+    holes = ~target_valid
+    prefer_right = sign < 0.0
+    fill_indices = directional_nearest_indices(target_valid, prefer_right)
+    filled_disparity = torch.gather(target_disparity, -1, fill_indices)
+
+    width = frame.shape[-1]
+    source_grid_x = grid_x.float() - (
+        filled_disparity[0, 0] * (sign * 2.0 / max(1, width - 1))
+    )
+    grid = torch.stack((source_grid_x, grid_y.float()), dim=-1)[None].to(frame.dtype)
+    backward = F.grid_sample(
+        frame,
+        grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=True,
+    )
+    # The exported masks are smooth bands derived from true uncovered pixels;
+    # collisions are context only and are never pasted over the foreground.
+    dense = F.avg_pool2d(holes.float(), kernel_size=3, stride=1, padding=1) >= 0.22
+    dilated = F.max_pool2d(dense.float(), kernel_size=(5, 3), stride=1, padding=(2, 1))
+    joined = (
+        F.avg_pool2d(dilated, kernel_size=(5, 3), stride=1, padding=(2, 1)) >= 0.52
+    )
+    context = F.max_pool2d(joined.float(), kernel_size=(5, 9), stride=1, padding=(2, 4)) > 0
+    context |= collisions & F.max_pool2d(joined.float(), 7, stride=1, padding=3).bool()
+    compose = joined & context
+    # This is only a deterministic seed. Temporal Atlas replaces these pixels
+    # with real background observations from other frames before any neural
+    # residual repair. Keeping the seed one-sided avoids pulling foreground
+    # colour across hair and shoulders.
+    directional_seed = directional_background_fill(
+        backward, target_valid, prefer_right, safety_margin=2, mirror_texture=True
+    )
+    result = torch.where(compose, directional_seed, backward)
+    vertical = F.avg_pool2d(result, kernel_size=(5, 1), stride=1, padding=(2, 0))
+    result = torch.where(compose, result.lerp(vertical, 0.15), result)
+
+    sharpen_amount = max(0.0, min(1.0, sharpen))
+    if sharpen_amount > 0.0:
+        blurred = F.avg_pool2d(result, 3, stride=1, padding=1)
+        enhanced = (result + (result - blurred) * (0.35 * sharpen_amount)).clamp_(0.0, 1.0)
+        result = torch.where(compose, enhanced, result)
+    return (
+        result.to(frame.dtype),
+        float(holes.float().mean().item()),
+        context,
+        compose,
+        ~compose,
+    )
+
+
 def layered_splat(
     frame: torch.Tensor,
     depth: torch.Tensor,
@@ -409,12 +685,19 @@ def temporal_ldi_splat(
     ldi_layers: int,
     background_expansion: int,
     sharpen: float,
-) -> tuple[torch.Tensor, float, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, float, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Layered-depth reprojection with a far plate and sparse disocclusion repair."""
-    primary, primary_valid = forward_splat(
-        frame, depth, disparity_px, x, rows, sign, z_strength, ldi_layers
+    primary, primary_valid, depth_collisions = forward_splat(
+        frame, depth, disparity_px, x, rows, sign, z_strength, ldi_layers,
+        return_uncertain=True,
     )
     original_holes = ~primary_valid
+    repair_mask = reprojection_guard_mask(
+        original_holes, depth_collisions, disparity_px * float(sign)
+    )
+    compose_mask = directional_compose_mask(
+        original_holes, repair_mask, disparity_px * float(sign)
+    )
     result = primary
     repaired_valid = primary_valid
     if original_holes.any() and background_expansion > 0:
@@ -445,8 +728,9 @@ def temporal_ldi_splat(
     return (
         result.to(frame.dtype),
         float(original_holes.float().mean().item()),
-        original_holes,
-        repaired_valid,
+        repair_mask,
+        compose_mask,
+        repaired_valid & ~repair_mask,
     )
 
 
@@ -472,6 +756,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-video", required=True, type=Path)
     parser.add_argument("--right-seed-output", type=Path)
     parser.add_argument("--right-mask-output", type=Path)
+    parser.add_argument("--right-compose-mask-output", type=Path)
+    parser.add_argument("--left-compose-mask-output", type=Path)
     parser.add_argument("--width", required=True, type=int)
     parser.add_argument("--height", required=True, type=int)
     parser.add_argument("--frames", required=True, type=int)
@@ -480,7 +766,7 @@ def parse_args() -> argparse.Namespace:
         "--layout", choices=["half-sbs", "full-sbs", "half-ou", "full-ou"], default="half-sbs"
     )
     parser.add_argument(
-        "--stereo-method", choices=["inverse", "layered", "temporal-ldi"],
+        "--stereo-method", choices=["inverse", "layered", "temporal-ldi", "gapw"],
         default="temporal-ldi",
     )
     parser.add_argument("--eye-anchor", choices=["symmetric", "left", "right"], default="symmetric")
@@ -562,6 +848,8 @@ def main() -> int:
 
     right_seed_command = None
     right_mask_command = None
+    right_compose_mask_command = None
+    left_compose_mask_command = None
     if args.right_seed_output is not None:
         right_seed_command = [
             str(args.ffmpeg), "-y", "-nostdin", "-v", "error",
@@ -577,6 +865,22 @@ def main() -> int:
             "-r", f"{args.fps:.9g}", "-i", "pipe:0", "-an", "-c:v", "ffv1",
             "-level", "3", "-coder", "1", "-context", "1", "-pix_fmt", "gray",
             "-frames:v", str(args.frames), str(args.right_mask_output),
+        ]
+    if args.right_compose_mask_output is not None:
+        right_compose_mask_command = [
+            str(args.ffmpeg), "-y", "-nostdin", "-v", "error",
+            "-f", "rawvideo", "-pix_fmt", "gray", "-s:v", f"{eye_width}x{eye_height}",
+            "-r", f"{args.fps:.9g}", "-i", "pipe:0", "-an", "-c:v", "ffv1",
+            "-level", "3", "-coder", "1", "-context", "1", "-pix_fmt", "gray",
+            "-frames:v", str(args.frames), str(args.right_compose_mask_output),
+        ]
+    if args.left_compose_mask_output is not None:
+        left_compose_mask_command = [
+            str(args.ffmpeg), "-y", "-nostdin", "-v", "error",
+            "-f", "rawvideo", "-pix_fmt", "gray", "-s:v", f"{eye_width}x{eye_height}",
+            "-r", f"{args.fps:.9g}", "-i", "pipe:0", "-an", "-c:v", "ffv1",
+            "-level", "3", "-coder", "1", "-context", "1", "-pix_fmt", "gray",
+            "-frames:v", str(args.frames), str(args.left_compose_mask_output),
         ]
 
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -601,6 +905,20 @@ def main() -> int:
             stderr=subprocess.PIPE, creationflags=creation_flags,
         )
         if right_mask_command is not None else None
+    )
+    right_compose_mask_process = (
+        subprocess.Popen(
+            right_compose_mask_command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, creationflags=creation_flags,
+        )
+        if right_compose_mask_command is not None else None
+    )
+    left_compose_mask_process = (
+        subprocess.Popen(
+            left_compose_mask_command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, creationflags=creation_flags,
+        )
+        if left_compose_mask_command is not None else None
     )
     if decoder.stdout is None or encoder_process.stdin is None:
         raise RuntimeError("could not create VR video pipes")
@@ -638,6 +956,14 @@ def main() -> int:
         torch.empty((eye_height, eye_width), dtype=torch.uint8, pin_memory=True)
         if right_mask_process is not None else None
     )
+    right_compose_mask_staging = (
+        torch.empty((eye_height, eye_width), dtype=torch.uint8, pin_memory=True)
+        if right_compose_mask_process is not None else None
+    )
+    left_compose_mask_staging = (
+        torch.empty((eye_height, eye_width), dtype=torch.uint8, pin_memory=True)
+        if left_compose_mask_process is not None else None
+    )
     right_seed_staging_view = (
         memoryview(right_seed_staging.numpy()).cast("B")
         if right_seed_staging is not None else None
@@ -645,6 +971,14 @@ def main() -> int:
     right_mask_staging_view = (
         memoryview(right_mask_staging.numpy()).cast("B")
         if right_mask_staging is not None else None
+    )
+    right_compose_mask_staging_view = (
+        memoryview(right_compose_mask_staging.numpy()).cast("B")
+        if right_compose_mask_staging is not None else None
+    )
+    left_compose_mask_staging_view = (
+        memoryview(left_compose_mask_staging.numpy()).cast("B")
+        if left_compose_mask_staging is not None else None
     )
     started = time.perf_counter()
     processed = 0
@@ -755,21 +1089,31 @@ def main() -> int:
                 disparity = disparity * adaptive_scale
                 adaptive_scale_sum += adaptive_scale
                 motion_pixels_sum += motion_pixels
-                if args.eye_anchor == "left":
-                    left_shift, right_shift = 0.0, -2.0
-                elif args.eye_anchor == "right":
-                    left_shift, right_shift = 2.0, 0.0
-                else:
-                    left_shift, right_shift = 1.0, -1.0
+                left_shift, right_shift = eye_shift_factors(args.eye_anchor)
 
                 def render_eye(
                     shift: float,
-                ) -> tuple[torch.Tensor, float, torch.Tensor, torch.Tensor]:
+                ) -> tuple[torch.Tensor, float, torch.Tensor, torch.Tensor, torch.Tensor]:
                     if shift == 0:
                         valid = torch.ones(
                             (1, 1, eye_height, eye_width), device=device, dtype=torch.bool
                         )
-                        return frame, 0.0, ~valid, valid
+                        return frame, 0.0, ~valid, ~valid, valid
+                    if args.stereo_method == "gapw":
+                        return gradient_aware_parallax_warp(
+                            frame,
+                            depth,
+                            disparity,
+                            x,
+                            y,
+                            splat_x,
+                            splat_rows,
+                            shift,
+                            args.z_buffer_strength,
+                            args.ldi_layers,
+                            args.background_expansion,
+                            args.inpaint_sharpen,
+                        )
                     if args.stereo_method == "temporal-ldi":
                         return temporal_ldi_splat(
                             frame,
@@ -793,17 +1137,17 @@ def main() -> int:
                         valid = torch.ones(
                             (1, 1, eye_height, eye_width), device=device, dtype=torch.bool
                         )
-                        return rendered, holes_fraction, ~valid, valid
+                        return rendered, holes_fraction, ~valid, ~valid, valid
                     rendered, holes_fraction = inverse_warp(
                         frame, disparity, x, y, shift, args.occlusion_fill
                     )
                     valid = torch.ones(
                         (1, 1, eye_height, eye_width), device=device, dtype=torch.bool
                     )
-                    return rendered, holes_fraction, ~valid, valid
+                    return rendered, holes_fraction, ~valid, ~valid, valid
 
-                left, left_holes, left_hole_mask, left_valid = render_eye(left_shift)
-                right, right_holes, right_hole_mask, right_valid = render_eye(right_shift)
+                left, left_holes, left_hole_mask, left_compose_mask, left_valid = render_eye(left_shift)
+                right, right_holes, right_hole_mask, right_compose_mask, right_valid = render_eye(right_shift)
                 hole_sum += 0.5 * (left_holes + right_holes)
                 if use_temporal_repair and motion_np is not None and not scene_change:
                     threshold = max(0.0, min(1.0, args.temporal_fill_confidence))
@@ -832,10 +1176,10 @@ def main() -> int:
                         return repaired.to(current.dtype), current_valid | eligible, float(eligible.float().mean().item())
 
                     left, left_valid, left_repaired = repair_from_history(
-                        left, left_hole_mask, left_valid, previous_left, previous_left_valid
+                        left, left_compose_mask, left_valid, previous_left, previous_left_valid
                     )
                     right, right_valid, right_repaired = repair_from_history(
-                        right, right_hole_mask, right_valid, previous_right, previous_right_valid
+                        right, right_compose_mask, right_valid, previous_right, previous_right_valid
                     )
                     temporal_repair_sum += 0.5 * (left_repaired + right_repaired)
                 previous_left = left.detach().clone()
@@ -855,6 +1199,22 @@ def main() -> int:
                 if right_mask_process is not None and right_mask_staging is not None:
                     right_mask_u8 = right_hole_mask[0, 0].mul(255.0).byte().contiguous()
                     right_mask_staging.copy_(right_mask_u8, non_blocking=True)
+                if (
+                    right_compose_mask_process is not None
+                    and right_compose_mask_staging is not None
+                ):
+                    right_compose_mask_u8 = (
+                        right_compose_mask[0, 0].mul(255.0).byte().contiguous()
+                    )
+                    right_compose_mask_staging.copy_(right_compose_mask_u8, non_blocking=True)
+                if (
+                    left_compose_mask_process is not None
+                    and left_compose_mask_staging is not None
+                ):
+                    left_compose_mask_u8 = (
+                        left_compose_mask[0, 0].mul(255.0).byte().contiguous()
+                    )
+                    left_compose_mask_staging.copy_(left_compose_mask_u8, non_blocking=True)
                 if args.eye_swap:
                     left, right = right, left
                 if args.layout in ("half-sbs", "full-sbs"):
@@ -871,6 +1231,16 @@ def main() -> int:
                     right_seed_process.stdin.write(right_seed_staging_view)
                 if right_mask_process is not None and right_mask_process.stdin is not None:
                     right_mask_process.stdin.write(right_mask_staging_view)
+                if (
+                    right_compose_mask_process is not None
+                    and right_compose_mask_process.stdin is not None
+                ):
+                    right_compose_mask_process.stdin.write(right_compose_mask_staging_view)
+                if (
+                    left_compose_mask_process is not None
+                    and left_compose_mask_process.stdin is not None
+                ):
+                    left_compose_mask_process.stdin.write(left_compose_mask_staging_view)
                 processed += 1
                 if processed == 1 or processed % 30 == 0 or processed == args.frames:
                     elapsed = time.perf_counter() - started
@@ -896,6 +1266,10 @@ def main() -> int:
             right_seed_process.stdin.close()
         if right_mask_process is not None and right_mask_process.stdin is not None:
             right_mask_process.stdin.close()
+        if right_compose_mask_process is not None and right_compose_mask_process.stdin is not None:
+            right_compose_mask_process.stdin.close()
+        if left_compose_mask_process is not None and left_compose_mask_process.stdin is not None:
+            left_compose_mask_process.stdin.close()
 
     decoder.wait(timeout=30)
     encoder_process.wait(timeout=120)
@@ -903,6 +1277,10 @@ def main() -> int:
         right_seed_process.wait(timeout=120)
     if right_mask_process is not None:
         right_mask_process.wait(timeout=120)
+    if right_compose_mask_process is not None:
+        right_compose_mask_process.wait(timeout=120)
+    if left_compose_mask_process is not None:
+        left_compose_mask_process.wait(timeout=120)
     if decoder.returncode != 0:
         raise RuntimeError("VR decoder failed: " + decoder.stderr.read().decode("utf-8", errors="replace"))
     if encoder_process.returncode != 0:
@@ -916,6 +1294,22 @@ def main() -> int:
         raise RuntimeError(
             "VR disocclusion-mask encoder failed: "
             + right_mask_process.stderr.read().decode("utf-8", errors="replace")
+        )
+    if (
+        right_compose_mask_process is not None
+        and right_compose_mask_process.returncode != 0
+    ):
+        raise RuntimeError(
+            "VR strict compose-mask encoder failed: "
+            + right_compose_mask_process.stderr.read().decode("utf-8", errors="replace")
+        )
+    if (
+        left_compose_mask_process is not None
+        and left_compose_mask_process.returncode != 0
+    ):
+        raise RuntimeError(
+            "VR left strict compose-mask encoder failed: "
+            + left_compose_mask_process.stderr.read().decode("utf-8", errors="replace")
         )
     if processed != args.frames:
         raise RuntimeError(f"depth sidecars contain {processed} frames, expected {args.frames}")
@@ -934,6 +1328,14 @@ def main() -> int:
                 "pixel_format": args.pixel_format, "output": str(args.output_video),
                 "right_seed_output": str(args.right_seed_output) if args.right_seed_output else None,
                 "right_mask_output": str(args.right_mask_output) if args.right_mask_output else None,
+                "right_compose_mask_output": (
+                    str(args.right_compose_mask_output)
+                    if args.right_compose_mask_output else None
+                ),
+                "left_compose_mask_output": (
+                    str(args.left_compose_mask_output)
+                    if args.left_compose_mask_output else None
+                ),
             }, separators=(",", ":"),
         ), flush=True,
     )

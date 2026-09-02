@@ -1,11 +1,13 @@
 param(
     [string] $Target = 'D:\DLSS5_VIDEO_STUDIO_PORTABLE_NEURAL_V5',
-    [string] $DependencyRoot = 'D:\DLSS5VideoStudioDeps'
+    [string] $DependencyRoot = 'D:\DLSS5VideoStudioDeps',
+    [string] $Base = 'C:\Users\Lenovo\Documents\Codex\DLSS5_VIDEO_STUDIO_PORTABLE',
+    [string] $MainModelSource = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $Build = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$Base = 'C:\Users\Lenovo\Documents\Codex\DLSS5_VIDEO_STUDIO_PORTABLE'
+$Base = [IO.Path]::GetFullPath($Base)
 $Target = [IO.Path]::GetFullPath($Target)
 
 foreach ($Path in @($Build,$Base,$DependencyRoot)) {
@@ -23,9 +25,9 @@ if (Test-Path -LiteralPath $Target) {
 }
 
 $Directories = @(
-    'app','engine','licenses','licenses\upscalers','licenses\vr','models','models\upscalers','models\vr','models\vr\m2svid',
-    'models\upscalers\nanovsr','models\upscalers\animesr','models\depth','output','settings','temp',
-    'runtime','runtime\python','third_party','third_party\FlashVSR_Ultra_Fast','third_party\DLoRAL','third_party\spatial-media',
+    'app','engine','licenses','licenses\upscalers','licenses\vr','models','models\upscalers','models\vr','models\vr\m2svid','models\vr\moebius',
+    'models\upscalers\nanovsr','models\upscalers\animesr','models\depth','models\motion','models\vr\migan','output','settings','temp',
+    'runtime','runtime\python','third_party','third_party\FlashVSR_Ultra_Fast','third_party\DLoRAL','third_party\spatial-media','third_party\moebius',
     'tools','tools\guidegen','tools\upscaler','tools\upscaler\backends','tools\spatialmedia','tools\vr_depth','tools\vr_generative','scripts'
 )
 foreach ($Relative in $Directories) {
@@ -35,12 +37,36 @@ foreach ($Relative in $Directories) {
 foreach ($Name in @('START.cmd','NVIDIA_RUNTIME_NOTICE.txt','THIRD_PARTY_NOTICES.md')) {
     Copy-Item -LiteralPath (Join-Path $Base $Name) -Destination (Join-Path $Target $Name) -Force
 }
-Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_DA3_LARGE.cmd') -Destination $Target -Force
+Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_DA3_LARGE.cmd'),(Join-Path $Build 'INSTALL_M2SVID_EXPERIMENTAL.cmd'),(Join-Path $Build 'INSTALL_MOEBIUS_EXPERIMENTAL.cmd') -Destination $Target -Force
 Copy-Item -Path (Join-Path $Base 'licenses\*') -Destination (Join-Path $Target 'licenses') -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $Build 'licenses\vr\MI-GAN-MIT.txt') -Destination (Join-Path $Target 'licenses\vr') -Force
 Copy-Item -LiteralPath (Join-Path $Base 'models\depth_anything_v2_small.onnx') -Destination (Join-Path $Target 'models') -Force
+if (-not [string]::IsNullOrWhiteSpace($MainModelSource)) {
+    $ResolvedModelSource = [IO.Path]::GetFullPath($MainModelSource)
+    foreach ($Relative in @(
+        'models\depth\da3-small',
+        'models\motion\raft_small_C_T_V2-01064c6d.pth',
+        'models\vr\migan'
+    )) {
+        $SourcePath = Join-Path $ResolvedModelSource $Relative
+        if (-not (Test-Path -LiteralPath $SourcePath)) { throw "Missing main model payload: $SourcePath" }
+        $DestinationPath = Join-Path $Target $Relative
+        if ((Get-Item -LiteralPath $SourcePath).PSIsContainer) {
+            New-Item -ItemType Directory -Path $DestinationPath -Force | Out-Null
+            Copy-Item -Path (Join-Path $SourcePath '*') -Destination $DestinationPath -Recurse -Force
+        } else {
+            Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+        }
+    }
+}
 Copy-Item -LiteralPath (Join-Path $Base 'tools\ffmpeg.exe'),(Join-Path $Base 'tools\ffprobe.exe'),(Join-Path $Base 'tools\ffplay.exe') -Destination (Join-Path $Target 'tools') -Force
 
-$PortablePython = Join-Path $DependencyRoot 'runtime\python\cpython-3.11.16-windows-x86_64-none'
+$BasePython = Join-Path $Base 'runtime\python'
+$PortablePython = if (
+    (Test-Path -LiteralPath (Join-Path $BasePython 'Lib\site-packages\torch') -PathType Container) -and
+    (Test-Path -LiteralPath (Join-Path $BasePython 'Lib\site-packages\cv2') -PathType Container) -and
+    (Test-Path -LiteralPath (Join-Path $BasePython 'Lib\site-packages\onnxruntime') -PathType Container)
+) { $BasePython } else { Join-Path $DependencyRoot 'runtime\python\cpython-3.11.16-windows-x86_64-none' }
 if (-not (Test-Path -LiteralPath (Join-Path $PortablePython 'Lib\site-packages\torch') -PathType Container)) {
     throw "Portable CUDA runtime is incomplete: $PortablePython"
 }
@@ -127,10 +153,14 @@ Copy-Item -Path (Join-Path $Build 'dist\guidegen\*') -Destination (Join-Path $Ta
 Copy-Item -LiteralPath (Join-Path $Build 'python\guidegen.py') -Destination (Join-Path $Target 'tools\guidegen') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\vr_depth_worker.py') -Destination (Join-Path $Target 'tools\vr_depth') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\m2svid_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'python\moebius_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'python\temporal_atlas_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\install_depth_models.py') -Destination (Join-Path $Target 'tools') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'scripts\Install-DepthModels.ps1') -Destination (Join-Path $Target 'scripts') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_VR_MODELS.cmd') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'scripts\Install-VRGenerativeModels.ps1') -Destination (Join-Path $Target 'scripts') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'scripts\Install-MoebiusModels.ps1') -Destination (Join-Path $Target 'scripts') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'scripts\Install-TemporalAtlasModels.ps1') -Destination (Join-Path $Target 'scripts') -Force
 Copy-Item -LiteralPath `
     (Join-Path $Build 'app\process-video.ps1'), `
     (Join-Path $Build 'app\realtime-player.ps1'), `

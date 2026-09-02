@@ -5,6 +5,7 @@
 /qa-engine-logs/
 /qa-output/
 /.corebroker/
+/temp/
 
 # Downloaded SDKs, models and nested repositories
 /third_party/

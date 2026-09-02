@@ -73,7 +73,7 @@ def validate_install(args: argparse.Namespace) -> None:
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(
-            "M2SVid is not fully installed; run INSTALL_VR_MODELS.cmd. Missing: "
+            "M2SVid is not fully installed; run INSTALL_M2SVID_EXPERIMENTAL.cmd. Missing: "
             + "; ".join(missing)
         )
     if args.checkpoint.stat().st_size < 4_900_000_000:
@@ -141,9 +141,9 @@ def auto_limits(vram_mb: int, requested_side: int, requested_chunk: int) -> tupl
         max_side = max(256, min(1024, requested_side))
     elif vram_mb < 10_000:
         max_side = 384
-    elif vram_mb < 15_000:
+    elif vram_mb < 18_000:
         max_side = 512
-    elif vram_mb < 22_000:
+    elif vram_mb < 24_000:
         max_side = 640
     else:
         max_side = 768
@@ -151,13 +151,16 @@ def auto_limits(vram_mb: int, requested_side: int, requested_chunk: int) -> tupl
     if requested_chunk > 0:
         chunk = max(3, min(25, requested_chunk))
     elif vram_mb < 10_000:
-        chunk = 6
-    elif vram_mb < 15_000:
-        chunk = 10
-    elif vram_mb < 22_000:
-        chunk = 16
+        # A 384px / 3-frame window peaked at 8.10 GB on the laptop's
+        # 8 GB RTX 4060. Six frames can cross the WDDM budget and stall the
+        # desktop, so keep the automatic path at the measured safe window.
+        chunk = 3
+    elif vram_mb < 18_000:
+        chunk = 8
+    elif vram_mb < 24_000:
+        chunk = 12
     else:
-        chunk = 25
+        chunk = 16
     return max_side, chunk
 
 

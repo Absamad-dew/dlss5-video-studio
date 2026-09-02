@@ -1,15 +1,15 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-echo Installing the optional M2SVid generative VR backend...
-echo Required download: about 9 GB. Existing partial downloads will resume.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Install-VRGenerativeModels.ps1"
+echo Installing Temporal Atlas for native-resolution 2K/4K VR reconstruction...
+echo Required download: about 28 MB. Existing partial downloads will resume.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Install-TemporalAtlasModels.ps1"
 if errorlevel 1 (
   echo.
-  echo M2SVid installation did not finish. The partial download was kept for resume.
+  echo Temporal Atlas installation did not finish. The partial download was kept for resume.
   pause
   exit /b 1
 )
 echo.
-echo M2SVid generative VR is ready.
+echo Temporal Atlas generative VR is ready.
 pause

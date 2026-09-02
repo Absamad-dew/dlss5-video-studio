@@ -1,2 +1,2 @@
-17.0.0-generative-vr
-VR now supports an optional official M2SVid full-attention second-eye backend: Temporal LDI supplies geometry and disocclusion masks, long clips use overlapping model windows, hybrid blending preserves the source eye, and Auto selects 384/640/768 model resolution by VRAM.
+19.0.0-temporal-atlas-vr
+VR now recovers hidden background from past and future frames with bidirectional motion/depth checks at guide resolution, copies accepted RGB at native 2K/4K resolution, and runs compact MI-GAN only on at most two grouped residual ROIs per eye.

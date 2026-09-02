@@ -30,9 +30,10 @@ class M2SVidWorkerTests(unittest.TestCase):
         self.assertEqual(canvas_h - inner_h, pad_y * 2)
 
     def test_automatic_limits_scale_with_available_vram(self) -> None:
-        self.assertEqual(m2s.auto_limits(8187, 0, 0), (384, 6))
-        self.assertEqual(m2s.auto_limits(16384, 0, 0), (640, 16))
-        self.assertEqual(m2s.auto_limits(24576, 0, 0), (768, 25))
+        # A measured 8 GB run peaks at the VRAM limit with longer windows.
+        self.assertEqual(m2s.auto_limits(8187, 0, 0), (384, 3))
+        self.assertEqual(m2s.auto_limits(16384, 0, 0), (512, 8))
+        self.assertEqual(m2s.auto_limits(24576, 0, 0), (768, 16))
 
     def test_user_limits_are_bounded_by_official_25_frame_window(self) -> None:
         self.assertEqual(m2s.auto_limits(16384, 2048, 99), (1024, 25))
