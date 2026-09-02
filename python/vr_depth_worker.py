@@ -130,6 +130,209 @@ def edge_aware_feather(depth: torch.Tensor, radius: float) -> torch.Tensor:
     return depth.float().lerp(smooth, edge_gate * min(1.0, radius / 6.0))
 
 
+def robust_depth_range(
+    depth: torch.Tensor,
+    trim_percent: float,
+    previous_range: tuple[float, float] | None,
+    smoothing: float,
+) -> tuple[torch.Tensor, tuple[float, float]]:
+    """Normalize useful depth while suppressing unstable per-frame outliers."""
+    trim = max(0.0, min(20.0, trim_percent)) * 0.01
+    if trim <= 0.0:
+        return depth.float(), (0.0, 1.0)
+    sample = depth.float()[..., ::2, ::2]
+    low = float(torch.quantile(sample, trim).item())
+    high = float(torch.quantile(sample, 1.0 - trim).item())
+    if high - low < 1.0e-4:
+        low, high = 0.0, 1.0
+    if previous_range is not None:
+        blend = max(0.0, min(0.98, smoothing))
+        low = low * (1.0 - blend) + previous_range[0] * blend
+        high = high * (1.0 - blend) + previous_range[1] * blend
+    normalized = depth.float().sub(low).div(max(1.0e-4, high - low)).clamp_(0.0, 1.0)
+    return normalized, (low, high)
+
+
+def gradient_aware_depth(depth: torch.Tensor, strength: float) -> torch.Tensor:
+    """Turn noisy ramps at silhouettes into clean foreground/background steps."""
+    amount = max(0.0, min(1.0, strength))
+    if amount <= 0.0:
+        return depth
+    work = depth.float()
+    local_mean = F.avg_pool2d(work, 3, stride=1, padding=1)
+    near = F.max_pool2d(work, 3, stride=1, padding=1)
+    far = -F.max_pool2d(-work, 3, stride=1, padding=1)
+    separated = torch.where(work >= local_mean, near, far)
+    edge = (near - far).mul(12.0).clamp_(0.0, 1.0)
+    return work.lerp(separated, edge * amount)
+
+
+def resolve_convergence(
+    depth: torch.Tensor,
+    configured: float,
+    mode: str,
+    previous: float | None,
+    smoothing: float,
+) -> float:
+    if mode == "manual":
+        return max(0.1, min(0.9, configured))
+    _, _, height, width = depth.shape
+    crop = depth[
+        ...,
+        max(0, height // 5) : max(1, height - height // 5),
+        max(0, width // 5) : max(1, width - width // 5),
+    ].float()
+    if mode == "subject":
+        target = float(torch.quantile(crop, 0.60).item())
+    else:
+        target = 0.5 * (
+            float(torch.quantile(crop, 0.38).item())
+            + float(torch.quantile(crop, 0.68).item())
+        )
+    target += max(-0.25, min(0.25, configured - 0.5))
+    target = max(0.12, min(0.88, target))
+    if previous is None:
+        return target
+    blend = max(0.0, min(0.98, smoothing))
+    return target * (1.0 - blend) + previous * blend
+
+
+def shape_disparity_delta(delta: torch.Tensor, curve: str, comfort: float) -> torch.Tensor:
+    work = delta.float()
+    if curve == "cinematic":
+        work = work.sign() * work.abs().clamp_min(1.0e-6).pow(0.78)
+    elif curve == "comfort":
+        work = torch.tanh(work * 1.8) / 1.8
+    amount = max(0.0, min(1.0, comfort))
+    if amount > 0.0:
+        comfortable = torch.tanh(work * 2.2) / 2.2
+        work = work.lerp(comfortable, amount)
+    return work
+
+
+def background_plate(
+    frame: torch.Tensor, depth: torch.Tensor, disparity: torch.Tensor, radius: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Create a far-layer plate used only where reprojection reveals hidden pixels."""
+    radius = max(1, min(48, radius))
+    kernel = radius * 2 + 1
+    pooled, indices = F.max_pool2d(
+        -depth.float(), (1, kernel), stride=1, padding=(0, radius), return_indices=True
+    )
+    flat_indices = indices.reshape(1, -1)
+    flat_frame = frame[0].float().reshape(frame.shape[1], -1)
+    plate = torch.gather(flat_frame, 1, flat_indices.expand(frame.shape[1], -1)).reshape_as(frame)
+    plate_disparity = torch.gather(
+        disparity.float().reshape(1, -1), 1, flat_indices
+    ).reshape_as(disparity)
+    return plate, -pooled, plate_disparity
+
+
+def forward_splat(
+    frame: torch.Tensor,
+    depth: torch.Tensor,
+    disparity_px: torch.Tensor,
+    x: torch.Tensor,
+    rows: torch.Tensor,
+    sign: float,
+    z_strength: float,
+    ldi_layers: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    _, channels, height, width = frame.shape
+    device = frame.device
+    work_frame = frame[0].float()
+    work_depth = depth[0, 0].float()
+    target = x + disparity_px.float() * sign
+    x0 = torch.floor(target)
+    fraction = target - x0
+    layers = max(2, min(12, ldi_layers))
+    priority_depth = torch.round(work_depth * (layers - 1)) / float(layers - 1)
+    z_weight = torch.exp2((priority_depth - 0.5) * max(0.0, z_strength)).clamp_(0.03125, 32.0)
+    accum = torch.zeros((channels, height * width), device=device, dtype=torch.float32)
+    weights = torch.zeros((height * width,), device=device, dtype=torch.float32)
+    flat_rgb = work_frame.reshape(channels, -1)
+    for offset, bilinear in ((0, 1.0 - fraction), (1, fraction)):
+        target_x = x0.to(torch.int64) + offset
+        valid = (target_x >= 0) & (target_x < width)
+        index = (rows + target_x.clamp(0, width - 1)).reshape(-1)
+        weight = (bilinear * z_weight * valid).reshape(-1)
+        weights.scatter_add_(0, index, weight)
+        accum.scatter_add_(1, index[None].expand(channels, -1), flat_rgb * weight)
+    visible = weights.reshape(1, 1, height, width)
+    view = (accum / weights.clamp_min(1.0e-5)[None]).reshape(1, channels, height, width)
+    return view, visible >= 0.02
+
+
+def sparse_push_pull_fill(
+    view: torch.Tensor,
+    valid: torch.Tensor,
+    fallback: torch.Tensor,
+    fill_strength: float,
+    fill_radius: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    result = view.float()
+    filled = valid
+    maximum = max(1, min(48, fill_radius))
+    radius = 1
+    while radius <= maximum:
+        kernel = radius * 2 + 1
+        weights = F.avg_pool2d(filled.float(), (1, kernel), stride=1, padding=(0, radius))
+        colours = F.avg_pool2d(result * filled.float(), (1, kernel), stride=1, padding=(0, radius))
+        candidate = colours / weights.clamp_min(1.0e-4)
+        newly_filled = (~filled) & (weights > 1.0e-4)
+        result = torch.where(newly_filled, candidate, result)
+        filled = filled | newly_filled
+        radius *= 2
+    strength = max(0.0, min(1.0, fill_strength))
+    result = torch.where(filled, result, fallback.float().lerp(result, 1.0 - strength))
+    return result, filled
+
+
+def warp_history(
+    image: torch.Tensor,
+    valid: torch.Tensor,
+    motion_np: np.ndarray,
+    source_width: int,
+    source_height: int,
+    grid_cache: dict[tuple[int, int, int, int], torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    target_height, target_width = image.shape[-2:]
+    gh, gw = motion_np.shape
+    confidence_np = motion_np["confidence"].astype(np.float32) * (1.0 / 255.0)
+    confidence_np *= motion_np["valid"].astype(np.float32)
+    denominator = np.maximum(confidence_np, 1.0 / 255.0)
+    dx = torch.from_numpy(motion_np["dx"].astype(np.float32) / denominator).to(image.device)[None, None]
+    dy = torch.from_numpy(motion_np["dy"].astype(np.float32) / denominator).to(image.device)[None, None]
+    confidence = torch.from_numpy(confidence_np).to(image.device)[None, None]
+    if (gh, gw) != (target_height, target_width):
+        dx = F.interpolate(dx, size=(target_height, target_width), mode="bilinear", align_corners=False)
+        dy = F.interpolate(dy, size=(target_height, target_width), mode="bilinear", align_corners=False)
+        confidence = F.interpolate(confidence, size=(target_height, target_width), mode="bilinear", align_corners=False)
+    key = (target_height, target_width, gh, gw)
+    base = grid_cache.get(key)
+    if base is None:
+        gy, gx = torch.meshgrid(
+            torch.linspace(-1.0, 1.0, target_height, device=image.device),
+            torch.linspace(-1.0, 1.0, target_width, device=image.device),
+            indexing="ij",
+        )
+        base = torch.stack((gx, gy), dim=-1)[None]
+        grid_cache[key] = base
+    grid = base + torch.stack(
+        (
+            dx[0, 0] * (2.0 / max(1, source_width - 1)),
+            dy[0, 0] * (2.0 / max(1, source_height - 1)),
+        ), dim=-1,
+    )[None]
+    warped_image = F.grid_sample(
+        image.float(), grid, mode="bilinear", padding_mode="border", align_corners=True
+    )
+    warped_valid = F.grid_sample(
+        valid.float(), grid, mode="bilinear", padding_mode="zeros", align_corners=True
+    ) > 0.75
+    return warped_image, warped_valid, confidence
+
+
 def inverse_warp(
     frame: torch.Tensor,
     disparity_px: torch.Tensor,
@@ -159,40 +362,71 @@ def layered_splat(
     z_strength: float,
     fill_strength: float,
     fill_radius: int,
+    ldi_layers: int = 6,
 ) -> tuple[torch.Tensor, float]:
     """Forward soft z-splat that retains foreground ownership."""
-    _, channels, height, width = frame.shape
-    device = frame.device
-    work_frame = frame[0].float()
-    work_depth = depth[0, 0].float()
-    target = x + disparity_px.float() * sign
-    x0 = torch.floor(target)
-    fraction = target - x0
-    z_weight = torch.exp2((work_depth - 0.5) * max(0.0, z_strength)).clamp_(0.03125, 32.0)
-    accum = torch.zeros((channels, height * width), device=device, dtype=torch.float32)
-    weights = torch.zeros((height * width,), device=device, dtype=torch.float32)
-    flat_rgb = work_frame.reshape(channels, -1)
-    for offset, bilinear in ((0, 1.0 - fraction), (1, fraction)):
-        target_x = x0.to(torch.int64) + offset
-        valid = (target_x >= 0) & (target_x < width)
-        index = (rows + target_x.clamp(0, width - 1)).reshape(-1)
-        weight = (bilinear * z_weight * valid).reshape(-1)
-        weights.scatter_add_(0, index, weight)
-        accum.scatter_add_(1, index[None].expand(channels, -1), flat_rgb * weight)
-    visible = weights.reshape(1, 1, height, width)
-    view = (accum / weights.clamp_min(1.0e-5)[None]).reshape(1, channels, height, width)
-    holes = visible < 0.035
+    view, valid = forward_splat(
+        frame, depth, disparity_px, x, rows, sign, z_strength, ldi_layers
+    )
+    holes = ~valid
     hole_fraction = float(holes.float().mean().item())
     if holes.any():
-        radius = max(1, min(24, fill_radius))
-        kernel = radius * 2 + 1
-        valid = (~holes).float()
-        neighbour_sum = F.avg_pool2d(view * valid, (1, kernel), stride=1, padding=(0, radius))
-        neighbour_weight = F.avg_pool2d(valid, (1, kernel), stride=1, padding=(0, radius))
-        neighbour = neighbour_sum / neighbour_weight.clamp_min(1.0e-4)
-        filled = frame.float().lerp(neighbour, max(0.0, min(1.0, fill_strength)))
-        view = torch.where(holes, filled, view)
+        view, _ = sparse_push_pull_fill(view, valid, frame, fill_strength, fill_radius)
     return view.to(frame.dtype), hole_fraction
+
+
+def temporal_ldi_splat(
+    frame: torch.Tensor,
+    depth: torch.Tensor,
+    disparity_px: torch.Tensor,
+    x: torch.Tensor,
+    rows: torch.Tensor,
+    sign: float,
+    z_strength: float,
+    fill_strength: float,
+    fill_radius: int,
+    ldi_layers: int,
+    background_expansion: int,
+    sharpen: float,
+) -> tuple[torch.Tensor, float, torch.Tensor, torch.Tensor]:
+    """Layered-depth reprojection with a far plate and sparse disocclusion repair."""
+    primary, primary_valid = forward_splat(
+        frame, depth, disparity_px, x, rows, sign, z_strength, ldi_layers
+    )
+    original_holes = ~primary_valid
+    result = primary
+    repaired_valid = primary_valid
+    if original_holes.any() and background_expansion > 0:
+        plate, plate_depth, plate_disparity = background_plate(
+            frame, depth, disparity_px, background_expansion
+        )
+        background_view, background_valid = forward_splat(
+            plate,
+            plate_depth,
+            plate_disparity,
+            x,
+            rows,
+            sign,
+            max(0.0, z_strength * 0.45),
+            ldi_layers,
+        )
+        use_background = original_holes & background_valid
+        result = torch.where(use_background, background_view, result)
+        repaired_valid = repaired_valid | use_background
+    result, _ = sparse_push_pull_fill(
+        result, repaired_valid, frame, fill_strength, fill_radius
+    )
+    sharpen_amount = max(0.0, min(1.0, sharpen))
+    if sharpen_amount > 0.0:
+        blurred = F.avg_pool2d(result, 3, stride=1, padding=1)
+        sharpened = (result + (result - blurred) * (0.65 * sharpen_amount)).clamp_(0.0, 1.0)
+        result = torch.where(original_holes, sharpened, result)
+    return (
+        result.to(frame.dtype),
+        float(original_holes.float().mean().item()),
+        original_holes,
+        repaired_valid,
+    )
 
 
 def encode_options(codec: str, pixel_format: str, quality: int) -> list[str]:
@@ -222,17 +456,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--layout", choices=["half-sbs", "full-sbs", "half-ou", "full-ou"], default="half-sbs"
     )
-    parser.add_argument("--stereo-method", choices=["inverse", "layered"], default="layered")
+    parser.add_argument(
+        "--stereo-method", choices=["inverse", "layered", "temporal-ldi"],
+        default="temporal-ldi",
+    )
     parser.add_argument("--eye-anchor", choices=["symmetric", "left", "right"], default="symmetric")
     parser.add_argument("--temporal-mode", choices=["off", "ema", "motion"], default="motion")
+    parser.add_argument(
+        "--convergence-mode", choices=["manual", "subject", "comfort"], default="subject"
+    )
+    parser.add_argument(
+        "--disparity-curve", choices=["linear", "comfort", "cinematic"], default="cinematic"
+    )
     parser.add_argument("--eye-separation", type=float, default=1.0)
     parser.add_argument("--convergence", type=float, default=0.48)
+    parser.add_argument("--convergence-smoothing", type=float, default=0.88)
     parser.add_argument("--depth-gamma", type=float, default=1.0)
+    parser.add_argument("--depth-trim-percent", type=float, default=1.5)
+    parser.add_argument("--depth-range-smoothing", type=float, default=0.90)
+    parser.add_argument("--edge-protection", type=float, default=0.70)
+    parser.add_argument("--comfort-strength", type=float, default=0.30)
     parser.add_argument("--foreground-strength", type=float, default=1.0)
     parser.add_argument("--background-strength", type=float, default=0.75)
     parser.add_argument("--z-buffer-strength", type=float, default=5.0)
     parser.add_argument("--occlusion-fill", type=float, default=0.72)
     parser.add_argument("--hole-fill-radius", type=int, default=8)
+    parser.add_argument("--ldi-layers", type=int, default=6)
+    parser.add_argument("--background-expansion", type=int, default=16)
+    parser.add_argument("--temporal-fill", type=float, default=0.75)
+    parser.add_argument("--temporal-fill-confidence", type=float, default=0.35)
+    parser.add_argument("--inpaint-sharpen", type=float, default=0.35)
     parser.add_argument("--edge-feather", type=float, default=1.0)
     parser.add_argument("--temporal-smoothing", type=float, default=0.55)
     parser.add_argument("--max-disparity-percent", type=float, default=2.4)
@@ -254,7 +507,14 @@ def main() -> int:
         raise FileNotFoundError(f"no depth chunks in {args.depth_directory}")
     motion_paths = sorted((args.motion_directory or args.depth_directory).glob("chunk-*.motion"))
     use_motion = args.temporal_mode == "motion" and bool(motion_paths)
-    motion_iterator = iter(motion_frames(motion_paths)) if use_motion else None
+    use_temporal_repair = (
+        args.stereo_method == "temporal-ldi"
+        and args.temporal_fill > 0.0
+        and bool(motion_paths)
+    )
+    motion_iterator = (
+        iter(motion_frames(motion_paths)) if use_motion or use_temporal_repair else None
+    )
 
     width, height = args.width, args.height
     output_width = width * 2 if args.layout == "full-sbs" else width
@@ -285,6 +545,7 @@ def main() -> int:
         raise RuntimeError("could not create VR video pipes")
 
     torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
     torch.set_grad_enabled(False)
     device = torch.device("cuda")
     dtype = torch.float16
@@ -303,8 +564,17 @@ def main() -> int:
     started = time.perf_counter()
     processed = 0
     hole_sum = 0.0
+    temporal_repair_sum = 0.0
+    convergence_sum = 0.0
     previous_depth: torch.Tensor | None = None
     motion_grid_cache: dict[tuple[int, int], torch.Tensor] = {}
+    history_grid_cache: dict[tuple[int, int, int, int], torch.Tensor] = {}
+    previous_left: torch.Tensor | None = None
+    previous_right: torch.Tensor | None = None
+    previous_left_valid: torch.Tensor | None = None
+    previous_right_valid: torch.Tensor | None = None
+    previous_range: tuple[float, float] | None = None
+    previous_convergence: float | None = None
     try:
         with torch.inference_mode():
             for index, (depth_np, _, _) in enumerate(depth_frames(depth_paths)):
@@ -319,23 +589,58 @@ def main() -> int:
                 frame = frame.permute(2, 0, 1)[None].to(dtype=dtype).div_(255.0)
                 depth = torch.from_numpy(depth_np.astype(np.float32, copy=False)).to(device)[None, None]
                 motion_np = next(motion_iterator)[0] if motion_iterator is not None else None
+                motion_confidence = 0.0
+                if motion_np is not None:
+                    motion_confidence = float(
+                        np.mean(
+                            motion_np["valid"].astype(np.float32)
+                            * motion_np["confidence"].astype(np.float32)
+                            * (1.0 / 255.0)
+                        )
+                    )
+                scene_change = motion_np is not None and motion_confidence < 0.035
+                if scene_change:
+                    previous_depth = None
+                    previous_left = previous_right = None
+                    previous_left_valid = previous_right_valid = None
+                    previous_range = None
+                    previous_convergence = None
                 temporal = max(0.0, min(0.95, args.temporal_smoothing))
                 if args.temporal_mode == "off":
                     temporal = 0.0
-                if args.temporal_mode == "ema":
-                    motion_np = None
+                depth_motion_np = motion_np if args.temporal_mode == "motion" else None
+                depth, previous_range = robust_depth_range(
+                    depth,
+                    args.depth_trim_percent,
+                    previous_range,
+                    args.depth_range_smoothing,
+                )
                 depth = motion_compensated_depth(
-                    depth, previous_depth, motion_np, width, height, temporal, motion_grid_cache
+                    depth, previous_depth, depth_motion_np, width, height, temporal, motion_grid_cache
                 ).clamp_(0.0, 1.0)
                 previous_depth = depth.detach().clone()
-                depth = F.interpolate(depth, size=(height, width), mode="bilinear", align_corners=False)
                 depth = depth.pow(max(0.25, min(3.0, args.depth_gamma)))
                 depth = edge_aware_feather(depth, args.edge_feather)
+                convergence = resolve_convergence(
+                    depth,
+                    args.convergence,
+                    args.convergence_mode,
+                    previous_convergence,
+                    args.convergence_smoothing,
+                )
+                previous_convergence = convergence
+                convergence_sum += convergence
+                depth = F.interpolate(depth, size=(height, width), mode="bilinear", align_corners=False)
                 if (eye_height, eye_width) != (height, width):
                     frame = F.interpolate(frame, size=(eye_height, eye_width), mode="bilinear", align_corners=False)
                     depth = F.interpolate(depth, size=(eye_height, eye_width), mode="bilinear", align_corners=False)
+                depth = gradient_aware_depth(depth, args.edge_protection)
 
-                delta = depth[0, 0] - max(0.1, min(0.9, args.convergence))
+                delta = shape_disparity_delta(
+                    depth[0, 0] - convergence,
+                    args.disparity_curve,
+                    args.comfort_strength,
+                )
                 foreground = max(0.0, min(2.0, args.foreground_strength))
                 background = max(0.0, min(2.0, args.background_strength))
                 delta = torch.where(delta >= 0, delta * foreground, delta * background)
@@ -348,19 +653,86 @@ def main() -> int:
                 else:
                     left_shift, right_shift = 1.0, -1.0
 
-                def render_eye(shift: float) -> tuple[torch.Tensor, float]:
+                def render_eye(
+                    shift: float,
+                ) -> tuple[torch.Tensor, float, torch.Tensor, torch.Tensor]:
                     if shift == 0:
-                        return frame, 0.0
-                    if args.stereo_method == "layered":
-                        return layered_splat(
-                            frame, depth, disparity, splat_x, splat_rows, shift, args.z_buffer_strength,
-                            args.occlusion_fill, args.hole_fill_radius,
+                        valid = torch.ones(
+                            (1, 1, eye_height, eye_width), device=device, dtype=torch.bool
                         )
-                    return inverse_warp(frame, disparity, x, y, shift, args.occlusion_fill)
+                        return frame, 0.0, ~valid, valid
+                    if args.stereo_method == "temporal-ldi":
+                        return temporal_ldi_splat(
+                            frame,
+                            depth,
+                            disparity,
+                            splat_x,
+                            splat_rows,
+                            shift,
+                            args.z_buffer_strength,
+                            args.occlusion_fill,
+                            args.hole_fill_radius,
+                            args.ldi_layers,
+                            args.background_expansion,
+                            args.inpaint_sharpen,
+                        )
+                    if args.stereo_method == "layered":
+                        rendered, holes_fraction = layered_splat(
+                            frame, depth, disparity, splat_x, splat_rows, shift, args.z_buffer_strength,
+                            args.occlusion_fill, args.hole_fill_radius, args.ldi_layers,
+                        )
+                        valid = torch.ones(
+                            (1, 1, eye_height, eye_width), device=device, dtype=torch.bool
+                        )
+                        return rendered, holes_fraction, ~valid, valid
+                    rendered, holes_fraction = inverse_warp(
+                        frame, disparity, x, y, shift, args.occlusion_fill
+                    )
+                    valid = torch.ones(
+                        (1, 1, eye_height, eye_width), device=device, dtype=torch.bool
+                    )
+                    return rendered, holes_fraction, ~valid, valid
 
-                left, left_holes = render_eye(left_shift)
-                right, right_holes = render_eye(right_shift)
+                left, left_holes, left_hole_mask, left_valid = render_eye(left_shift)
+                right, right_holes, right_hole_mask, right_valid = render_eye(right_shift)
                 hole_sum += 0.5 * (left_holes + right_holes)
+                if use_temporal_repair and motion_np is not None and not scene_change:
+                    threshold = max(0.0, min(1.0, args.temporal_fill_confidence))
+                    amount = max(0.0, min(1.0, args.temporal_fill))
+
+                    def repair_from_history(
+                        current: torch.Tensor,
+                        holes: torch.Tensor,
+                        current_valid: torch.Tensor,
+                        history: torch.Tensor | None,
+                        history_valid: torch.Tensor | None,
+                    ) -> tuple[torch.Tensor, torch.Tensor, float]:
+                        if history is None or history_valid is None:
+                            return current, current_valid, 0.0
+                        warped, warped_valid, confidence = warp_history(
+                            history,
+                            history_valid,
+                            motion_np,
+                            width,
+                            height,
+                            history_grid_cache,
+                        )
+                        eligible = holes & warped_valid & (confidence >= threshold)
+                        blend = eligible.float() * confidence.clamp_(0.0, 1.0) * amount
+                        repaired = current.float().mul(1.0 - blend).add_(warped.mul(blend))
+                        return repaired.to(current.dtype), current_valid | eligible, float(eligible.float().mean().item())
+
+                    left, left_valid, left_repaired = repair_from_history(
+                        left, left_hole_mask, left_valid, previous_left, previous_left_valid
+                    )
+                    right, right_valid, right_repaired = repair_from_history(
+                        right, right_hole_mask, right_valid, previous_right, previous_right_valid
+                    )
+                    temporal_repair_sum += 0.5 * (left_repaired + right_repaired)
+                previous_left = left.detach().clone()
+                previous_right = right.detach().clone()
+                previous_left_valid = left_valid.detach().clone()
+                previous_right_valid = right_valid.detach().clone()
                 if args.eye_swap:
                     left, right = right, left
                 if args.layout in ("half-sbs", "full-sbs"):
@@ -378,6 +750,8 @@ def main() -> int:
                                 "frames": processed, "total": args.frames,
                                 "fps": processed / max(elapsed, 1e-6),
                                 "holes_percent": 100.0 * hole_sum / processed,
+                                "temporal_repair_percent": 100.0 * temporal_repair_sum / processed,
+                                "convergence": convergence_sum / processed,
                                 "method": args.stereo_method,
                                 "temporal": "motion" if use_motion else args.temporal_mode,
                             }, separators=(",", ":"),
@@ -401,6 +775,8 @@ def main() -> int:
             {
                 "frames": processed, "elapsed_s": elapsed, "fps": processed / max(elapsed, 1e-6),
                 "holes_percent": 100.0 * hole_sum / max(processed, 1),
+                "temporal_repair_percent": 100.0 * temporal_repair_sum / max(processed, 1),
+                "mean_convergence": convergence_sum / max(processed, 1),
                 "method": args.stereo_method,
                 "temporal": "motion" if use_motion else args.temporal_mode,
                 "pixel_format": args.pixel_format, "output": str(args.output_video),

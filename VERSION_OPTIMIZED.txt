@@ -1,2 +1,2 @@
-14.0.0-vr-layered-stereo
-VR export now uses headset-compatible HEVC/H.264, exact frame-preserving muxing, motion-compensated depth, CUDA layered z-splat stereo, tunable foreground/background/occlusion controls, and optional DA3 Large depth.
+15.0.0-neural-stereo-ldi
+VR now includes configurable gradient-aware Temporal LDI, robust temporally stabilized depth ranges, automatic convergence, background/disocclusion reconstruction, motion-guided temporal repair, and real optional DLSS5 refinement independently per eye.

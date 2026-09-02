@@ -1,10 +1,10 @@
-# DLSS5 Video Studio 13
+# DLSS5 Video Studio 15
 
 Windows video player/processor that reconstructs motion and depth from ordinary video, evaluates NVIDIA NGX through a D3D12 host, and can present the result with official NVIDIA DLSS Frame Generation through Streamline + Reflex.
 
 The repository contains source code and dependency installers. It intentionally excludes proprietary NVIDIA DLLs, the user's custom `nvngx_dlssnr.dll`, FFmpeg binaries, ReShade binaries, portable Python, and very large optional model weights. A small open-licensed core model pack for an existing V11 portable folder is available from [GitHub Releases](https://github.com/Absamad-dew/dlss5-video-studio/releases).
 
-## Version 14 highlights
+## Version 15 highlights
 
 - three dedicated workspaces: Realtime, Recording, and VR / 3D;
 - five universal profiles — Ultra Fast, Fast, Medium, Heavy, and Maximum — with automatic adaptation by VRAM, resolution, and CPU capacity;
@@ -19,8 +19,9 @@ The repository contains source code and dependency installers. It intentionally 
 - periodic neural-depth inference is prefetched on the GPU while CPU motion/confidence maps are built, preserving the same depth frames and quality while removing most of the serial DML wait;
 - portable GPU motion-compensated x2 fallback when DLSS-G is unavailable;
 - Depth Anything V2 Small, Video Depth Anything Small, and Depth Anything 3 Small/Base/Large;
-- true depth-warped stereoscopic VR output after the DLSS5 pass, with a fast inverse mode and a CUDA layered z-splat mode that preserves foreground ownership, finds internal disocclusions, and fills them separately;
-- motion-compensated temporal depth using the same confidence-aware optical flow sidecars as DLSS5, plus independent foreground/background parallax, eye anchoring, z priority, fill radius, depth gamma, edge protection, and eye swapping;
+- true depth-warped stereoscopic VR output after the DLSS5 pass, with fast inverse warp, layered z-splat, and a new gradient-aware Temporal LDI renderer that reconstructs a far background plate and repairs disocclusions spatially and across time;
+- robust percentile depth normalization, temporally stabilized depth range, subject/comfort/manual convergence, cinematic/comfort/linear disparity curves, independent foreground/background parallax, configurable 2–12 LDI layers, edge protection, comfort limiting, and repaired-region sharpening;
+- explicit VR DLSS5 policy: one genuine Feature 18 pass before stereo, or a maximum-quality mode that splits the generated stereo view and performs a second genuine DLSS5 pass independently for each eye before restacking;
 - headset-safe H.264 High and HEVC Main/Main10 export, exact video-frame-preserving audio muxing, and a mandatory decode/profile check that rejects the HEVC Rext/GBR combination responsible for black playback;
 - local files and supported network video URLs, buffering, audio, fullscreen, pause, and seeking;
 - selectable source-stream resolution for network URLs and an optional right-hand preview pane;
@@ -42,6 +43,8 @@ Version 13.7 replaces process suspension with a real ffplay/SDL device pause and
 Version 13.8 removes the remaining high-resolution realtime stalls. RGB plus packed V3 motion/depth sidecars stay in named shared memory; completed chunks are reported through a monotonic shared-memory counter instead of delayed redirected stdout. Retired mappings are released asynchronously after the replacement chunk is published. The native OpenMP pool is bounded and uses passive waits, while the lightweight buffer controller gets deterministic scheduling. Sustained 600-frame tests on the RTX 4060 Laptop held 29.996 FPS at 1080p and 29.991 FPS at 1440p from a 30 FPS source, with zero buffer underruns in both cases. At 1080p the native DLSS path delivered 218.10 FPS and guide generation reached 77.48 FPS; at 1440p they retained 62.14 and 33.43 FPS respectively. For 1440p on the standard-VRAM path, Auto moves the same sparse DA2 model to a bounded CPU executor so depth does not contend with a nearly saturated DLSS GPU queue; explicit backend choices remain respected. Audio now keeps one normal-speed ffplay endpoint instead of reopening it from transient startup-rate telemetry; a 15-second run and three pause/resume cycles both retained one PID and a frozen paused sample clock.
 
 Version 14 rebuilds DepthSBS output around a motion-stabilized layered renderer. Laptop tests rendered the new depth stereo stage at 76.46 FPS for a 60-frame 606×1080 Half-SBS job and 57.88 FPS at 810×1440 using one anchored source eye. Both produced all 60 requested frames and validated as HEVC Main/yuv420p. The optional DA3 Large checkpoint also completed together with DLSS5 and RAFT inside the RTX 4060 Laptop's 8 GB VRAM; after warm-up its individual 392-pixel depth passes were about 87–141 ms, so it is exposed as an offline maximum-quality choice rather than a realtime default.
+
+Version 15 adds Temporal LDI and three VR presets. A laptop end-to-end smoke test completed source decoding, guide generation, genuine Feature 18, stereo synthesis, audio mux, metadata injection, and first-frame validation for all eight requested frames. The direct 604×540 Full-SBS Temporal LDI stage measured 19.19 FPS including both generated eyes. A separate test verified the maximum path with three genuine Feature 18 evaluations: one before stereo and one independently for each eye; the resulting HEVC Main/yuv420p file contained every requested frame and decoded successfully.
 
 The model and renderer trade-offs, including DepthCrafter, StereoCrafter, and M2SVid, are documented in VR_RESEARCH_RU.md.
 

@@ -14,7 +14,7 @@ $Invariant = [Globalization.CultureInfo]::InvariantCulture
 $Xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DLSS5 Video Studio 14 · Realtime / Recording / VR" Width="1500" Height="960"
+        Title="DLSS5 Video Studio 15 · Neural Stereo / Realtime / Recording" Width="1500" Height="960"
         MinWidth="1120" MinHeight="720" WindowStartupLocation="CenterScreen"
         Background="#090D14" Foreground="#DCE7F5" FontFamily="Segoe UI">
   <Window.Resources>
@@ -40,7 +40,7 @@ $Xaml = @'
     <Grid.RowDefinitions><RowDefinition Height="88"/><RowDefinition Height="*"/><RowDefinition Height="76"/></Grid.RowDefinitions>
     <Border Grid.Row="0" Background="#111824" BorderBrush="#26354D" BorderThickness="1" CornerRadius="14" Padding="18,10" Margin="0,0,0,12">
       <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <StackPanel><TextBlock Text="DLSS5 VIDEO STUDIO" FontSize="24" FontWeight="SemiBold" Foreground="#F5F9FF"/><TextBlock Text="Feature 18 · Dynamic MFG · motion/depth · VR · аппаратная автоадаптация" Foreground="#7F91AA" Margin="0,3,0,0"/></StackPanel>
+        <StackPanel><TextBlock Text="DLSS5 VIDEO STUDIO" FontSize="24" FontWeight="SemiBold" Foreground="#F5F9FF"/><TextBlock Text="Feature 18 · Temporal LDI · gradient-aware stereo · motion/depth · аппаратная автоадаптация" Foreground="#7F91AA" Margin="0,3,0,0"/></StackPanel>
         <Button x:Name="PreviewPaneButton" Grid.Column="1" Content="Скрыть просмотр" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="Правая панель не участвует в обработке. Её можно убрать, чтобы освободить место настройкам."/>
         <Border Grid.Column="2" Background="#102923" BorderBrush="#268C78" BorderThickness="1" CornerRadius="10" Padding="15,8" VerticalAlignment="Center"><TextBlock x:Name="RuntimeStatus" Text="● Persistent DLSS5 pipeline" Foreground="#6BE0C3"/></Border>
       </Grid>
@@ -92,7 +92,11 @@ $Xaml = @'
 
           <GroupBox x:Name="VrGroup" Header="VR-ВЫВОД">
             <StackPanel>
-              <Border Background="#17122A" BorderBrush="#6B55A5" BorderThickness="1" CornerRadius="9" Padding="10" Margin="0,0,0,9"><StackPanel><TextBlock Text="DLSS5 FEATURE 18 ВКЛЮЧЁН ВО ВСЁМ VR-КОНВЕЙЕРЕ" Foreground="#C6B3FF" FontWeight="SemiBold"/><TextBlock Text="Сначала DLSS5 восстанавливает каждый кадр с motion/depth, затем строятся отдельные ракурсы глаз и VR-контейнер. Сила эффекта задаётся в секции «Нейронный рендеринг»." Foreground="#A99BD0" TextWrapping="Wrap" Margin="0,3,0,0"/></StackPanel></Border>
+              <Border Background="#17122A" BorderBrush="#6B55A5" BorderThickness="1" CornerRadius="9" Padding="10" Margin="0,0,0,9"><StackPanel><TextBlock Text="DLSS 5 — ЯВНАЯ ЧАСТЬ VR-КОНВЕЙЕРА" Foreground="#C6B3FF" FontWeight="SemiBold"/><TextBlock Text="Обычный режим применяет настоящий DLSS5 Feature 18 до построения глаз. Максимальный режим дополнительно разделяет стереопару и запускает ещё один независимый DLSS5-проход для каждого глаза." Foreground="#A99BD0" TextWrapping="Wrap" Margin="0,3,0,0"/></StackPanel></Border>
+              <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                <StackPanel><TextBlock Text="Профиль VR"/><ComboBox x:Name="VRQualityPresetCombo"><ComboBoxItem Content="Cinematic · рекомендуется" Tag="Cinematic"/><ComboBoxItem Content="Fast · быстрее" Tag="Fast"/><ComboBoxItem Content="Maximum · всё качество" Tag="Maximum"/><ComboBoxItem Content="Вручную" Tag="Custom"/></ComboBox></StackPanel>
+                <StackPanel Grid.Column="2"><TextBlock Text="DLSS 5 в VR"/><ComboBox x:Name="VRDLSSModeCombo"><ComboBoxItem Content="До стереосинтеза · 1 проход, быстро" Tag="PreStereo"/><ComboBoxItem Content="До + отдельно для каждого глаза · максимум" Tag="PreAndPerEye"/></ComboBox></StackPanel>
+              </Grid>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                 <StackPanel><TextBlock Text="Режим просмотра"/><ComboBox x:Name="VrModeCombo"><ComboBoxItem Content="Обычное видео" Tag="Off"/><ComboBoxItem Content="3D VR · разные ракурсы из depth" Tag="DepthSBS"/><ComboBoxItem Content="VR-кинотеатр · плоский SBS" Tag="CinemaSBS"/><ComboBoxItem Content="Панорама 360° · equirectangular" Tag="Equirect360"/></ComboBox></StackPanel>
                 <StackPanel Grid.Column="2"><TextBlock Text="Компоновка для шлема"/><ComboBox x:Name="VrLayoutCombo"><ComboBoxItem Content="Half-SBS · та же ширина" Tag="HalfSBS"/><ComboBoxItem Content="Full-SBS · двойная ширина" Tag="FullSBS"/><ComboBoxItem Content="Half-OU · верх/низ" Tag="HalfOU"/><ComboBoxItem Content="Full-OU · двойная высота" Tag="FullOU"/></ComboBox></StackPanel>
@@ -104,19 +108,33 @@ $Xaml = @'
               <Expander Header="ТОНКАЯ НАСТРОЙКА DEPTH-СТЕРЕО" Foreground="#C1B4EE" Margin="2,4,2,9">
                 <Border BorderBrush="#3A315B" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
-                    <StackPanel><TextBlock Text="Стереорендер"/><ComboBox x:Name="VRStereoMethodCombo"><ComboBoxItem Content="Layered z-splat · качество" Tag="Layered"/><ComboBoxItem Content="Inverse warp · максимум FPS" Tag="Inverse"/></ComboBox></StackPanel>
+                    <StackPanel><TextBlock Text="Стереорендер"/><ComboBox x:Name="VRStereoMethodCombo"><ComboBoxItem Content="Temporal LDI · максимум качества" Tag="TemporalLDI"/><ComboBoxItem Content="Layered z-splat · баланс" Tag="Layered"/><ComboBoxItem Content="Inverse warp · максимум FPS" Tag="Inverse"/></ComboBox></StackPanel>
                     <StackPanel Grid.Column="2"><TextBlock Text="Стабилизация depth"/><ComboBox x:Name="VRTemporalModeCombo"><ComboBoxItem Content="Motion-compensated · рекомендуется" Tag="Motion"/><ComboBoxItem Content="EMA · проще" Tag="EMA"/><ComboBoxItem Content="Выключена" Tag="Off"/></ComboBox></StackPanel>
                   </Grid>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                     <StackPanel><TextBlock Text="Опорный глаз"/><ComboBox x:Name="VREyeAnchorCombo"><ComboBoxItem Content="Симметрично · объём" Tag="Symmetric"/><ComboBoxItem Content="Левый исходный · чище/быстрее" Tag="Left"/><ComboBoxItem Content="Правый исходный · чище/быстрее" Tag="Right"/></ComboBox></StackPanel>
                     <StackPanel Grid.Column="2"><TextBlock Text="Совместимость файла"/><ComboBox x:Name="VRPixelFormatCombo"><ComboBoxItem Content="8-bit 4:2:0 · все шлемы" Tag="Compatible8Bit"/><ComboBoxItem Content="10-bit HEVC · меньше полос" Tag="HEVC10Bit"/></ComboBox></StackPanel>
                   </Grid>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                    <StackPanel><TextBlock Text="Автофокус стерео"/><ComboBox x:Name="VRConvergenceModeCombo"><ComboBoxItem Content="По главному объекту" Tag="Subject"/><ComboBoxItem Content="Комфортный диапазон" Tag="Comfort"/><ComboBoxItem Content="Ручная плоскость" Tag="Manual"/></ComboBox></StackPanel>
+                    <StackPanel Grid.Column="2"><TextBlock Text="Кривая параллакса"/><ComboBox x:Name="VRDisparityCurveCombo"><ComboBoxItem Content="Cinematic · выраженный объём" Tag="Cinematic"/><ComboBoxItem Content="Comfort · мягкие края" Tag="Comfort"/><ComboBoxItem Content="Linear · без коррекции" Tag="Linear"/></ComboBox></StackPanel>
+                  </Grid>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Гамма глубины"/><TextBlock x:Name="VRDepthGammaValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRDepthGammaSlider" Minimum="0.25" Maximum="3" Value="1" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Сила переднего плана"/><TextBlock x:Name="VRForegroundValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRForegroundSlider" Minimum="0" Maximum="2" Value="1" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Сила заднего плана"/><TextBlock x:Name="VRBackgroundValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRBackgroundSlider" Minimum="0" Maximum="2" Value="0.75" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Приоритет ближнего слоя (z)"/><TextBlock x:Name="VRZBufferValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRZBufferSlider" Minimum="0" Maximum="10" Value="5" TickFrequency="0.25" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Заполнение раскрытых краёв"/><TextBlock x:Name="VROcclusionValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VROcclusionSlider" Minimum="0" Maximum="1" Value="0.65" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
-                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Радиус заполнения дыр"/><TextBlock x:Name="VRHoleFillValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRHoleFillSlider" Minimum="1" Maximum="24" Value="8" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Радиус заполнения дыр"/><TextBlock x:Name="VRHoleFillValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRHoleFillSlider" Minimum="1" Maximum="48" Value="8" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Слои LDI"/><TextBlock x:Name="VRLDILayersValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRLDILayersSlider" Minimum="2" Maximum="12" Value="6" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Восстановление скрытого фона"/><TextBlock x:Name="VRBackgroundExpansionValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRBackgroundExpansionSlider" Minimum="0" Maximum="48" Value="16" TickFrequency="2" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Заполнение из соседних кадров"/><TextBlock x:Name="VRTemporalFillValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRTemporalFillSlider" Minimum="0" Maximum="1" Value="0.75" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Порог доверия temporal-fill"/><TextBlock x:Name="VRTemporalConfidenceValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRTemporalConfidenceSlider" Minimum="0" Maximum="1" Value="0.35" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Защита границ объектов"/><TextBlock x:Name="VREdgeProtectionValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VREdgeProtectionSlider" Minimum="0" Maximum="1" Value="0.7" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Обрезка выбросов depth"/><TextBlock x:Name="VRDepthTrimValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRDepthTrimSlider" Minimum="0" Maximum="10" Value="1.5" TickFrequency="0.5" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Комфортное ограничение параллакса"/><TextBlock x:Name="VRComfortValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRComfortSlider" Minimum="0" Maximum="1" Value="0.3" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Резкость дорисованных областей"/><TextBlock x:Name="VRInpaintSharpenValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRInpaintSharpenSlider" Minimum="0" Maximum="1" Value="0.35" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Плавность автофокуса"/><TextBlock x:Name="VRConvergenceSmoothingValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRConvergenceSmoothingSlider" Minimum="0" Maximum="0.98" Value="0.88" TickFrequency="0.02" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Стабильность диапазона depth"/><TextBlock x:Name="VRDepthRangeSmoothingValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRDepthRangeSmoothingSlider" Minimum="0" Maximum="0.98" Value="0.9" TickFrequency="0.02" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Смягчение границ depth"/><TextBlock x:Name="VREdgeValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VREdgeSlider" Minimum="0" Maximum="12" Value="2" TickFrequency="1" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Временная стабилизация depth"/><TextBlock x:Name="VRTemporalValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRTemporalSlider" Minimum="0" Maximum="0.95" Value="0.55" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Максимальная диспаратность"/><TextBlock x:Name="VRDisparityValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B59CFF"/></Grid><Slider x:Name="VRDisparitySlider" Minimum="0.5" Maximum="5" Value="2.4" TickFrequency="0.1" IsSnapToTickEnabled="True"/>
@@ -305,9 +323,14 @@ $AdditionalNames = @(
     'RecordMotionSlider','RecordMotionValue','RecordTemporalSlider','RecordTemporalValue','RecordSceneSlider','RecordSceneValue',
     'RecordMotionPresetCombo','RecordMotionBackendCombo','RecordRaftSlider','RecordRaftValue','RecordChunkSlider','RecordChunkValue',
     'VRDepthGammaSlider','VRDepthGammaValue','VROcclusionSlider','VROcclusionValue','VREdgeSlider','VREdgeValue',
-    'VRTemporalSlider','VRTemporalValue','VREyeSwapCheck','VRStereoMethodCombo','VRTemporalModeCombo',
+    'VRTemporalSlider','VRTemporalValue','VREyeSwapCheck','VRStereoMethodCombo','VRTemporalModeCombo','VRDLSSModeCombo','VRQualityPresetCombo',
     'VREyeAnchorCombo','VRPixelFormatCombo','VRForegroundSlider','VRForegroundValue',
-    'VRBackgroundSlider','VRBackgroundValue','VRZBufferSlider','VRZBufferValue','VRHoleFillSlider','VRHoleFillValue'
+    'VRBackgroundSlider','VRBackgroundValue','VRZBufferSlider','VRZBufferValue','VRHoleFillSlider','VRHoleFillValue',
+    'VRConvergenceModeCombo','VRDisparityCurveCombo','VRLDILayersSlider','VRLDILayersValue',
+    'VRBackgroundExpansionSlider','VRBackgroundExpansionValue','VRTemporalFillSlider','VRTemporalFillValue',
+    'VRTemporalConfidenceSlider','VRTemporalConfidenceValue','VREdgeProtectionSlider','VREdgeProtectionValue',
+    'VRDepthTrimSlider','VRDepthTrimValue','VRComfortSlider','VRComfortValue','VRInpaintSharpenSlider','VRInpaintSharpenValue',
+    'VRConvergenceSmoothingSlider','VRConvergenceSmoothingValue','VRDepthRangeSmoothingSlider','VRDepthRangeSmoothingValue'
 )
 foreach ($Name in $AdditionalNames) { Set-Variable -Name $Name -Value $Window.FindName($Name) -Scope Script }
 
@@ -352,6 +375,7 @@ $script:LastEtaSeconds = $null
 $script:ActiveWork = $null
 $script:RunJournal = $null
 $script:ApplyingRealtimeProfile = $false
+$script:ApplyingVrProfile = $false
 $script:SyncingUniversalProfile = $false
 
 function Tag($Combo) { if ($Combo.SelectedItem) { return [int]$Combo.SelectedItem.Tag }; return 0 }
@@ -383,6 +407,9 @@ function Refresh-Labels {
     $RecordWorkerValue.Text=if([int]$RecordWorkerSlider.Value-eq 0){'Авто'}else{[string][int]$RecordWorkerSlider.Value}
     $VRDepthGammaValue.Text=F $VRDepthGammaSlider.Value;$VROcclusionValue.Text=F $VROcclusionSlider.Value;$VREdgeValue.Text=[string][int]$VREdgeSlider.Value;$VRTemporalValue.Text=F $VRTemporalSlider.Value;$VRDisparityValue.Text=(F $VRDisparitySlider.Value)+'%'
     $VRForegroundValue.Text=F $VRForegroundSlider.Value;$VRBackgroundValue.Text=F $VRBackgroundSlider.Value;$VRZBufferValue.Text=F $VRZBufferSlider.Value;$VRHoleFillValue.Text=[string][int]$VRHoleFillSlider.Value
+    $VRLDILayersValue.Text=[string][int]$VRLDILayersSlider.Value;$VRBackgroundExpansionValue.Text=([string][int]$VRBackgroundExpansionSlider.Value)+' px';$VRTemporalFillValue.Text=F $VRTemporalFillSlider.Value;$VRTemporalConfidenceValue.Text=F $VRTemporalConfidenceSlider.Value
+    $VREdgeProtectionValue.Text=F $VREdgeProtectionSlider.Value;$VRDepthTrimValue.Text=(F $VRDepthTrimSlider.Value)+'%';$VRComfortValue.Text=F $VRComfortSlider.Value;$VRInpaintSharpenValue.Text=F $VRInpaintSharpenSlider.Value
+    $VRConvergenceSmoothingValue.Text=F $VRConvergenceSmoothingSlider.Value;$VRDepthRangeSmoothingValue.Text=F $VRDepthRangeSmoothingSlider.Value
     if($IntensitySlider.Value -ge 1.8 -or $StructureSlider.Value -ge 1.9){$AggressionText.Text='Сильное влияние: возможна лишняя дорисовка и изменение лица.';$AggressionText.Foreground='#FF9A9A'}elseif($IntensitySlider.Value -le 1.1){$AggressionText.Text='Мягкое влияние: минимальный риск перерисовки.';$AggressionText.Foreground='#8DD8C5'}else{$AggressionText.Text='Выраженная детализация без максимального общего веса.';$AggressionText.Foreground='#A9BAD0'}
 }
 function Get-WorkspaceMode {
@@ -422,10 +449,9 @@ function Apply-QuickScenario {
         'Maximum' { Select-StringTag $PerformanceCombo 'Maximum';Apply-RealtimeProfile 'Maximum';$QuickScenarioInfo.Text='Максимальная точность motion/depth и нейрорендеринга; предназначен для запаса производительности или финальной записи.' }
         'DepthVR' {
             $WorkspaceTabs.SelectedIndex=2
-            Select-StringTag $ModeCombo '1440p';Select-StringTag $PerformanceCombo 'Heavy';Select-StringTag $DepthModelCombo 'DA3Small';Select-StringTag $VrModeCombo 'DepthSBS';Select-StringTag $VrLayoutCombo 'FullSBS';Select-StringTag $VrTargetFpsCombo '90'
-            Select-StringTag $VRStereoMethodCombo 'Layered';Select-StringTag $VRTemporalModeCombo 'Motion';Select-StringTag $VREyeAnchorCombo 'Symmetric';Select-StringTag $VRPixelFormatCombo 'Compatible8Bit'
-            $VRForegroundSlider.Value=1.0;$VRBackgroundSlider.Value=0.75;$VRZBufferSlider.Value=5.0;$VRHoleFillSlider.Value=8
-            $QuickScenarioInfo.Text='DLSS5 улучшает каждый кадр, DA3 строит геометрию, а motion-compensated CUDA layered renderer формирует разные left/right ракурсы; файл проверяется на совместимость со шлемом.'
+            Select-StringTag $ModeCombo '1440p';Select-StringTag $PerformanceCombo 'Heavy';Select-StringTag $VrModeCombo 'DepthSBS';Select-StringTag $VrTargetFpsCombo '90';Select-StringTag $VRPixelFormatCombo 'Compatible8Bit'
+            Select-StringTag $VRQualityPresetCombo 'Cinematic'
+            $QuickScenarioInfo.Text='DLSS5 восстанавливает исходный ракурс, DA3 строит геометрию, Temporal LDI восстанавливает скрытый фон и переносит его между кадрами. При необходимости включите отдельный DLSS5-проход для каждого глаза.'
         }
     }
     Update-ExpertUi;Update-ProfileUi;Update-VrUi;Update-Estimate
@@ -447,6 +473,39 @@ function Apply-RealtimeProfile([string]$Name) {
         $GuideWorkerSlider.Value=$P.workers
     }finally{$script:ApplyingRealtimeProfile=$false}
     Refresh-Labels;Update-RealtimeQualityInfo;Update-Estimate
+}
+function Apply-VrProfile {
+    if(-not $VRQualityPresetCombo.SelectedItem -or $script:ApplyingVrProfile){return}
+    $Name=Combo-Tag $VRQualityPresetCombo
+    if($Name-eq'Custom'){Update-VrUi;Update-Estimate;return}
+    $script:ApplyingVrProfile=$true
+    try{
+        Select-StringTag $VrModeCombo 'DepthSBS'
+        Select-StringTag $VRTemporalModeCombo 'Motion'
+        Select-StringTag $VREyeAnchorCombo 'Symmetric'
+        Select-StringTag $VRConvergenceModeCombo 'Subject'
+        switch($Name){
+            'Fast' {
+                Select-StringTag $DepthModelCombo 'DA2Small';Select-StringTag $VRStereoMethodCombo 'Layered';Select-StringTag $VRDLSSModeCombo 'PreStereo';Select-StringTag $VRDisparityCurveCombo 'Comfort';Select-StringTag $VrLayoutCombo 'HalfSBS'
+                $VREyeSlider.Value=0.85;$VRConvergenceSlider.Value=0.50;$VRDepthGammaSlider.Value=1.0;$VRForegroundSlider.Value=0.90;$VRBackgroundSlider.Value=0.65;$VRZBufferSlider.Value=4.0;$VROcclusionSlider.Value=0.65;$VRHoleFillSlider.Value=8;$VRLDILayersSlider.Value=4;$VRBackgroundExpansionSlider.Value=10;$VRTemporalFillSlider.Value=0.55;$VRTemporalConfidenceSlider.Value=0.45;$VREdgeProtectionSlider.Value=0.55;$VRDepthTrimSlider.Value=2.0;$VRComfortSlider.Value=0.60;$VRInpaintSharpenSlider.Value=0.20;$VRConvergenceSmoothingSlider.Value=0.86;$VRDepthRangeSmoothingSlider.Value=0.86;$VREdgeSlider.Value=2;$VRTemporalSlider.Value=0.48;$VRDisparitySlider.Value=1.8
+            }
+            'Maximum' {
+                Select-StringTag $DepthModelCombo 'DA3Large';Select-StringTag $VRStereoMethodCombo 'TemporalLDI';Select-StringTag $VRDLSSModeCombo 'PreAndPerEye';Select-StringTag $VRDisparityCurveCombo 'Cinematic';Select-StringTag $VrLayoutCombo 'FullSBS'
+                $VREyeSlider.Value=1.15;$VRConvergenceSlider.Value=0.48;$VRDepthGammaSlider.Value=1.05;$VRForegroundSlider.Value=1.15;$VRBackgroundSlider.Value=0.82;$VRZBufferSlider.Value=7.0;$VROcclusionSlider.Value=0.82;$VRHoleFillSlider.Value=24;$VRLDILayersSlider.Value=10;$VRBackgroundExpansionSlider.Value=32;$VRTemporalFillSlider.Value=0.88;$VRTemporalConfidenceSlider.Value=0.42;$VREdgeProtectionSlider.Value=0.92;$VRDepthTrimSlider.Value=1.0;$VRComfortSlider.Value=0.20;$VRInpaintSharpenSlider.Value=0.55;$VRConvergenceSmoothingSlider.Value=0.94;$VRDepthRangeSmoothingSlider.Value=0.94;$VREdgeSlider.Value=1;$VRTemporalSlider.Value=0.68;$VRDisparitySlider.Value=2.8
+            }
+            default {
+                Select-StringTag $DepthModelCombo 'VideoDepthSmall';Select-StringTag $VRStereoMethodCombo 'TemporalLDI';Select-StringTag $VRDLSSModeCombo 'PreStereo';Select-StringTag $VRDisparityCurveCombo 'Cinematic';Select-StringTag $VrLayoutCombo 'FullSBS'
+                $VREyeSlider.Value=1.0;$VRConvergenceSlider.Value=0.48;$VRDepthGammaSlider.Value=1.0;$VRForegroundSlider.Value=1.0;$VRBackgroundSlider.Value=0.75;$VRZBufferSlider.Value=5.5;$VROcclusionSlider.Value=0.75;$VRHoleFillSlider.Value=16;$VRLDILayersSlider.Value=6;$VRBackgroundExpansionSlider.Value=20;$VRTemporalFillSlider.Value=0.75;$VRTemporalConfidenceSlider.Value=0.35;$VREdgeProtectionSlider.Value=0.75;$VRDepthTrimSlider.Value=1.5;$VRComfortSlider.Value=0.30;$VRInpaintSharpenSlider.Value=0.35;$VRConvergenceSmoothingSlider.Value=0.88;$VRDepthRangeSmoothingSlider.Value=0.90;$VREdgeSlider.Value=2;$VRTemporalSlider.Value=0.55;$VRDisparitySlider.Value=2.4
+            }
+        }
+    }finally{$script:ApplyingVrProfile=$false}
+    Refresh-Labels;Update-VrUi;Update-Estimate
+}
+function Mark-VrCustom {
+    if(-not $script:ApplyingVrProfile -and $VRQualityPresetCombo.SelectedItem -and (Combo-Tag $VRQualityPresetCombo)-ne'Custom'){
+        Select-StringTag $VRQualityPresetCombo 'Custom'
+    }
+    Refresh-Labels;Update-VrUi;Update-Estimate
 }
 function Mark-RealtimeCustom {
     if($DepthMinIntervalSlider.Value -gt $DepthIntervalSlider.Value){
@@ -608,13 +667,17 @@ function Update-VrUi {
     $VrMode=Combo-Tag $VrModeCombo
     $VrLayoutCombo.IsEnabled = $VrMode -in @('CinemaSBS','DepthSBS') -and (Get-WorkspaceMode) -ne 'Realtime'
     $DepthStereo=$VrMode-eq'DepthSBS'
-    foreach($Control in @($VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VREyeSwapCheck,$VRStereoMethodCombo,$VRTemporalModeCombo,$VREyeAnchorCombo,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider)){$Control.IsEnabled=$DepthStereo}
+    foreach($Control in @($VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VREyeSwapCheck,$VRStereoMethodCombo,$VRTemporalModeCombo,$VREyeAnchorCombo,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRDLSSModeCombo,$VRQualityPresetCombo,$VRConvergenceModeCombo,$VRDisparityCurveCombo,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider)){$Control.IsEnabled=$DepthStereo}
     $VRPixelFormatCombo.IsEnabled=$VrMode-ne'Off' -and (Combo-Tag $CodecCombo)-eq'H265'
     if((Combo-Tag $CodecCombo)-eq'H264'){Select-StringTag $VRPixelFormatCombo 'Compatible8Bit'}
-    $VRZBufferSlider.IsEnabled=$DepthStereo -and (Combo-Tag $VRStereoMethodCombo)-eq'Layered'
+    $LayeredStereo=$DepthStereo -and (Combo-Tag $VRStereoMethodCombo)-in @('Layered','TemporalLDI')
+    $TemporalLdi=$DepthStereo -and (Combo-Tag $VRStereoMethodCombo)-eq'TemporalLDI'
+    $VRZBufferSlider.IsEnabled=$LayeredStereo
     $VRHoleFillSlider.IsEnabled=$VRZBufferSlider.IsEnabled
+    foreach($Control in @($VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VRInpaintSharpenSlider)){$Control.IsEnabled=$TemporalLdi}
+    $VRConvergenceSmoothingSlider.IsEnabled=$DepthStereo -and (Combo-Tag $VRConvergenceModeCombo)-ne'Manual'
     switch($VrMode){
-        'DepthSBS' { $VrInfo.Text='DLSS5 Feature 18 восстанавливает сцену; затем motion-compensated depth и CUDA layered z-splat создают разные ракурсы с корректной видимостью ближних слоёв. Для максимума качества выберите Video Depth Anything или DA3.' }
+        'DepthSBS' { $VrInfo.Text='Рекомендуемый современный путь: DLSS5 → DA3/VDA → gradient-aware Temporal LDI → motion-guided disocclusion repair. Режим «до + по глазам» действительно запускает ещё два DLSS5-прохода, а не имитирует их фильтром.' }
         'CinemaSBS' { $VrInfo.Text='Два одинаковых ракурса left/right для VR-кинотеатра. Это комфортный просмотр плоского видео, а не выдуманная стереоглубина. Full-SBS сохраняет полное разрешение каждого глаза.' }
         'Equirect360' { $VrInfo.Text='Для уже снятого/сшитого панорамного исходника 2:1. Программа проверит геометрию и добавит стандартные spherical-video v2 метаданные.' }
         default { $VrInfo.Text='Обычный плоский файл без VR-компоновки и пространственных метаданных.' }
@@ -653,6 +716,8 @@ function Update-Estimate {
             }
             if((Combo-Tag $VrLayoutCombo)-in @('FullSBS','FullOU')){$Seconds*=1.18}
             if((Combo-Tag $VRStereoMethodCombo)-eq'Layered'){$Seconds*=1.08}
+            elseif((Combo-Tag $VRStereoMethodCombo)-eq'TemporalLDI'){$Seconds*=1.22}
+            if((Combo-Tag $VRDLSSModeCombo)-eq'PreAndPerEye'){$Seconds*=2.65}
         }
         if([int](Combo-Tag $VrTargetFpsCombo)-gt 0){$Seconds*=1.65}
     }
@@ -805,7 +870,7 @@ function Update-RecordFineUi {
     $RecordRaftSlider.IsEnabled=$Enabled -and (Combo-Tag $RecordMotionBackendCombo)-eq'raft'
 }
 
-foreach($S in @($IntensitySlider,$ToneSlider,$StructureSlider,$SkinSlider,$MotionXSlider,$MotionYSlider,$TransferSlider,$ColorSlider,$PaperSlider,$QualitySlider,$UpscalerStrengthSlider,$VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$RecordGuideWidthSlider,$RecordDepthIntervalSlider,$RecordDepthMinSlider,$RecordConfidenceSlider,$RecordMotionSlider,$RecordTemporalSlider,$RecordSceneSlider,$RecordRaftSlider,$RecordChunkSlider,$RecordWorkerSlider,$GuideWorkerSlider)){$S.Add_ValueChanged({Refresh-Labels})}
+foreach($S in @($IntensitySlider,$ToneSlider,$StructureSlider,$SkinSlider,$MotionXSlider,$MotionYSlider,$TransferSlider,$ColorSlider,$PaperSlider,$QualitySlider,$UpscalerStrengthSlider,$VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider,$RecordGuideWidthSlider,$RecordDepthIntervalSlider,$RecordDepthMinSlider,$RecordConfidenceSlider,$RecordMotionSlider,$RecordTemporalSlider,$RecordSceneSlider,$RecordRaftSlider,$RecordChunkSlider,$RecordWorkerSlider,$GuideWorkerSlider)){$S.Add_ValueChanged({Refresh-Labels})}
 $RealtimeBufferSlider.Add_ValueChanged({Refresh-Labels;Update-Estimate})
 $RealtimeChunkSlider.Add_ValueChanged({Refresh-Labels})
 $RealtimeQualityCombo.Add_SelectionChanged({
@@ -826,6 +891,13 @@ $FrameGenerationCombo.Add_SelectionChanged({Update-ProfileUi;Update-Estimate})
 $RealtimeTargetFpsCombo.Add_SelectionChanged({Update-Estimate})
 $VrTargetFpsCombo.Add_SelectionChanged({Update-Estimate})
 $VRStereoMethodCombo.Add_SelectionChanged({Update-VrUi})
+$VRConvergenceModeCombo.Add_SelectionChanged({Update-VrUi})
+$VRDLSSModeCombo.Add_SelectionChanged({Update-Estimate})
+$VRQualityPresetCombo.Add_SelectionChanged({Apply-VrProfile})
+$VrLayoutCombo.Add_SelectionChanged({Mark-VrCustom})
+foreach($S in @($VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider)){$S.Add_ValueChanged({Mark-VrCustom})}
+foreach($C in @($VRStereoMethodCombo,$VRTemporalModeCombo,$VREyeAnchorCombo,$VRDLSSModeCombo,$VRConvergenceModeCombo,$VRDisparityCurveCombo,$DepthModelCombo)){$C.Add_SelectionChanged({Mark-VrCustom})}
+$VREyeSwapCheck.Add_Click({Mark-VrCustom})
 $CodecCombo.Add_SelectionChanged({Update-VrUi;Update-Estimate})
 $DepthModelCombo.Add_SelectionChanged({Update-Estimate})
 $RenderPresetCombo.Add_SelectionChanged({Update-Estimate})
@@ -872,8 +944,12 @@ $HelpText=[ordered]@{
     VrModeCombo='Depth 3D строит разные ракурсы глаз; Cinema SBS упаковывает плоское видео; 360 подходит только для готового источника 2:1.'
     VrLayoutCombo='Half экономит разрешение контейнера; Full сохраняет полное разрешение каждого глаза. SBS располагает глаза слева/справа, OU — сверху/снизу.'
     DepthModelCombo='DA2 Small быстрее; Video Depth устойчивее во времени; DA3 Small/Base точнее геометрически; DA3 Large — самый тяжёлый и детальный вариант для офлайн VR-записи.'
-    VRStereoMethodCombo='Layered z-splat переносит исходные пиксели вперёд с приоритетом ближних поверхностей и правильно обнаруживает раскрытые области. Inverse warp легче и быстрее, но хуже на силуэтах.'
+    VRQualityPresetCombo='Cinematic использует Temporal LDI и стабильную видеоглубину. Fast экономит на стереорендере. Maximum включает DA3 Large, Full-SBS, десять LDI-слоёв и настоящий отдельный DLSS5-проход для каждого глаза. После ручного изменения выбирается «Вручную».'
+    VRDLSSModeCombo='«До стерео» — один настоящий проход DLSS5 Feature 18. «До + по глазам» после создания двух ракурсов запускает DLSS5 ещё раз отдельно для левого и правого глаза; это намного медленнее, но детали глаз не смешиваются через шов SBS.'
+    VRStereoMethodCombo='Temporal LDI добавляет дальний скрытый слой, sparse-заполнение и перенос раскрытых областей из соседних кадров. Layered z-splat быстрее, но восстанавливает фон проще. Inverse warp — режим максимального FPS.'
     VRTemporalModeCombo='Motion-compensated переносит предыдущую глубину по optical flow перед смешиванием и не приклеивает объём к экрану. EMA дешевле, но может плыть; Off полезен для диагностики.'
+    VRConvergenceModeCombo='По главному объекту удерживает нулевой параллакс около центрального персонажа. Comfort выбирает устойчивый средний диапазон. Manual использует только ползунок плоскости фокуса.'
+    VRDisparityCurveCombo='Cinematic усиливает хорошо читаемые средние планы; Comfort мягко ограничивает экстремальный параллакс; Linear переносит depth без художественного ремаппинга.'
     VREyeAnchorCombo='Симметричный режим строит оба ракурса и даёт центральную композицию. Опорный левый/правый глаз сохраняет один исходный кадр нетронутым, экономит один warp и уменьшает артефакты.'
     VRPixelFormatCombo='8-bit 4:2:0 использует аппаратно совместимые HEVC Main/H.264 High и не даёт чёрный экран в обычных VR-плеерах. 10-bit HEVC Main10 уменьшает цветовые полосы, если шлем его поддерживает.'
     VREyeSlider='Масштаб стереопараллакса. Слишком большое значение вызывает усталость глаз и раскрытые области по краям.'
@@ -886,6 +962,16 @@ $HelpText=[ordered]@{
     VREdgeSlider='Смягчает резкие границы карты глубины, уменьшая рваные края при построении второго ракурса.'
     VROcclusionSlider='Заполняет области, открывшиеся после построения второго ракурса. Больше — меньше дыр, но слабее настоящий стереоэффект на краях.'
     VRHoleFillSlider='Радиус поиска соседнего видимого слоя для дыр после смещения. Увеличивайте для сильного 3D; слишком большое значение может растянуть фон.'
+    VRLDILayersSlider='Число дискретных уровней приоритета layered-depth image. Больше лучше разделяет близкие перекрывающиеся поверхности, но повышает чувствительность к ошибкам depth.'
+    VRBackgroundExpansionSlider='Строит отдельную дальнюю цветовую пластину за границами переднего плана. Она используется только в областях, реально раскрывшихся при сдвиге камеры.'
+    VRTemporalFillSlider='Доля скрытого фона, переносимая из предыдущего кадра по motion vectors. Убирает мерцание дорисованных краёв; требует Motion temporal.'
+    VRTemporalConfidenceSlider='Запрещает temporal-fill там, где optical flow ненадёжен. Больше — меньше шлейфов, но чаще используется пространственное заполнение.'
+    VREdgeProtectionSlider='Gradient-aware разделение глубины на силуэтах. Убирает резиновые края волос, рук и персонажей без размытия всего кадра.'
+    VRDepthTrimSlider='Отбрасывает небольшой процент выбросов нейроглубины и растягивает полезный диапазон. Обычно 1–3% даёт более выразительный объём.'
+    VRComfortSlider='Мягко ограничивает крайний отрицательный и положительный параллакс. 0 сохраняет максимум pop-out; 1 безопаснее для долгого просмотра.'
+    VRInpaintSharpenSlider='Возвращает локальную резкость только дорисованным disocclusion-областям, не перешарпливая исходный глаз.'
+    VRConvergenceSmoothingSlider='Инерция автоматической плоскости фокуса. Больше устраняет прыжки глубины между кадрами; меньше быстрее следует за новым главным объектом.'
+    VRDepthRangeSmoothingSlider='Удерживает одинаковый ближний/дальний диапазон depth во времени и подавляет дыхание объёма.'
     VRTemporalSlider='Стабилизирует нейроглубину во времени перед построением глаз. Убирает дрожание объёма, но слишком большое значение замедляет реакцию.'
     VREyeSwapCheck='Меняет местами левый и правый ракурсы, если конкретный VR-плеер трактует порядок глаз наоборот.'
     RecordFineGuideCheck='Открывает ручные motion/depth-параметры записи и VR. Если выключено, работает выбранный универсальный профиль.'
@@ -1244,12 +1330,22 @@ $RunButton.Add_Click({
                 '-VREdgeFeather',([string]::Format($Invariant,'{0:0.###}',[double]$VREdgeSlider.Value)),
                 '-VRTemporalSmoothing',([string]::Format($Invariant,'{0:0.###}',[double]$VRTemporalSlider.Value)),
                 '-VRMaxDisparityPercent',([string]::Format($Invariant,'{0:0.###}',[double]$VRDisparitySlider.Value)),
-                '-VRStereoMethod',(Combo-Tag $VRStereoMethodCombo),'-VREyeAnchor',(Combo-Tag $VREyeAnchorCombo),
+                '-VRStereoMethod',(Combo-Tag $VRStereoMethodCombo),'-VRDLSSMode',(Combo-Tag $VRDLSSModeCombo),'-VREyeAnchor',(Combo-Tag $VREyeAnchorCombo),
                 '-VRTemporalMode',(Combo-Tag $VRTemporalModeCombo),'-VRPixelFormat',(Combo-Tag $VRPixelFormatCombo),
+                '-VRConvergenceMode',(Combo-Tag $VRConvergenceModeCombo),'-VRDisparityCurve',(Combo-Tag $VRDisparityCurveCombo),
+                '-VRConvergenceSmoothing',([string]::Format($Invariant,'{0:0.###}',[double]$VRConvergenceSmoothingSlider.Value)),
+                '-VRDepthTrimPercent',([string]::Format($Invariant,'{0:0.###}',[double]$VRDepthTrimSlider.Value)),
+                '-VRDepthRangeSmoothing',([string]::Format($Invariant,'{0:0.###}',[double]$VRDepthRangeSmoothingSlider.Value)),
+                '-VREdgeProtection',([string]::Format($Invariant,'{0:0.###}',[double]$VREdgeProtectionSlider.Value)),
+                '-VRComfortStrength',([string]::Format($Invariant,'{0:0.###}',[double]$VRComfortSlider.Value)),
                 '-VRForegroundStrength',([string]::Format($Invariant,'{0:0.###}',[double]$VRForegroundSlider.Value)),
                 '-VRBackgroundStrength',([string]::Format($Invariant,'{0:0.###}',[double]$VRBackgroundSlider.Value)),
                 '-VRZBufferStrength',([string]::Format($Invariant,'{0:0.###}',[double]$VRZBufferSlider.Value)),
-                '-VRHoleFillRadius',[int]$VRHoleFillSlider.Value,
+                '-VRHoleFillRadius',[int]$VRHoleFillSlider.Value,'-VRLDILayers',[int]$VRLDILayersSlider.Value,
+                '-VRBackgroundExpansion',[int]$VRBackgroundExpansionSlider.Value,
+                '-VRTemporalFill',([string]::Format($Invariant,'{0:0.###}',[double]$VRTemporalFillSlider.Value)),
+                '-VRTemporalFillConfidence',([string]::Format($Invariant,'{0:0.###}',[double]$VRTemporalConfidenceSlider.Value)),
+                '-VRInpaintSharpen',([string]::Format($Invariant,'{0:0.###}',[double]$VRInpaintSharpenSlider.Value)),
                 '-VRTargetFps',[int](Combo-Tag $VrTargetFpsCombo),
                 '-GuideWorkerThreads',[int]$RecordWorkerSlider.Value,
                 '-NetworkMaxHeight',[int](Combo-Tag $SourceNetworkHeightCombo),
@@ -1366,6 +1462,9 @@ $VRStereoMethodCombo.SelectedIndex=0
 $VRTemporalModeCombo.SelectedIndex=0
 $VREyeAnchorCombo.SelectedIndex=0
 $VRPixelFormatCombo.SelectedIndex=0
+$VRDLSSModeCombo.SelectedIndex=0
+$VRConvergenceModeCombo.SelectedIndex=0
+$VRDisparityCurveCombo.SelectedIndex=0
 $HardwareCombo.SelectedIndex=0
 $RenderPresetCombo.SelectedIndex=0
 $DepthModelCombo.SelectedIndex=0
@@ -1387,6 +1486,7 @@ $GuideMotionBackendCombo.SelectedIndex=0
 $RecordMotionPresetCombo.SelectedIndex=1
 $RecordMotionBackendCombo.SelectedIndex=0
 $RealtimeQualityCombo.SelectedIndex=2
+$VRQualityPresetCombo.SelectedIndex=0
 $OutputBox.Text=Join-Path $Root 'output'
 Load-Presets
 Apply-Settings $BuiltIn['Balanced · рекомендовано']

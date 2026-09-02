@@ -24,14 +24,27 @@ param(
     [ValidateRange(0.0,24.0)] [double] $VREdgeFeather = 2.0,
     [ValidateRange(0.0,0.95)] [double] $VRTemporalSmoothing = 0.55,
     [ValidateRange(0.5,5.0)] [double] $VRMaxDisparityPercent = 2.4,
-    [ValidateSet('Inverse','Layered')] [string] $VRStereoMethod = 'Layered',
+    [ValidateSet('Inverse','Layered','TemporalLDI')] [string] $VRStereoMethod = 'TemporalLDI',
+    [ValidateSet('PreStereo','PreAndPerEye')] [string] $VRDLSSMode = 'PreStereo',
     [ValidateSet('Symmetric','Left','Right')] [string] $VREyeAnchor = 'Symmetric',
     [ValidateSet('Off','EMA','Motion')] [string] $VRTemporalMode = 'Motion',
+    [ValidateSet('Manual','Subject','Comfort')] [string] $VRConvergenceMode = 'Subject',
+    [ValidateSet('Linear','Comfort','Cinematic')] [string] $VRDisparityCurve = 'Cinematic',
     [ValidateSet('Compatible8Bit','HEVC10Bit')] [string] $VRPixelFormat = 'Compatible8Bit',
+    [ValidateRange(0.0,0.98)] [double] $VRConvergenceSmoothing = 0.88,
+    [ValidateRange(0.0,20.0)] [double] $VRDepthTrimPercent = 1.5,
+    [ValidateRange(0.0,0.98)] [double] $VRDepthRangeSmoothing = 0.90,
+    [ValidateRange(0.0,1.0)] [double] $VREdgeProtection = 0.70,
+    [ValidateRange(0.0,1.0)] [double] $VRComfortStrength = 0.30,
     [ValidateRange(0.0,2.0)] [double] $VRForegroundStrength = 1.0,
     [ValidateRange(0.0,2.0)] [double] $VRBackgroundStrength = 0.75,
     [ValidateRange(0.0,10.0)] [double] $VRZBufferStrength = 5.0,
-    [ValidateRange(1,24)] [int] $VRHoleFillRadius = 8,
+    [ValidateRange(1,48)] [int] $VRHoleFillRadius = 8,
+    [ValidateRange(2,12)] [int] $VRLDILayers = 6,
+    [ValidateRange(0,48)] [int] $VRBackgroundExpansion = 16,
+    [ValidateRange(0.0,1.0)] [double] $VRTemporalFill = 0.75,
+    [ValidateRange(0.0,1.0)] [double] $VRTemporalFillConfidence = 0.35,
+    [ValidateRange(0.0,1.0)] [double] $VRInpaintSharpen = 0.35,
     [ValidateSet(0,72,90,120)] [int] $VRTargetFps = 0,
     [switch] $VREyeSwap,
     [double] $StartSeconds = 0,
@@ -191,6 +204,64 @@ function Test-VrOutput([string] $Path) {
         codec=[string]$VrStream.codec_name;profile=[string]$VrStream.profile;pixel_format=[string]$VrStream.pix_fmt
         width=[int]$VrStream.width;height=[int]$VrStream.height;frames=[string]$VrStream.nb_frames
     }|ConvertTo-Json -Compress))
+}
+
+function Invoke-VrPerEyeDlss([string] $StereoInput, [string] $StereoOutput) {
+    $EyeLeftSource = Join-Path $Work 'vr-eye-left-source.mp4'
+    $EyeRightSource = Join-Path $Work 'vr-eye-right-source.mp4'
+    $EyeLeftDlss = Join-Path $Work 'vr-eye-left-dlss.mp4'
+    $EyeRightDlss = Join-Path $Work 'vr-eye-right-dlss.mp4'
+    $IntermediateQp = [math]::Max(6,$Quality-8)
+    $IntermediateCodec = 'hevc_nvenc'
+    $SplitCommon = @('-an','-c:v',$IntermediateCodec,'-preset','p2','-rc','constqp','-qp',$IntermediateQp,'-pix_fmt','p010le','-profile:v','main10','-tag:v','hvc1')
+    if ($VRSbsLayout -in @('HalfSBS','FullSBS')) {
+        $LeftCrop = 'crop=iw/2:ih:0:0'
+        $RightCrop = 'crop=iw/2:ih:iw/2:0'
+        $StackFilter = '[0:v][1:v]hstack=inputs=2[v]'
+    } else {
+        $LeftCrop = 'crop=iw:ih/2:0:0'
+        $RightCrop = 'crop=iw:ih/2:0:ih/2'
+        $StackFilter = '[0:v][1:v]vstack=inputs=2[v]'
+    }
+    Run-Tool $Ffmpeg (@('-y','-v','error','-i',$StereoInput,'-vf',$LeftCrop,'-frames:v',$TotalFrames)+$SplitCommon+@($EyeLeftSource)) 'VR left-eye extraction failed'
+    Run-Tool $Ffmpeg (@('-y','-v','error','-i',$StereoInput,'-vf',$RightCrop,'-frames:v',$TotalFrames)+$SplitCommon+@($EyeRightSource)) 'VR right-eye extraction failed'
+
+    function Invoke-EyePass([string] $EyeName, [string] $EyeInput, [string] $EyeOutput) {
+        $ChildArguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,
+            '-InputVideo',$EyeInput,'-OutputVideo',$EyeOutput,'-ConfigPath',$ConfigPath,
+            '-Codec',$Codec,'-Quality',[math]::Max(8,$Quality-4),'-OutputMode','Source',
+            '-PerformanceProfile',$PerformanceProfile,'-HardwareProfile',$HardwareProfile,
+            '-DepthModelProfile',$DepthModelProfile,'-DepthComputeBackend',$DepthComputeBackend,
+            '-Upscaler','None','-PipelineOrder','DLSSOnly','-VRMode','Off',
+            '-StartSeconds','0','-FrameCount',$TotalFrames,'-GuideWorkerThreads',$GuideWorkerThreads
+        )
+        if ($FineGuideSettings) {
+            $ChildArguments += @(
+                '-FineGuideSettings','-GuideWidthOverride',$GuideWidthOverride,
+                '-DepthIntervalOverride',$DepthIntervalOverride,'-DepthMinIntervalOverride',$DepthMinIntervalOverride,
+                '-AdaptiveConfidenceOverride',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$AdaptiveConfidenceOverride)),
+                '-AdaptiveMotionOverride',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$AdaptiveMotionOverride)),
+                '-TemporalDepthOverride',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$TemporalDepthOverride)),
+                '-SceneCutThresholdOverride',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$SceneCutThresholdOverride)),
+                '-MotionPresetOverride',$MotionPresetOverride,'-MotionBackendOverride',$MotionBackendOverride,
+                '-RaftUpdatesOverride',$RaftUpdatesOverride,'-ChunkFramesOverride',$ChunkFramesOverride
+            )
+        }
+        Write-Output "VR_DLSS5_EYE_START $EyeName"
+        & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" @ChildArguments 2>&1 |
+            ForEach-Object { Write-Output ("VR_DLSS5_EYE_$($EyeName.ToUpperInvariant()) " + [string]$_) }
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $EyeOutput -PathType Leaf)) {
+            throw "DLSS5 per-eye refinement failed for $EyeName eye."
+        }
+        Write-Output "VR_DLSS5_EYE_DONE $EyeName"
+    }
+
+    Invoke-EyePass 'left' $EyeLeftSource $EyeLeftDlss
+    Invoke-EyePass 'right' $EyeRightSource $EyeRightDlss
+    $Encoder = if ($Codec -eq 'H265') { 'hevc_nvenc' } else { 'h264_nvenc' }
+    $VrCodecArguments = Get-VrCodecArguments $Codec $VRPixelFormat
+    Run-Tool $Ffmpeg (@('-y','-v','error','-i',$EyeLeftDlss,'-i',$EyeRightDlss,'-filter_complex',$StackFilter,'-map','[v]','-frames:v',$TotalFrames,'-an','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$VrCodecArguments+@('-movflags','+faststart',$StereoOutput)) 'VR per-eye DLSS5 restacking failed'
 }
 
 function Parse-Rate([string] $Value) {
@@ -832,6 +903,7 @@ $Plan = [ordered]@{
     container_geometry=@($ContainerWidth,$ContainerHeight); source_fps=$SourceRate; fps=$Fps
     duration_seconds=$Duration; total_frames=$TotalFrames; pipeline_order=$PipelineOrder
     pipeline_label=$PipelineLabel; vr_mode=$VRMode; vr_layout=$VRSbsLayout
+    vr_dlss5_mode=if($VRMode-eq'DepthSBS'){$VRDLSSMode}else{$null}
     vr_eye_separation=if($VRMode-eq'DepthSBS'){$VREyeSeparation}else{$null}
     vr_convergence=if($VRMode-eq'DepthSBS'){$VRConvergence}else{$null}
     vr_depth_gamma=if($VRMode-eq'DepthSBS'){$VRDepthGamma}else{$null}
@@ -842,11 +914,23 @@ $Plan = [ordered]@{
     vr_stereo_method=if($VRMode-eq'DepthSBS'){$VRStereoMethod}else{$null}
     vr_eye_anchor=if($VRMode-eq'DepthSBS'){$VREyeAnchor}else{$null}
     vr_temporal_mode=if($VRMode-eq'DepthSBS'){$VRTemporalMode}else{$null}
+    vr_convergence_mode=if($VRMode-eq'DepthSBS'){$VRConvergenceMode}else{$null}
+    vr_disparity_curve=if($VRMode-eq'DepthSBS'){$VRDisparityCurve}else{$null}
+    vr_convergence_smoothing=if($VRMode-eq'DepthSBS'){$VRConvergenceSmoothing}else{$null}
+    vr_depth_trim_percent=if($VRMode-eq'DepthSBS'){$VRDepthTrimPercent}else{$null}
+    vr_depth_range_smoothing=if($VRMode-eq'DepthSBS'){$VRDepthRangeSmoothing}else{$null}
+    vr_edge_protection=if($VRMode-eq'DepthSBS'){$VREdgeProtection}else{$null}
+    vr_comfort_strength=if($VRMode-eq'DepthSBS'){$VRComfortStrength}else{$null}
     vr_pixel_format=if($VRMode-ne'Off'){if($Codec-eq'H264'){'Compatible8Bit'}else{$VRPixelFormat}}else{$null}
     vr_foreground_strength=if($VRMode-eq'DepthSBS'){$VRForegroundStrength}else{$null}
     vr_background_strength=if($VRMode-eq'DepthSBS'){$VRBackgroundStrength}else{$null}
     vr_z_buffer_strength=if($VRMode-eq'DepthSBS'){$VRZBufferStrength}else{$null}
     vr_hole_fill_radius=if($VRMode-eq'DepthSBS'){$VRHoleFillRadius}else{$null}
+    vr_ldi_layers=if($VRMode-eq'DepthSBS'){$VRLDILayers}else{$null}
+    vr_background_expansion=if($VRMode-eq'DepthSBS'){$VRBackgroundExpansion}else{$null}
+    vr_temporal_fill=if($VRMode-eq'DepthSBS'){$VRTemporalFill}else{$null}
+    vr_temporal_fill_confidence=if($VRMode-eq'DepthSBS'){$VRTemporalFillConfidence}else{$null}
+    vr_inpaint_sharpen=if($VRMode-eq'DepthSBS'){$VRInpaintSharpen}else{$null}
     vr_target_fps=if($VRMode-ne'Off' -and $VRTargetFps-gt 0){$VRTargetFps}else{$null}
     vr_eye_swap=if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
     realtime_buffer_seconds=if($IsPreviewOnly){$RealtimeBufferSeconds}else{$null}
@@ -1501,6 +1585,7 @@ try {
             $LayoutName = switch ($VRSbsLayout) { 'FullSBS' {'full-sbs'} 'HalfOU' {'half-ou'} 'FullOU' {'full-ou'} default {'half-sbs'} }
             $CodecNameVr = if ($Codec -eq 'H265') { 'h265' } else { 'h264' }
             $VrDepthPixelFormat = if($Codec-eq'H265' -and $VRPixelFormat-eq'HEVC10Bit'){'p010le'}else{'yuv420p'}
+            $VrStereoMethodName = if($VRStereoMethod-eq'TemporalLDI'){'temporal-ldi'}else{$VRStereoMethod.ToLowerInvariant()}
             $VrDepthArgs = @(
                 '-s','-B',$VRDepthWorker,'--ffmpeg',$Ffmpeg,'--input-video',$FlatOutput,
                 '--depth-directory',$ChunkDirectory,'--motion-directory',$ChunkDirectory,'--output-video',$VrDepthVideoOnly,
@@ -1513,18 +1598,35 @@ try {
                 '--edge-feather',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VREdgeFeather)),
                 '--temporal-smoothing',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRTemporalSmoothing)),
                 '--max-disparity-percent',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRMaxDisparityPercent)),
-                '--stereo-method',$VRStereoMethod.ToLowerInvariant(),
+                '--stereo-method',$VrStereoMethodName,
                 '--eye-anchor',$VREyeAnchor.ToLowerInvariant(),
                 '--temporal-mode',$VRTemporalMode.ToLowerInvariant(),
+                '--convergence-mode',$VRConvergenceMode.ToLowerInvariant(),
+                '--disparity-curve',$VRDisparityCurve.ToLowerInvariant(),
+                '--convergence-smoothing',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRConvergenceSmoothing)),
+                '--depth-trim-percent',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRDepthTrimPercent)),
+                '--depth-range-smoothing',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRDepthRangeSmoothing)),
+                '--edge-protection',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VREdgeProtection)),
+                '--comfort-strength',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRComfortStrength)),
                 '--foreground-strength',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRForegroundStrength)),
                 '--background-strength',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRBackgroundStrength)),
                 '--z-buffer-strength',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRZBufferStrength)),
                 '--hole-fill-radius',$VRHoleFillRadius,
+                '--ldi-layers',$VRLDILayers,'--background-expansion',$VRBackgroundExpansion,
+                '--temporal-fill',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRTemporalFill)),
+                '--temporal-fill-confidence',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRTemporalFillConfidence)),
+                '--inpaint-sharpen',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRInpaintSharpen)),
                 '--pixel-format',$VrDepthPixelFormat,
                 '--codec',$CodecNameVr,'--quality',$Quality
             )
             if ($VREyeSwap) { $VrDepthArgs += '--eye-swap' }
             Run-Tool $UpscalerPython $VrDepthArgs 'Depth-warped VR synthesis failed'
+            if ($VRDLSSMode -eq 'PreAndPerEye') {
+                Emit-Progress '3D VR + DLSS5' 'Running a real DLSS5 refinement pass for each eye' 97 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
+                $VrPerEyeDlss = Join-Path $Work 'vr-depth-per-eye-dlss.mp4'
+                Invoke-VrPerEyeDlss $VrDepthVideoOnly $VrPerEyeDlss
+                $VrDepthVideoOnly = $VrPerEyeDlss
+            }
             $StereoMetadata = if ($VRSbsLayout -in @('HalfOU','FullOU')) { 'top_bottom' } else { 'left_right' }
             $SpatialStereo = if ($VRSbsLayout -in @('HalfOU','FullOU')) { 'top-bottom' } else { 'left-right' }
             Run-Tool $Ffmpeg @('-y','-v','error','-i',$VrDepthVideoOnly,'-i',$FlatOutput,'-map','0:v:0','-map','1:a?','-c','copy','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrEncoded) 'Depth VR audio mux failed'
@@ -1596,7 +1698,7 @@ try {
     $WallFps = if ($ProcessingElapsedSeconds -gt 0) { $TotalFrames / $ProcessingElapsedSeconds } else { 0.0 }
     $DisplayFps = if ($PreviewFpsMatch.Success) { [double]::Parse($PreviewFpsMatch.Groups['fps'].Value, [Globalization.CultureInfo]::InvariantCulture) } else { 0.0 }
     $Result = [ordered]@{
-        schema = 'dlss5-video-studio-run/7'
+        schema = 'dlss5-video-studio-run/8'
         status = 'ok'
         input_video = if ($IsNetworkSource) { '[network stream]' } else { $InputVideo }
         source_kind = if ($IsNetworkSource) { 'network' } else { 'file' }
@@ -1620,6 +1722,7 @@ try {
         pipeline_label = $PipelineLabel
         vr_mode = $VRMode
         vr_sbs_layout = if ($VRMode -in @('CinemaSBS','DepthSBS')) { $VRSbsLayout } else { $null }
+        vr_dlss5_mode = if($VRMode-eq'DepthSBS'){$VRDLSSMode}else{$null}
         vr_eye_separation = if($VRMode-eq'DepthSBS'){$VREyeSeparation}else{$null}
         vr_convergence = if($VRMode-eq'DepthSBS'){$VRConvergence}else{$null}
         vr_depth_gamma = if($VRMode-eq'DepthSBS'){$VRDepthGamma}else{$null}
@@ -1630,11 +1733,23 @@ try {
         vr_stereo_method = if($VRMode-eq'DepthSBS'){$VRStereoMethod}else{$null}
         vr_eye_anchor = if($VRMode-eq'DepthSBS'){$VREyeAnchor}else{$null}
         vr_temporal_mode = if($VRMode-eq'DepthSBS'){$VRTemporalMode}else{$null}
+        vr_convergence_mode = if($VRMode-eq'DepthSBS'){$VRConvergenceMode}else{$null}
+        vr_disparity_curve = if($VRMode-eq'DepthSBS'){$VRDisparityCurve}else{$null}
+        vr_convergence_smoothing = if($VRMode-eq'DepthSBS'){$VRConvergenceSmoothing}else{$null}
+        vr_depth_trim_percent = if($VRMode-eq'DepthSBS'){$VRDepthTrimPercent}else{$null}
+        vr_depth_range_smoothing = if($VRMode-eq'DepthSBS'){$VRDepthRangeSmoothing}else{$null}
+        vr_edge_protection = if($VRMode-eq'DepthSBS'){$VREdgeProtection}else{$null}
+        vr_comfort_strength = if($VRMode-eq'DepthSBS'){$VRComfortStrength}else{$null}
         vr_pixel_format = if($VRMode-ne'Off'){if($Codec-eq'H264'){'Compatible8Bit'}else{$VRPixelFormat}}else{$null}
         vr_foreground_strength = if($VRMode-eq'DepthSBS'){$VRForegroundStrength}else{$null}
         vr_background_strength = if($VRMode-eq'DepthSBS'){$VRBackgroundStrength}else{$null}
         vr_z_buffer_strength = if($VRMode-eq'DepthSBS'){$VRZBufferStrength}else{$null}
         vr_hole_fill_radius = if($VRMode-eq'DepthSBS'){$VRHoleFillRadius}else{$null}
+        vr_ldi_layers = if($VRMode-eq'DepthSBS'){$VRLDILayers}else{$null}
+        vr_background_expansion = if($VRMode-eq'DepthSBS'){$VRBackgroundExpansion}else{$null}
+        vr_temporal_fill = if($VRMode-eq'DepthSBS'){$VRTemporalFill}else{$null}
+        vr_temporal_fill_confidence = if($VRMode-eq'DepthSBS'){$VRTemporalFillConfidence}else{$null}
+        vr_inpaint_sharpen = if($VRMode-eq'DepthSBS'){$VRInpaintSharpen}else{$null}
         vr_target_fps = if($VRMode-ne'Off' -and $VRTargetFps-gt 0){$VRTargetFps}else{$null}
         vr_eye_swap = if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
         output_mode = $Mode
