@@ -50,20 +50,22 @@ $SourceResolver = Join-Path $PSScriptRoot 'source-resolver.psm1'
 $PowerShell = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
 $Invariant = [Globalization.CultureInfo]::InvariantCulture
 
-# Keep the already-open decoder/audio device alive across pause and short
-# rebuffer events.  Reopening ffplay at a network timestamp is slow and the
-# decoder start-up delay is audible as a gap or an A/V jump after Resume.
-if (-not ('StudioNativeProcessControl' -as [type])) {
+# Control ffplay through its SDL window. Suspending the process is not a valid
+# audio pause: samples already queued in the Windows endpoint keep playing and
+# make sound run ahead while video is stopped. A native ffplay pause freezes
+# both the SDL device and its sample clock.
+if (-not ('StudioNativeAudioControl' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class StudioNativeProcessControl {
-    [DllImport("ntdll.dll")]
-    public static extern int NtSuspendProcess(IntPtr processHandle);
-
-    [DllImport("ntdll.dll")]
-    public static extern int NtResumeProcess(IntPtr processHandle);
+public static class StudioNativeAudioControl {
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr window, int command);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr window);
 }
 '@
 }
@@ -146,10 +148,30 @@ if ($IsOnline) {
 if ($Duration -le 0) { throw 'Could not determine the video duration for realtime seeking.' }
 $CurrentStart = [math]::Max(0.0,[math]::Min($Duration-0.05,$StartSeconds))
 $AudioProcess = $null
-$AudioStderrTask = $null
+$AudioStderrReadTask = $null
+$AudioStderrBytes = $null
+$AudioStderrBuffer = ''
+$AudioErrorTail = ''
+$AudioWindowHandle = [IntPtr]::Zero
 $AudioMuted = $false
 $AudioSuspended = $false
 $AudioSuspendedPosition = 0.0
+$AudioSuspendReason = ''
+$AudioPausePending = $false
+$AudioPausePendingPosition = 0.0
+$AudioPausePendingReason = ''
+$AudioSeekPosition = 0.0
+$AudioPlaybackRate = 1.0
+$AudioClockMedia = [double]::NaN
+$AudioClockObservedWall = 0.0
+$AudioRateEstimate = [double]::NaN
+$AudioRateCandidate = 1.0
+$AudioRateCandidateSince = 0.0
+$LastAudioRateChangeWall = 0.0
+$LatestVideoRate = 1.0
+$AudioPendingStart = $false
+$AudioPendingSince = 0.0
+$AudioPendingPosition = 0.0
 $VideoPaused = $false
 $BufferingPaused = $false
 $LastAudioStartWall = 0.0
@@ -175,23 +197,149 @@ if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) {
 
 function Stop-Audio {
     if ($script:AudioProcess) {
+        $WasExited = $script:AudioProcess.HasExited
+        $StoppedPid = $script:AudioProcess.Id
+        $StoppedExitCode = if ($WasExited) { $script:AudioProcess.ExitCode } else { $null }
         Stop-ChildTree $script:AudioProcess
-        if ($script:AudioStderrTask) {
-            try {
-                $AudioError = (([string]$script:AudioStderrTask.Result) -replace "\x1B\[[0-?]*[ -/]*[@-~]",'').Trim()
-                if ($AudioError) { Write-Output ('STUDIO_PLAYER_AUDIO_ERROR ' + ($AudioError -replace '[\r\n]+',' | ')) }
-            } catch {}
+        Poll-AudioStatus
+        if ($script:AudioErrorTail -match '(?i)\b(error|failed|invalid|unable)\b') {
+            $AudioError = (($script:AudioErrorTail -replace "\x1B\[[0-?]*[ -/]*[@-~]",'') -replace '[\r\n]+',' | ').Trim()
+            if ($AudioError) { Write-Output ('STUDIO_PLAYER_AUDIO_ERROR ' + $AudioError) }
         }
         try { $script:AudioProcess.Dispose() } catch {}
+        if ($WasExited) {
+            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_EXITED pid={0} exit_code={1}',$StoppedPid,$StoppedExitCode))
+        }
         $script:AudioProcess = $null
-        $script:AudioStderrTask = $null
     }
+    $script:AudioStderrReadTask = $null
+    $script:AudioStderrBytes = $null
+    $script:AudioStderrBuffer = ''
+    $script:AudioErrorTail = ''
+    $script:AudioWindowHandle = [IntPtr]::Zero
     $script:AudioSuspended = $false
     $script:AudioSuspendedPosition = 0.0
+    $script:AudioSuspendReason = ''
+    $script:AudioPausePending = $false
+    $script:AudioPausePendingPosition = 0.0
+    $script:AudioPausePendingReason = ''
+    $script:AudioClockMedia = [double]::NaN
+    $script:AudioClockObservedWall = 0.0
 }
 
 function Get-MonotonicSeconds {
     return [Diagnostics.Stopwatch]::GetTimestamp() / [double][Diagnostics.Stopwatch]::Frequency
+}
+
+function Get-TargetAudioRate {
+    if ([double]::IsNaN($script:AudioRateEstimate) -or $script:AudioRateEstimate -ge 0.965) { return 1.0 }
+    return [math]::Max(0.5,[math]::Min(0.95,[math]::Round($script:AudioRateEstimate*0.985,2)))
+}
+
+function Find-AudioWindow([int] $WaitMilliseconds = 0) {
+    if (-not $script:AudioProcess -or $script:AudioProcess.HasExited) { return [IntPtr]::Zero }
+    $Deadline = (Get-MonotonicSeconds) + ($WaitMilliseconds/1000.0)
+    do {
+        if ($script:AudioWindowHandle -ne [IntPtr]::Zero -and
+            [StudioNativeAudioControl]::IsWindow($script:AudioWindowHandle)) {
+            return $script:AudioWindowHandle
+        }
+        try {
+            $script:AudioProcess.Refresh()
+            $Handle = $script:AudioProcess.MainWindowHandle
+            if ($Handle -ne [IntPtr]::Zero) {
+                $script:AudioWindowHandle = $Handle
+                [StudioNativeAudioControl]::ShowWindow($Handle,0) | Out-Null
+                return $Handle
+            }
+        } catch {}
+        if ((Get-MonotonicSeconds) -ge $Deadline) { break }
+        Start-Sleep -Milliseconds 15
+    } while (-not $script:AudioProcess.HasExited)
+    return [IntPtr]::Zero
+}
+
+function Poll-AudioStatus {
+    if (-not $script:AudioProcess) { return }
+    $PublishedAudioWindow = Find-AudioWindow
+    if ($script:AudioPausePending -and $PublishedAudioWindow -ne [IntPtr]::Zero -and -not $script:AudioSuspended) {
+        $PendingPosition = $script:AudioPausePendingPosition
+        $PendingReason = $script:AudioPausePendingReason
+        if (Set-AudioDevicePaused $true $PendingPosition $PendingReason) {
+            $script:AudioPausePending = $false
+            $script:AudioPausePendingPosition = 0.0
+            $script:AudioPausePendingReason = ''
+            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_DEFERRED_PAUSE_APPLIED position={0:0.######} reason={1} pid={2}',
+                $PendingPosition,$PendingReason,$script:AudioProcess.Id))
+        }
+    }
+    $Reads = 0
+    while ($script:AudioStderrReadTask -and $script:AudioStderrReadTask.IsCompleted -and $Reads -lt 16) {
+        try { $Count = $script:AudioStderrReadTask.GetAwaiter().GetResult() } catch { $Count = 0 }
+        if ($Count -le 0) { $script:AudioStderrReadTask = $null; break }
+        $Chunk = [Text.Encoding]::UTF8.GetString($script:AudioStderrBytes,0,$Count)
+        $script:AudioStderrBuffer += $Chunk
+        if ($script:AudioStderrBuffer.Length -gt 16384) {
+            $script:AudioStderrBuffer = $script:AudioStderrBuffer.Substring($script:AudioStderrBuffer.Length-16384)
+        }
+        $ClockMatches = [regex]::Matches($script:AudioStderrBuffer,'(?:^|[\r\n])\s*(?<clock>-?[0-9]+\.[0-9]+)\s+M-A:')
+        if ($ClockMatches.Count -gt 0) {
+            $RawClock = 0.0
+            $LatestClockMatch = $ClockMatches[$ClockMatches.Count-1]
+            if ([double]::TryParse($LatestClockMatch.Groups['clock'].Value,[Globalization.NumberStyles]::Float,$Invariant,[ref]$RawClock)) {
+                # ffplay's master clock is output time. With atempo applied,
+                # source-media time advances by output clock * playback rate.
+                $script:AudioClockMedia = $script:AudioSeekPosition + [math]::Max(0.0,$RawClock)*$script:AudioPlaybackRate
+                $script:AudioClockObservedWall = Get-MonotonicSeconds
+            }
+        }
+        $CleanTail = ($script:AudioStderrBuffer -replace "`r","`n")
+        $ErrorLines = @($CleanTail -split "`n" | Where-Object { $_ -match '(?i)\b(error|failed|invalid|unable)\b' } | Select-Object -Last 4)
+        if ($ErrorLines.Count) { $script:AudioErrorTail = ($ErrorLines -join "`n") }
+        $script:AudioStderrBytes = [byte[]]::new(4096)
+        $script:AudioStderrReadTask = $script:AudioProcess.StandardError.BaseStream.ReadAsync($script:AudioStderrBytes,0,$script:AudioStderrBytes.Length)
+        ++$Reads
+    }
+}
+
+function Get-EstimatedAudioPosition([double] $Now = [double]::NaN) {
+    Poll-AudioStatus
+    if ([double]::IsNaN($script:AudioClockMedia)) { return [double]::NaN }
+    if ([double]::IsNaN($Now)) { $Now = Get-MonotonicSeconds }
+    $Position = $script:AudioClockMedia
+    if (-not $script:AudioSuspended -and $script:AudioClockObservedWall -gt 0) {
+        $Position += [math]::Max(0.0,$Now-$script:AudioClockObservedWall)*$script:AudioPlaybackRate
+    }
+    return $Position
+}
+
+function Set-AudioDevicePaused([bool] $Paused,[double] $Position,[string] $Reason) {
+    if (-not $script:AudioProcess -or $script:AudioProcess.HasExited) { return $false }
+    if ($script:AudioSuspended -eq $Paused) {
+        if ($Paused -and $Reason) { $script:AudioSuspendReason = $Reason }
+        return $true
+    }
+    $Handle = Find-AudioWindow 900
+    if ($Handle -eq [IntPtr]::Zero) { return $false }
+    try {
+        # SDL requires a real key transition with the Space scan code. A bare
+        # PostMessage without lParam was accepted by Windows but ignored by
+        # ffplay, which is why the old pause test gave a false sense of safety.
+        [StudioNativeAudioControl]::SendMessage($Handle,0x0100,[IntPtr]0x20,[IntPtr]0x00390001) | Out-Null
+        [StudioNativeAudioControl]::SendMessage($Handle,0x0101,[IntPtr]0x20,[IntPtr]0xC0390001) | Out-Null
+        $script:AudioSuspended = $Paused
+        if ($Paused) {
+            $script:AudioSuspendedPosition = $Position
+            $script:AudioSuspendReason = $Reason
+        } else {
+            $script:AudioSuspendedPosition = 0.0
+            $script:AudioSuspendReason = ''
+        }
+        return $true
+    } catch {
+        Write-Output ('STUDIO_PLAYER_AUDIO_DEVICE_WARNING ' + $_.Exception.Message)
+        return $false
+    }
 }
 
 function Set-PlaybackState([string] $State) {
@@ -260,93 +408,171 @@ function Publish-LiveBufferStatus([switch] $Force) {
 
 function Start-Audio([double] $Position) {
     if (-not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused -or $script:BufferingPaused) { return }
+    $script:AudioPendingStart = $false
     Stop-Audio
     $SeekPosition = [math]::Max(0.0,[math]::Min($Duration-0.01,$Position))
-    $AudioArgs=@('-nodisp','-autoexit','-loglevel','error','-volume',$Volume)
+    $WindowTitle = 'DLSS5AudioClock-' + [guid]::NewGuid().ToString('N')
+    # An off-screen waveform window gives us the SDL event endpoint required
+    # for a true device pause. It is hidden as soon as Windows publishes its
+    # handle and never appears over the video player.
+    $AudioArgs=@('-autoexit','-hide_banner','-loglevel','info','-stats','-volume',$Volume,
+        '-x','64','-y','64','-left','-32000','-top','-32000','-showmode','1','-window_title',$WindowTitle)
     if($InputTlsNoVerify){$AudioArgs+=@('-tls_verify','0')}
     if($InputHeaderBlock){$AudioArgs+=@('-headers',$InputHeaderBlock)}
+    $RateText = [string]::Format($Invariant,'{0:0.###}',[math]::Max(0.5,[math]::Min(1.0,$script:AudioPlaybackRate)))
+    $AudioFilter = 'aresample=async=0,asetpts=N/SR/TB'
+    if ([math]::Abs($script:AudioPlaybackRate-1.0) -gt 0.005) { $AudioFilter += ',atempo=' + $RateText }
     $AudioArgs+=@('-ss',([string]::Format($Invariant,'{0:0.######}',$SeekPosition)),'-i',$ResolvedInput,
-        '-vn','-sn','-sync','audio','-af','aresample=async=0,asetpts=N/SR/TB')
+        '-vn','-sn','-sync','audio','-af',$AudioFilter)
     $Psi=[Diagnostics.ProcessStartInfo]::new();$Psi.FileName=$Ffplay
     $Psi.Arguments=(($AudioArgs|ForEach-Object{Quote-Argument([string]$_)})-join' ')
     $Psi.WorkingDirectory=$Root;$Psi.UseShellExecute=$false;$Psi.CreateNoWindow=$true
     $Psi.RedirectStandardOutput=$false;$Psi.RedirectStandardError=$true
     $script:AudioProcess=[Diagnostics.Process]::new();$script:AudioProcess.StartInfo=$Psi
     if(-not $script:AudioProcess.Start()){$script:AudioProcess=$null;return}
-    $script:AudioStderrTask=$script:AudioProcess.StandardError.ReadToEndAsync()
+    $script:AudioStderrBuffer='';$script:AudioErrorTail=''
+    $script:AudioStderrBytes=[byte[]]::new(4096)
+    $script:AudioStderrReadTask=$script:AudioProcess.StandardError.BaseStream.ReadAsync($script:AudioStderrBytes,0,$script:AudioStderrBytes.Length)
+    $script:AudioWindowHandle=[IntPtr]::Zero
     $script:AudioSuspended=$false
     $script:AudioSuspendedPosition=$SeekPosition
+    $script:AudioSuspendReason=''
+    $script:AudioPausePending=$false
+    $script:AudioPausePendingPosition=0.0
+    $script:AudioPausePendingReason=''
+    $script:AudioSeekPosition=$SeekPosition
+    $script:AudioClockMedia=[double]::NaN
+    $script:AudioClockObservedWall=0.0
     $script:LastAudioStartWall=Get-MonotonicSeconds
-    Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_STARTED position={0:0.######} pid={1}',$SeekPosition,$script:AudioProcess.Id))
+    $script:LastAudioRateChangeWall=$script:LastAudioStartWall
+    Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_STARTED position={0:0.######} rate={1:0.###} pid={2}',$SeekPosition,$script:AudioPlaybackRate,$script:AudioProcess.Id))
 }
 
-function Suspend-Audio([double] $Position) {
+function Suspend-Audio([double] $Position,[string] $Reason = 'explicit') {
     if (-not $EnableAudio -or $script:AudioMuted -or -not $script:AudioProcess -or $script:AudioProcess.HasExited) { return }
-    if ($script:AudioSuspended) { return }
-    try {
-        $Status = [StudioNativeProcessControl]::NtSuspendProcess($script:AudioProcess.Handle)
-        if ($Status -ne 0) { throw "NtSuspendProcess status $Status" }
-        $script:AudioSuspended = $true
-        $script:AudioSuspendedPosition = $Position
-        Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_SUSPENDED position={0:0.######} pid={1}',$Position,$script:AudioProcess.Id))
-    } catch {
-        Write-Output ('STUDIO_PLAYER_AUDIO_SUSPEND_WARNING ' + $_.Exception.Message)
-        # The fallback is recoverable: Resume-Audio will open the stream once.
-        Stop-Audio
+    $AudioAtPause = Get-EstimatedAudioPosition
+    if (Set-AudioDevicePaused $true $Position $Reason) {
+        Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_SUSPENDED position={0:0.######} audio={1:0.######} reason={2} pid={3}',$Position,$AudioAtPause,$Reason,$script:AudioProcess.Id))
+    } else {
+        $script:AudioPausePending=$true
+        $script:AudioPausePendingPosition=$Position
+        $script:AudioPausePendingReason=$Reason
+        Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_PAUSE_DEFERRED position={0:0.######} reason={1} pid={2}',
+            $Position,$Reason,$script:AudioProcess.Id))
     }
 }
 
 function Resume-Audio([double] $Position) {
     if (-not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused -or $script:BufferingPaused) { return }
     if ($script:AudioProcess -and -not $script:AudioProcess.HasExited) {
+        if ($script:AudioPausePending -and -not $script:AudioSuspended) {
+            $script:AudioPausePending=$false
+            $script:AudioPausePendingPosition=0.0
+            $script:AudioPausePendingReason=''
+            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_DEFERRED_PAUSE_CANCELLED position={0:0.######} pid={1}',
+                $Position,$script:AudioProcess.Id))
+            return
+        }
         if (-not $script:AudioSuspended) {
             # Duplicate PLAYING/BUFFER_READY/RESUME events must never restart a
             # healthy device or create a second network seek.
             return
         }
-        $ResumeDelta = [math]::Abs($Position-$script:AudioSuspendedPosition)
-        if ($ResumeDelta -le 0.75) {
-            try {
-                $Status = [StudioNativeProcessControl]::NtResumeProcess($script:AudioProcess.Handle)
-                if ($Status -ne 0) { throw "NtResumeProcess status $Status" }
-                $script:AudioSuspended = $false
-                $script:AudioSuspendedPosition = 0.0
-                Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RESUMED position={0:0.######} pid={1}',$Position,$script:AudioProcess.Id))
-                return
-            } catch {
-                Write-Output ('STUDIO_PLAYER_AUDIO_RESUME_WARNING ' + $_.Exception.Message)
-            }
-        } else {
-            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RESYNC requested={0:0.######} paused={1:0.######}',$Position,$script:AudioSuspendedPosition))
+        $AudioPosition = Get-EstimatedAudioPosition
+        $ResumeDelta = if ([double]::IsNaN($AudioPosition)) { 0.0 } else { [math]::Abs($Position-$AudioPosition) }
+        # Pause/rebuffer must never reopen a healthy endpoint. If the clocks
+        # differ, the continuous drift controller holds or releases this same
+        # device; a new seek is reserved for an actual player SEEK operation.
+        if (Set-AudioDevicePaused $false $Position '') {
+            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RESUMED position={0:0.######} audio={1:0.######} drift={2:0.###} pid={3}',$Position,$AudioPosition,$ResumeDelta,$script:AudioProcess.Id))
+            return
         }
+        Write-Output 'STUDIO_PLAYER_AUDIO_RESUME_WARNING ffplay SDL audio window was unavailable'
     }
     Start-Audio $Position
 }
 
 function Update-AudioClockFromTelemetry {
+    Poll-AudioStatus
     if (-not (Test-Path -LiteralPath $TelemetryPath -PathType Leaf)) { return }
     try { $Telemetry = [IO.File]::ReadAllText($TelemetryPath,$Utf8NoBom).Trim() } catch { return }
     if ($Telemetry -notmatch 'media_seconds=(?<p>[0-9.]+)\s+real_fps=(?<r>[0-9.]+)\s+display_fps=(?<d>[0-9.]+)\s+real_frames=(?<f>[0-9]+)') { return }
     $Frame = [long]$Matches.f
-    if ($Frame -eq $script:LastTelemetryFrame) { return }
     $Position = [double]::Parse($Matches.p,$Invariant)
+    $RealFps = [double]::Parse($Matches.r,$Invariant)
     $Now = Get-MonotonicSeconds
-    $script:LastTelemetryFrame = $Frame
-    $script:LastTelemetryWall = $Now
-    $script:LatestVideoPosition = $Position
-    $script:LatestRealFrames = $Frame
+    if ($Frame -ne $script:LastTelemetryFrame) {
+        $script:LastTelemetryFrame = $Frame
+        $script:LastTelemetryWall = $Now
+        $script:LatestVideoPosition = $Position
+        $script:LatestRealFrames = $Frame
+        if ($script:ProducerFps -gt 0.1 -and $RealFps -gt 0.1) {
+            $ObservedRate = [math]::Max(0.1,[math]::Min(1.0,$RealFps/$script:ProducerFps))
+            $script:LatestVideoRate = $ObservedRate
+            if ([double]::IsNaN($script:AudioRateEstimate)) { $script:AudioRateEstimate = $ObservedRate }
+            else { $script:AudioRateEstimate = 0.72*$script:AudioRateEstimate + 0.28*$ObservedRate }
+        }
+    } else {
+        $Position = $script:LatestVideoPosition
+    }
     if (-not $script:VideoPlaybackStarted -or -not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused -or $script:BufferingPaused) { return }
-    # Audio is the continuous master clock. Never kill/restart a healthy audio
-    # device merely because video telemetry is early, late or temporarily
-    # absent: those corrective restarts were heard as recurring drop-outs.
-    # Recover only when ffplay actually exited, with a retry guard for broken
-    # network streams or inputs without an audio track.
-    if ($script:AudioProcess -and -not $script:AudioProcess.HasExited -and $script:AudioSuspended) {
-        Resume-Audio $Position
-    } elseif ((-not $script:AudioProcess -or $script:AudioProcess.HasExited) -and
+    if ($script:AudioPendingStart) {
+        if (($Now-$script:AudioPendingSince) -lt 0.22) { return }
+        $StartPosition = $script:LatestVideoPosition + [math]::Max(0.0,$Now-$script:LastTelemetryWall)*$script:LatestVideoRate
+        $StartPosition = [math]::Max($script:AudioPendingPosition,$StartPosition)
+        # The startup buffer normally provides enough measured frames to pick
+        # the correct tempo before the audio device is opened. This avoids a
+        # later audible rate-change restart on heavy resolutions.
+        $script:AudioPlaybackRate = Get-TargetAudioRate
+        $script:AudioRateCandidate = $script:AudioPlaybackRate
+        $script:AudioRateCandidateSince = $Now
+        $script:AudioPendingStart = $false
+        Start-Audio $StartPosition
+        Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_ALIGNED_START position={0:0.###}',$StartPosition))
+        return
+    }
+    if ((-not $script:AudioProcess -or $script:AudioProcess.HasExited) -and
         ($Now-$script:LastAudioStartWall) -ge 2.0) {
         Start-Audio $Position
         Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RECOVERED position={0:0.###}',$Position))
+        return
+    }
+
+    # When the renderer cannot sustain source FPS, normal-speed audio is
+    # mathematically guaranteed to run ahead. Slow it with pitch correction to
+    # the measured media rate. Hysteresis prevents repeated device reopenings.
+    if (-not [double]::IsNaN($script:AudioRateEstimate)) {
+        $TargetRate = Get-TargetAudioRate
+        if ([math]::Abs($TargetRate-$script:AudioRateCandidate) -gt 0.025) {
+            $script:AudioRateCandidate = $TargetRate
+            $script:AudioRateCandidateSince = $Now
+        } elseif ([math]::Abs($TargetRate-$script:AudioPlaybackRate) -ge 0.07 -and
+                  ($Now-$script:AudioRateCandidateSince) -ge 2.4 -and
+                  ($Now-$script:LastAudioRateChangeWall) -ge 6.0) {
+            $OldRate = $script:AudioPlaybackRate
+            $script:AudioPlaybackRate = $TargetRate
+            Start-Audio $Position
+            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RATE old={0:0.###} new={1:0.###} video_rate={2:0.###} position={3:0.###}',
+                $OldRate,$TargetRate,$script:AudioRateEstimate,$Position))
+            return
+        }
+    }
+
+    # Fine sync uses the actual ffplay sample clock. Hold only audio when it is
+    # ahead; resume after the next displayed frames close the gap. This also
+    # bounds drift when video is slower than the minimum 0.5x atempo rate.
+    $AudioPosition = Get-EstimatedAudioPosition $Now
+    if (-not [double]::IsNaN($AudioPosition)) {
+        $VideoPosition = $Position + [math]::Max(0.0,$Now-$script:LastTelemetryWall)*$script:LatestVideoRate
+        $Drift = $AudioPosition-$VideoPosition
+        if (-not $script:AudioSuspended -and $Drift -gt 0.18) {
+            Suspend-Audio $VideoPosition 'drift'
+            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_HOLD drift={0:0.###} audio={1:0.###} video={2:0.###}',$Drift,$AudioPosition,$VideoPosition))
+        } elseif ($script:AudioSuspended -and $script:AudioSuspendReason -eq 'drift' -and $Drift -le 0.025) {
+            if (Set-AudioDevicePaused $false $VideoPosition '') {
+                Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RELEASE drift={0:0.###} audio={1:0.###} video={2:0.###}',$Drift,$AudioPosition,$VideoPosition))
+            }
+        }
     }
 }
 
@@ -366,7 +592,11 @@ while ($true) {
     Set-PlaybackState 'buffering'
     if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
     $script:LastTelemetryWall=0.0;$script:LastTelemetryFrame=-1L;$script:LastAudioStartWall=0.0
-    $script:AudioSuspended=$false;$script:AudioSuspendedPosition=0.0
+    $script:AudioSuspended=$false;$script:AudioSuspendedPosition=0.0;$script:AudioSuspendReason=''
+    $script:AudioPausePending=$false;$script:AudioPausePendingPosition=0.0;$script:AudioPausePendingReason=''
+    $script:AudioPlaybackRate=1.0;$script:AudioRateEstimate=[double]::NaN;$script:AudioRateCandidate=1.0
+    $script:AudioRateCandidateSince=Get-MonotonicSeconds;$script:LastAudioRateChangeWall=0.0;$script:LatestVideoRate=1.0
+    $script:AudioPendingStart=$false;$script:AudioPendingSince=0.0;$script:AudioPendingPosition=$CurrentStart
     $script:VideoPlaybackStarted=$false;$script:VideoPaused=$false;$script:BufferingPaused=$false;$script:LatestVideoPosition=$CurrentStart
     $script:LatestRealFrames=0L;$script:ProducerSentFrames=0L;$script:ProducerTargetFrames=0L;$script:ProducerFps=0.0
     $script:ProducerRateFps=0.0;$script:ProducerLastEventWall=Get-MonotonicSeconds;$script:ProducerLastEventFrames=0L;$script:ProducerSamples=@();$script:LastBufferPublishWall=0.0
@@ -443,21 +673,41 @@ while ($true) {
 
         Update-AudioClockFromTelemetry
         Publish-LiveBufferStatus
-        # Audio intentionally runs continuously. Buffering protects the video
-        # clock; telemetry is used for position/recovery, never as a reason to
-        # interrupt a healthy audio device.
+        # The actual ffplay sample clock is continuously compared with the
+        # media position of displayed frames. Pause, buffering and sustained
+        # render slowdown are all handled by the same timeline controller.
 
         try {
-            $Command = $null
+            $Commands = [Collections.Generic.List[string]]::new()
             $NativeEvents = @(Get-Content -LiteralPath $NativeEventPath -ErrorAction SilentlyContinue)
             if ((Get-Item -LiteralPath $ControlPath -ErrorAction Stop).Length -gt 0) {
-                $Command = [IO.File]::ReadAllText($ControlPath,$Utf8NoBom).Trim()
+                $ExternalCommand = [IO.File]::ReadAllText($ControlPath,$Utf8NoBom).Trim()
                 [IO.File]::WriteAllText($ControlPath,'',$Utf8NoBom)
-            } elseif ($NativeEventOffset -lt $NativeEvents.Count) {
-                $Command = ([string]$NativeEvents[$NativeEventOffset]).Trim()
-                $NativeEventOffset++
+                if (-not [string]::IsNullOrWhiteSpace($ExternalCommand)) { $Commands.Add($ExternalCommand) }
             }
-            if (-not [string]::IsNullOrWhiteSpace($Command)) {
+            # Drain every native event already written instead of handling only
+            # one per UI tick. Falling behind here previously replayed obsolete
+            # BUFFERING timestamps seconds later and repeatedly disturbed audio.
+            while ($NativeEventOffset -lt $NativeEvents.Count) {
+                $NativeCommand = ([string]$NativeEvents[$NativeEventOffset]).Trim()
+                $NativeEventOffset++
+                if (-not [string]::IsNullOrWhiteSpace($NativeCommand)) { $Commands.Add($NativeCommand) }
+            }
+            if ($Commands.Count -gt 1) {
+                $CoalescedCommands = [Collections.Generic.List[string]]::new()
+                $PendingBufferCommand = $null
+                foreach ($QueuedCommand in $Commands) {
+                    if ($QueuedCommand -match '^BUFFER(?:ING|_READY)\s+') {
+                        $PendingBufferCommand = $QueuedCommand
+                    } else {
+                        if ($PendingBufferCommand) { $CoalescedCommands.Add($PendingBufferCommand);$PendingBufferCommand=$null }
+                        $CoalescedCommands.Add($QueuedCommand)
+                    }
+                }
+                if ($PendingBufferCommand) { $CoalescedCommands.Add($PendingBufferCommand) }
+                $Commands = $CoalescedCommands
+            }
+            foreach ($Command in $Commands) {
                 if ($Command -match '^SEEK\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
                     $ParsedTarget = 0.0
                     if ([double]::TryParse($Matches.s,[Globalization.NumberStyles]::Float,$Invariant,[ref]$ParsedTarget)) {
@@ -469,19 +719,28 @@ while ($true) {
                     $Position=[double]::Parse($Matches.s,$Invariant)
                     $script:VideoPlaybackStarted=$true
                     Set-PlaybackState 'playing'
-                    # PLAYING is emitted by the native host at the first frame
-                    # actually presented. Telemetry can already describe frames
-                    # prepared further ahead, so it must never replace this exact
-                    # presentation position for audio seeking.
-                    $AudioPosition=$Position
-                    Resume-Audio $AudioPosition
+                    # Native events are file-backed and can be observed after
+                    # later frames have already reached the swap chain. Start
+                    # at the newest displayed-frame telemetry so decoder start
+                    # latency cannot leave sound several seconds behind.
+                    $AudioPosition=if($script:LatestVideoPosition -gt $Position){$script:LatestVideoPosition}else{$Position}
+                    if ($EnableAudio -and -not $script:AudioMuted -and (-not $script:AudioProcess -or $script:AudioProcess.HasExited)) {
+                        # Let the first telemetry sample settle before opening
+                        # audio. This removes decoder/window startup latency
+                        # from A/V alignment without adding a blind fixed seek.
+                        $script:AudioPendingStart=$true
+                        $script:AudioPendingSince=Get-MonotonicSeconds
+                        $script:AudioPendingPosition=$AudioPosition
+                    } else {
+                        Resume-Audio $AudioPosition
+                    }
                     Write-Output ('STUDIO_PLAYER_PLAYING ' + (@{
                         position_seconds=[math]::Round($Position,3);audio_position_seconds=[math]::Round($AudioPosition,3)
                         audio=[bool]($EnableAudio -and -not $script:AudioMuted)
                         audio_pid=if($script:AudioProcess){$script:AudioProcess.Id}else{$null};muted=[bool]$script:AudioMuted;volume=$Volume
                     }|ConvertTo-Json -Compress))
                 } elseif ($Command -match '^BUFFERING\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
-                    $script:BufferingPaused=$true;Set-PlaybackState 'rebuffering';Suspend-Audio ([double]::Parse($Matches.s,$Invariant));Publish-LiveBufferStatus -Force
+                    $script:BufferingPaused=$true;Set-PlaybackState 'rebuffering';Suspend-Audio ([double]::Parse($Matches.s,$Invariant)) 'buffering';Publish-LiveBufferStatus -Force
                     Write-Output ('STUDIO_PLAYER_REBUFFERING ' + $Matches.s)
                 } elseif ($Command -match '^BUFFER_READY\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
                     $script:BufferingPaused=$false
@@ -489,7 +748,7 @@ while ($true) {
                     Publish-LiveBufferStatus -Force
                     Write-Output ('STUDIO_PLAYER_REBUFFERED ' + $Matches.s)
                 } elseif ($Command -match '^PAUSE\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
-                    $script:VideoPaused=$true;Set-PlaybackState 'paused';Suspend-Audio ([double]::Parse($Matches.s,$Invariant));Publish-LiveBufferStatus -Force
+                    $script:VideoPaused=$true;Set-PlaybackState 'paused';Suspend-Audio ([double]::Parse($Matches.s,$Invariant)) 'user';Publish-LiveBufferStatus -Force
                     Write-Output ('STUDIO_PLAYER_PAUSED ' + $Matches.s)
                 } elseif ($Command -match '^RESUME\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
                     $script:VideoPaused=$false;Set-PlaybackState 'playing';Resume-Audio ([double]::Parse($Matches.s,$Invariant));Publish-LiveBufferStatus -Force
@@ -504,6 +763,7 @@ while ($true) {
                 } elseif ($Command -eq 'CLOSE') {
                     $Action = 'close'
                 }
+                if ($Action) { break }
             }
         } catch {}
 

@@ -26,12 +26,13 @@ function Quote-Argument([string] $value) {
 function Toggle-NativePause {
     $hostProcess = Get-Process -Name 'dlss5-video-host' -ErrorAction SilentlyContinue |
         Sort-Object StartTime -Descending | Select-Object -First 1
-    if (-not $hostProcess) { throw 'native preview host was not found' }
-    $hostProcess.Refresh()
-    if ($hostProcess.MainWindowHandle -eq [IntPtr]::Zero) { throw 'native preview window is not ready' }
-    if (-not [StudioTestWindowMessage]::PostMessage($hostProcess.MainWindowHandle,0x0100,[IntPtr]0x20,[IntPtr]::Zero)) {
-        throw 'could not post Space to the native preview window'
+    if (-not $hostProcess) { return $false }
+    try { $hostProcess.Refresh(); if ($hostProcess.HasExited) { return $false }; $handle = $hostProcess.MainWindowHandle } catch { return $false }
+    if ($null -eq $handle -or $handle -eq [IntPtr]::Zero) { return $false }
+    if (-not [StudioTestWindowMessage]::PostMessage($handle,0x0100,[IntPtr]0x20,[IntPtr]::Zero)) {
+        return $false
     }
+    return $true
 }
 
 $arguments = @(
@@ -62,29 +63,49 @@ $stderr = $process.StandardError.ReadLineAsync()
 $watch = [Diagnostics.Stopwatch]::StartNew()
 $playingAt = -1.0
 $suspendedAt = -1.0
-$resumedAt = -1.0
+$lastResumeAt = -1.0
+$videoPausedAt = -1.0
+$pauseCommandSent = $false
+$resumeCommandSent = $false
+$targetPauseCycles = 3
+$completedPauseCycles = 0
 $audioStarts = 0
 $startedPid = 0
 $suspendedPid = 0
-$resumedPid = 0
+$audioAtSuspend = [double]::NaN
+$pausedClockAdvances = [Collections.Generic.List[double]]::new()
+$pausePids = [Collections.Generic.List[int]]::new()
 $closeSent = $false
 $errors = [Collections.Generic.List[string]]::new()
+$audioEvents = [Collections.Generic.List[string]]::new()
 try {
     while ($watch.Elapsed.TotalSeconds -lt 100) {
         if ($stdout -and $stdout.IsCompleted) {
             $line = $stdout.Result
             if ($null -eq $line) { $stdout = $null } else {
+                if ($line -match '^STUDIO_PLAYER_AUDIO_') { $audioEvents.Add($line) }
                 if ($line -match '^STUDIO_PLAYER_AUDIO_STARTED .*pid=(?<pid>[0-9]+)$') {
                     $audioStarts++
                     $startedPid = [int]$Matches.pid
                 } elseif ($line -match '^STUDIO_PLAYER_PLAYING ') {
                     $playingAt = $watch.Elapsed.TotalSeconds
-                } elseif ($line -match '^STUDIO_PLAYER_AUDIO_SUSPENDED .*pid=(?<pid>[0-9]+)$') {
+                } elseif ($line -match '^STUDIO_PLAYER_AUDIO_SUSPENDED .*audio=(?<audio>(?:NaN|-?[0-9.]+)).*reason=user .*pid=(?<pid>[0-9]+)$') {
                     $suspendedPid = [int]$Matches.pid
+                    $audioAtSuspend = [double]::Parse($Matches.audio,[Globalization.CultureInfo]::InvariantCulture)
                     $suspendedAt = $watch.Elapsed.TotalSeconds
-                } elseif ($line -match '^STUDIO_PLAYER_AUDIO_RESUMED .*pid=(?<pid>[0-9]+)$') {
+                } elseif ($suspendedPid -gt 0 -and $line -match '^STUDIO_PLAYER_AUDIO_RESUMED .*audio=(?<audio>(?:NaN|-?[0-9.]+)).*pid=(?<pid>[0-9]+)$') {
                     $resumedPid = [int]$Matches.pid
-                    $resumedAt = $watch.Elapsed.TotalSeconds
+                    $audioAtResume = [double]::Parse($Matches.audio,[Globalization.CultureInfo]::InvariantCulture)
+                    $pausedClockAdvances.Add([math]::Abs($audioAtResume-$audioAtSuspend))
+                    $pausePids.Add($suspendedPid);$pausePids.Add($resumedPid)
+                    $completedPauseCycles++
+                    $lastResumeAt = $watch.Elapsed.TotalSeconds
+                    $suspendedPid = 0
+                    $videoPausedAt = -1.0
+                    $pauseCommandSent = $false
+                    $resumeCommandSent = $false
+                } elseif ($line -match '^STUDIO_PLAYER_PAUSED ') {
+                    $videoPausedAt = $watch.Elapsed.TotalSeconds
                 } elseif ($line -match '^(STUDIO_ERROR|PLAYER_CHILD_ERROR) ') {
                     $errors.Add($line)
                 }
@@ -98,30 +119,35 @@ try {
                 $stderr = $process.StandardError.ReadLineAsync()
             }
         }
-        if ($playingAt -ge 0 -and $suspendedAt -lt 0 -and ($watch.Elapsed.TotalSeconds-$playingAt) -ge 0.8) {
-            Toggle-NativePause
-            $playingAt = -999.0
+        $PauseAnchor = if ($completedPauseCycles -eq 0) { $playingAt } else { $lastResumeAt }
+        if ($completedPauseCycles -lt $targetPauseCycles -and $PauseAnchor -ge 0 -and -not $pauseCommandSent -and ($watch.Elapsed.TotalSeconds-$PauseAnchor) -ge 0.8) {
+            $pauseCommandSent = Toggle-NativePause
         }
-        if ($suspendedAt -ge 0 -and $resumedAt -lt 0 -and ($watch.Elapsed.TotalSeconds-$suspendedAt) -ge 0.8) {
-            Toggle-NativePause
-            $suspendedAt = -999.0
+        if ($videoPausedAt -ge 0 -and -not $resumeCommandSent -and ($watch.Elapsed.TotalSeconds-$videoPausedAt) -ge 0.8) {
+            $resumeCommandSent = Toggle-NativePause
         }
-        if ($resumedAt -ge 0 -and -not $closeSent -and ($watch.Elapsed.TotalSeconds-$resumedAt) -ge 1.0) {
+        if ($completedPauseCycles -eq $targetPauseCycles -and $lastResumeAt -ge 0 -and -not $closeSent -and ($watch.Elapsed.TotalSeconds-$lastResumeAt) -ge 1.0) {
             [IO.File]::WriteAllText($control,'CLOSE',$utf8NoBom)
             $closeSent = $true
         }
         if ($process.HasExited -and -not $stdout -and -not $stderr) { break }
         Start-Sleep -Milliseconds 20
     }
-    if (-not $process.HasExited) { throw 'audio pause/resume test timed out' }
+    if (-not $process.HasExited) { throw "audio pause/resume test timed out: cycles=$completedPauseCycles/$targetPauseCycles events=$($audioEvents -join ' || ')" }
     if ($process.ExitCode -ne 0 -or $errors.Count) { throw ('audio pause/resume pipeline failed: ' + ($errors -join ' | ')) }
-    if (-not $closeSent -or $startedPid -le 0 -or $suspendedPid -ne $startedPid -or $resumedPid -ne $startedPid) {
-        throw "audio process was not preserved: starts=$audioStarts started=$startedPid suspended=$suspendedPid resumed=$resumedPid close=$closeSent"
+    $wrongPid = @($pausePids | Where-Object { $_ -ne $startedPid })
+    if (-not $closeSent -or $completedPauseCycles -ne $targetPauseCycles -or $startedPid -le 0 -or $wrongPid.Count) {
+        throw "audio process was not preserved: starts=$audioStarts started=$startedPid cycles=$completedPauseCycles/$targetPauseCycles wrong_pids=$($wrongPid -join ',') close=$closeSent events=$($audioEvents -join ' || ')"
     }
     if ($audioStarts -ne 1) { throw "audio was restarted $audioStarts times" }
+    $maxPausedClockAdvance = ($pausedClockAdvances | Measure-Object -Maximum).Maximum
+    if ($pausedClockAdvances.Count -ne $targetPauseCycles -or [double]::IsNaN($maxPausedClockAdvance) -or $maxPausedClockAdvance -gt 0.12) {
+        throw "ffplay sample clock advanced during repeated pause: samples=$($pausedClockAdvances -join ',') max=$maxPausedClockAdvance"
+    }
     [pscustomobject]@{
         status='ok';audio_starts=$audioStarts;audio_pid=$startedPid
-        same_process_after_pause=$true;clean_close=$closeSent
+        pause_cycles=$completedPauseCycles;same_process_after_pause=$true;sample_clock_frozen=$true
+        max_paused_clock_advance_seconds=[math]::Round([double]$maxPausedClockAdvance,3);clean_close=$closeSent
         elapsed_seconds=[math]::Round($watch.Elapsed.TotalSeconds,2)
     } | ConvertTo-Json -Compress
 } finally {

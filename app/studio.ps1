@@ -818,7 +818,7 @@ $HelpText=[ordered]@{
     FrameGenerationCombo='Dynamic MFG целится в выбранный FPS; фиксированный MFG создаёт 2/3/4 кадра на один базовый. Поддержка проверяется через официальный Streamline API.'
     RealtimeTargetFpsCombo='Цель Dynamic MFG. 0 использует частоту текущего монитора; 72/90/120 полезны для шлемов и высокочастотных дисплеев.'
     RealtimeFullscreenCheck='Открывает GPU-direct плеер сразу без рамки на весь экран. F11 и двойной щелчок переключают режим во время просмотра.'
-    RealtimeAudioCheck='Звук запускается строго с позиции первого реально показанного кадра. Аудиосэмплы идут в исходном темпе без ускоряющей коррекции по нестабильным timestamp; здоровый аудиопроцесс не перезапускается.'
+    RealtimeAudioCheck='Звук привязан к фактически показанным кадрам по измеренному аудиочасу. При тяжёлом рендере темп плавно согласуется с видео с сохранением высоты голоса; пауза останавливает само аудиоустройство, а исправный декодер не пересоздаётся.'
     RealtimeVolumeSlider='Громкость отдельного realtime-аудиопотока. На обработку кадров и запись не влияет.'
     RealtimeBufferSlider='Гарантированный запас полностью подготовленных RGB, motion и depth кадров. Плеер запускается только после набора выбранных секунд и затем постоянно восстанавливает этот уровень.'
     RealtimeFillPauseCheck='Если включено, декодирование и построение motion/depth продолжаются на паузе с максимальной доступной скоростью, пока выбранный запас не станет полным. Если выключено, вычислительный конвейер тоже ждёт.'
@@ -1033,7 +1033,7 @@ $Timer.Add_Tick({
             } elseif ($L -match '^STUDIO_REALTIME_BUFFER_LEVEL (?<j>.+)$') {
                 try {
                     $Buffer=$Matches.j|ConvertFrom-Json
-                    $DetailText.Text=('Постоянный запас: {0:0.00}/{1} сек · звук непрерывный' -f [double]$Buffer.ready_seconds,[int]$Buffer.target_seconds)
+                    $DetailText.Text=('Постоянный запас: {0:0.00}/{1} сек · единый таймлайн звука и кадров' -f [double]$Buffer.ready_seconds,[int]$Buffer.target_seconds)
                 } catch { Add-Log ('Buffer level JSON: '+$_.Exception.Message) }
             } elseif ($L -match '^STUDIO_REALTIME_BUFFER_STATUS (?<j>.+)$') {
                 try {
