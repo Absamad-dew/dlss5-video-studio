@@ -1,2 +1,2 @@
-19.0.0-temporal-atlas-vr
-VR now recovers hidden background from past and future frames with bidirectional motion/depth checks at guide resolution, copies accepted RGB at native 2K/4K resolution, and runs compact MI-GAN only on at most two grouped residual ROIs per eye.
+20.0.0-recording-hardware-pipeline
+Recording now reuses realtime's source-resolution shared-memory RGB transport, native GPU expansion, monotonic chunk acknowledgements, asynchronous mapping release, isolated CPU lanes, and one persistent NV12/NVENC stream without lowering the selected image quality.

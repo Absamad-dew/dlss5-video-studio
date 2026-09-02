@@ -148,6 +148,14 @@ Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_MODELS.cmd'),(Join-Path $Build
 foreach ($Name in @('dxgi.dll','renodx-dlss5.addon64','nvngx_dlss.dll','nvngx_dlssnr.dll','ReShade.ini')) {
     Copy-Item -LiteralPath (Join-Path $Base "engine\$Name") -Destination (Join-Path $Target 'engine') -Force
 }
+$StreamlineBin = Join-Path $Build 'third_party\streamline-sdk-v2.12.0\bin\x64'
+foreach ($Name in @('sl.interposer.dll','sl.common.dll','sl.dlss_g.dll','sl.reflex.dll','sl.pcl.dll','nvngx_dlssg.dll','reflex.license.txt')) {
+    $StreamlineRuntime = Join-Path $StreamlineBin $Name
+    if (-not (Test-Path -LiteralPath $StreamlineRuntime -PathType Leaf)) {
+        throw "Missing Streamline runtime dependency: $StreamlineRuntime"
+    }
+    Copy-Item -LiteralPath $StreamlineRuntime -Destination (Join-Path $Target 'engine') -Force
+}
 Copy-Item -LiteralPath (Join-Path $Build 'dist\engine\dlss5-video-host.exe') -Destination (Join-Path $Target 'engine') -Force
 Copy-Item -Path (Join-Path $Build 'dist\guidegen\*') -Destination (Join-Path $Target 'tools\guidegen') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\guidegen.py') -Destination (Join-Path $Target 'tools\guidegen') -Force

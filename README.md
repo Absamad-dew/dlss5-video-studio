@@ -1,10 +1,19 @@
-# DLSS5 Video Studio 19
+# DLSS5 Video Studio 20
 
 Windows video player/processor that reconstructs motion and depth from ordinary video, evaluates NVIDIA NGX through a D3D12 host, and can present the result with official NVIDIA DLSS Frame Generation through Streamline + Reflex.
 
 The repository contains source code and dependency installers. It intentionally excludes proprietary NVIDIA DLLs, the user's custom `nvngx_dlssnr.dll`, FFmpeg binaries, ReShade binaries, portable Python, and very large optional model weights. A small open-licensed core model pack for an existing V11 portable folder is available from [GitHub Releases](https://github.com/Absamad-dew/dlss5-video-studio/releases).
 
-## Version 19 highlights
+## Version 20 highlights
+
+- recording now uses the same source-resolution pagefile-backed RGB transport and native D3D12 cubic expansion as realtime, avoiding a full CPU resize/copy at every frame;
+- recording chunk completion uses a monotonic shared-memory counter and ordered asynchronous mapping release instead of blocking on redirected text protocol responses;
+- guide/decode, native DLSS submission, and the controller receive separate hardware-sized CPU lanes; below-normal NVENC conversion can borrow the complete worker pool without starving guide generation;
+- ordinary recording feeds one persistent NV12/NVENC process directly from the native output ring, eliminating RGB chunk files, repeated encoder startup and FFmpeg RGB conversion; VSR-after-DLSS retains bounded asynchronous chunk encoding for its required intermediate hand-off;
+- `.run.json` schema 10 reports the hardware partition, acknowledgement transport, encoder time, blocking wait, and successfully overlapped NVENC time.
+- the portable packager now includes the Streamline/Reflex runtime beside the native host, preventing the missing-DLL exit that could occur before `HOST_STREAM_READY`.
+
+Version 20 retains all Version 19 features:
 
 - three dedicated workspaces: Realtime, Recording, and VR / 3D;
 - five universal profiles — Ultra Fast, Fast, Medium, Heavy, and Maximum — with automatic adaptation by VRAM, resolution, and CPU capacity;
@@ -33,6 +42,8 @@ The repository contains source code and dependency installers. It intentionally 
 - the CUDA stereo worker reuses page-locked input/output buffers, removing repeated large host allocations and `tobytes()` copies from high-resolution VR export.
 
 The program no longer exposes GPU-model-specific profiles. `Auto` classifies available VRAM internally, while the five user-facing levels control the accuracy/cadence of guide, motion, and depth generation. Output geometry and the internal DLSS render preset remain independent controls.
+
+Laptop validation used the same 300-frame 960x540 source, 2560x1440 output, Medium guide settings, explicit DirectML depth, H.265 QP 18, and an eight-physical-core CoreBroker allocation for both builds. End-to-end recording rose from 8.98 FPS in Version 19 to 9.68 FPS in Version 20 (+7.8%); the native DLSS+encode delivery stage rose from 24.00 to 28.87 FPS (+20.3%). The remaining limit was guide generation at about 17.2 FPS. Both outputs contain exactly 300 frames, 12.00 seconds of video and AAC audio, fully decode, and compare at SSIM 0.9922; the small difference is the explicit one-pass BT.709 NV12 conversion rather than reduced render or guide quality. A second H.264/Auto run confirmed that recording keeps DirectML instead of inheriting realtime's high-resolution CPU latency fallback.
 
 Dynamic MFG is used only when Streamline reports support. Fixed x3/x4 is likewise rejected when `numFramesToGenerateMax` is too low, so the UI never labels an ordinary blend as NVIDIA MFG. VR recording at 72/90/120 FPS uses bidirectional motion-compensated interpolation after DLSS5 and stereo synthesis; it is separate from display-only MFG.
 

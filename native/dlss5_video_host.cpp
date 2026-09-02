@@ -113,6 +113,7 @@ struct BatchOptions
     uint32_t output_width = 0, output_height = 0;
     uint32_t fps = 25;
     uint32_t quality = 18;
+    uint64_t encoder_affinity_mask = 0;
     double media_start_seconds = 0.0;
     double media_duration_seconds = 0.0;
 };
@@ -2991,7 +2992,8 @@ static int RunBatch(const BatchOptions &o)
             std::vector<wchar_t> mutable_command(command.begin(), command.end());
             mutable_command.push_back(L'\0');
             const BOOL started = CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, TRUE,
-                                                CREATE_NO_WINDOW, nullptr, nullptr, &si, &encode_process);
+                                                CREATE_NO_WINDOW | CREATE_SUSPENDED | BELOW_NORMAL_PRIORITY_CLASS,
+                                                nullptr, nullptr, &si, &encode_process);
             CloseHandle(pipe_read);
             if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
             if (!started)
@@ -2999,6 +3001,8 @@ static int RunBatch(const BatchOptions &o)
                 CloseHandle(pipe_write);
                 throw std::runtime_error("cannot start the direct NVENC encoder");
             }
+            if (o.encoder_affinity_mask != 0)
+                SetProcessAffinityMask(encode_process.hProcess, static_cast<DWORD_PTR>(o.encoder_affinity_mask));
             const int pipe_fd = _open_osfhandle(reinterpret_cast<intptr_t>(pipe_write), _O_BINARY | _O_WRONLY);
             encode_pipe = pipe_fd >= 0 ? _fdopen(pipe_fd, "wb") : nullptr;
             if (encode_pipe == nullptr)
@@ -3008,6 +3012,7 @@ static int RunBatch(const BatchOptions &o)
                 throw std::runtime_error("cannot open the buffered NVENC pipe stream");
             }
             setvbuf(encode_pipe, nullptr, _IOFBF, 4u * 1024u * 1024u);
+            ResumeThread(encode_process.hThread);
         }
         else if (!o.preview_only)
         {
@@ -3052,6 +3057,87 @@ static int RunBatch(const BatchOptions &o)
         double last_stream_wait_ms = 0.0;
         bool last_stream_buffering_announced = false;
         double chunk_encode_ms = 0.0;
+        double chunk_encode_wait_ms = 0.0;
+        double pending_chunk_encode_ms = 0.0;
+        std::exception_ptr chunk_encoder_error;
+        std::jthread chunk_encoder_thread;
+        auto run_encoder_process = [&](const std::wstring &command) -> DWORD
+        {
+            STARTUPINFOW startup = {};
+            startup.cb = sizeof(startup);
+            PROCESS_INFORMATION process = {};
+            std::vector<wchar_t> mutable_command(command.begin(), command.end());
+            mutable_command.push_back(L'\0');
+            const DWORD creation_flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | BELOW_NORMAL_PRIORITY_CLASS;
+            if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
+                                creation_flags, nullptr, nullptr, &startup, &process))
+                throw std::runtime_error("cannot start asynchronous NVENC encoder");
+            if (o.encoder_affinity_mask != 0)
+                SetProcessAffinityMask(process.hProcess, static_cast<DWORD_PTR>(o.encoder_affinity_mask));
+            ResumeThread(process.hThread);
+            const DWORD wait = WaitForSingleObject(process.hProcess, INFINITE);
+            DWORD exit_code = 1;
+            if (wait == WAIT_OBJECT_0) GetExitCodeProcess(process.hProcess, &exit_code);
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+            return exit_code;
+        };
+        auto join_chunk_encoder = [&]()
+        {
+            if (!chunk_encoder_thread.joinable()) return;
+            const auto wait_begin = BatchClock::now();
+            chunk_encoder_thread.join();
+            chunk_encode_wait_ms += ElapsedMs(wait_begin);
+            chunk_encode_ms += pending_chunk_encode_ms;
+            if (chunk_encoder_error) std::rethrow_exception(chunk_encoder_error);
+        };
+        auto queue_chunk_encode = [&](const fs::path &raw_path, const fs::path &video_path,
+                                      uint32_t frame_count)
+        {
+            // Keep one NVENC job in flight. The previous implementation called
+            // _wsystem synchronously at every boundary, leaving Feature 18,
+            // decode and guide generation idle for the whole encode. One
+            // bounded worker overlaps the dedicated NVENC engine with the next
+            // DLSS chunk without allowing unbounded processes or raw files.
+            join_chunk_encoder();
+            chunk_encoder_error = nullptr;
+            pending_chunk_encode_ms = 0.0;
+            const fs::path raw = raw_path;
+            const fs::path video = video_path;
+            const std::string codec = o.codec;
+            const uint32_t quality = o.quality;
+            const uint32_t fps = o.fps;
+            const bool delete_raw = o.delete_chunks;
+            chunk_encoder_thread = std::jthread(
+                [&, raw, video, frame_count, codec, quality, fps, delete_raw]()
+                {
+                    const auto encode_begin = BatchClock::now();
+                    try
+                    {
+                        const std::wstring encoder = codec == "h265" ? L"hevc_nvenc" : L"h264_nvenc";
+                        const std::wstring codec_tail = codec == "h265" ? L" -tag:v hvc1" : L"";
+                        const std::wstring encode_command =
+                            L"ffmpeg -y -v error -f rawvideo -pixel_format rgb24 -video_size " +
+                            std::to_wstring(target_width) + L"x" + std::to_wstring(target_height) +
+                            L" -framerate " + std::to_wstring(fps) + L" -i \"" + raw.wstring() +
+                            L"\" -frames:v " + std::to_wstring(frame_count) + L" -an -c:v " + encoder +
+                            L" -preset p1 -tune ll -rc constqp -qp " + std::to_wstring(quality) + codec_tail +
+                            L" -pix_fmt yuv420p -movflags +faststart \"" + video.wstring() + L"\"";
+                        if (run_encoder_process(encode_command) != 0)
+                            throw std::runtime_error("stream chunk NVENC encode failed");
+                        if (delete_raw)
+                        {
+                            std::error_code ignored;
+                            fs::remove(raw, ignored);
+                        }
+                    }
+                    catch (...)
+                    {
+                        chunk_encoder_error = std::current_exception();
+                    }
+                    pending_chunk_encode_ms = ElapsedMs(encode_begin);
+                });
+        };
         auto open_chunk = [&](uint32_t id, uint32_t frames, const fs::path &rgb_path,
                               const fs::path &motion_path, const fs::path &depth_path,
                               uint32_t rgb_width, uint32_t rgb_height)
@@ -3652,24 +3738,7 @@ static int RunBatch(const BatchOptions &o)
                     join_writer();
                     output_file.flush();
                     output_file.close();
-                    const auto encode_begin = BatchClock::now();
-                    const std::wstring encoder = o.codec == "h265" ? L"hevc_nvenc" : L"h264_nvenc";
-                    const std::wstring codec_tail = o.codec == "h265" ? L" -tag:v hvc1" : L"";
-                    const std::wstring encode_command =
-                        L"ffmpeg -y -v error -f rawvideo -pixel_format rgb24 -video_size " +
-                        std::to_wstring(target_width) + L"x" + std::to_wstring(target_height) +
-                        L" -framerate " + std::to_wstring(o.fps) + L" -i \"" + current_raw_output.wstring() +
-                        L"\" -frames:v " + std::to_wstring(current_chunk_frames) + L" -an -c:v " + encoder +
-                        L" -preset p1 -tune ll -rc constqp -qp " + std::to_wstring(o.quality) + codec_tail +
-                        L" -pix_fmt yuv420p -movflags +faststart \"" + current_video_output.wstring() + L"\"";
-                    if (_wsystem(encode_command.c_str()) != 0)
-                        throw std::runtime_error("stream chunk NVENC encode failed");
-                    chunk_encode_ms += ElapsedMs(encode_begin);
-                    if (o.delete_chunks)
-                    {
-                        std::error_code ignored;
-                        fs::remove(current_raw_output, ignored);
-                    }
+                    queue_chunk_encode(current_raw_output, current_video_output, current_chunk_frames);
                 }
                 if (chunk_ack_counter != nullptr)
                 {
@@ -3687,6 +3756,7 @@ static int RunBatch(const BatchOptions &o)
         for (uint32_t frame = drain_begin; frame < o.frames; ++frame)
             collect_output(static_cast<int>(frame % kPipeline));
         join_writer();
+        join_chunk_encoder();
         if (encode_pipe != nullptr)
         {
             fflush(encode_pipe);
@@ -3705,7 +3775,10 @@ static int RunBatch(const BatchOptions &o)
             if (output_file.is_open()) output_file.flush();
         }
         const double wall_total_ms = ElapsedMs(batch_begin);
-        const double total_ms = std::max(0.0, wall_total_ms - warmup_ms - stream_wait_ms - chunk_encode_ms - preview_pacing_ms);
+        const double recording_pipeline_ms = std::max(
+            0.0, wall_total_ms - warmup_ms - stream_wait_ms - preview_pacing_ms);
+        const double total_ms = std::max(0.0, recording_pipeline_ms - chunk_encode_wait_ms);
+        const double chunk_encode_overlap_ms = std::max(0.0, chunk_encode_ms - chunk_encode_wait_ms);
         const double preview_present_fps = preview_presented > 1
             ? 1000.0 * static_cast<double>(preview_presented - 1) /
               std::chrono::duration<double, std::milli>(preview_last_present - preview_first_present).count()
@@ -3713,8 +3786,8 @@ static int RunBatch(const BatchOptions &o)
         if (o.timings)
         {
             const double frames = static_cast<double>(o.frames);
-            Log("[host] DLSS5_BATCH_TIMING frames=%u pipeline=%d prefetch=%d async_write=%d total_ms=%.3f wall_total_ms=%.3f warmup_ms=%.3f startup_warmup_ms=%.3f stream_wait_ms=%.3f stream_wait_max_ms=%.3f stream_wait_events=%u stream_commands_received=%u stream_queue_peak=%zu buffer_underruns=%u buffer_underrun_max_ms=%.3f chunk_encode_ms=%.3f preview_pacing_ms=%.3f preview_present_fps=%.3f per_frame_ms=%.3f input_ms=%.3f guides_ms=%.3f prefetch_wait_ms=%.3f writer_wait_ms=%.3f upload_ms=%.3f submit_ms=%.3f readback_ms=%.3f readback_wait_ms=%.3f readback_pack_ms=%.3f write_ms=%.3f",
-                o.frames, kPipeline, o.prefetch ? 1 : 0, o.async_write ? 1 : 0, total_ms, wall_total_ms, warmup_ms, startup_warmup_ms, stream_wait_ms, stream_wait_max_ms, stream_wait_events, stream_commands_received, stream_queue_peak, stream_underruns, stream_underrun_max_ms, chunk_encode_ms, preview_pacing_ms, preview_present_fps, total_ms / frames,
+            Log("[host] DLSS5_BATCH_TIMING frames=%u pipeline=%d prefetch=%d async_write=%d total_ms=%.3f wall_total_ms=%.3f recording_pipeline_ms=%.3f warmup_ms=%.3f startup_warmup_ms=%.3f stream_wait_ms=%.3f stream_wait_max_ms=%.3f stream_wait_events=%u stream_commands_received=%u stream_queue_peak=%zu buffer_underruns=%u buffer_underrun_max_ms=%.3f chunk_encode_ms=%.3f chunk_encode_wait_ms=%.3f chunk_encode_overlap_ms=%.3f preview_pacing_ms=%.3f preview_present_fps=%.3f per_frame_ms=%.3f input_ms=%.3f guides_ms=%.3f prefetch_wait_ms=%.3f writer_wait_ms=%.3f upload_ms=%.3f submit_ms=%.3f readback_ms=%.3f readback_wait_ms=%.3f readback_pack_ms=%.3f write_ms=%.3f",
+                o.frames, kPipeline, o.prefetch ? 1 : 0, o.async_write ? 1 : 0, total_ms, wall_total_ms, recording_pipeline_ms, warmup_ms, startup_warmup_ms, stream_wait_ms, stream_wait_max_ms, stream_wait_events, stream_commands_received, stream_queue_peak, stream_underruns, stream_underrun_max_ms, chunk_encode_ms, chunk_encode_wait_ms, chunk_encode_overlap_ms, preview_pacing_ms, preview_present_fps, total_ms / frames,
                 input_ms / frames, guides_ms / frames, prefetch_wait_ms / frames,
                 writer_wait_ms / frames, upload_ms / frames,
                 evaluate_submit_ms / frames, readback_ms / frames,
@@ -4059,13 +4132,14 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--control-file") == 0 && i + 1 < argc) batch.control_file = argv[++i];
         else if (strcmp(argv[i], "--telemetry-file") == 0 && i + 1 < argc) batch.telemetry_file = argv[++i];
         else if (strcmp(argv[i], "--chunk-ack-map") == 0 && i + 1 < argc) batch.chunk_ack_map = argv[++i];
+        else if (strcmp(argv[i], "--encoder-affinity-mask") == 0 && i + 1 < argc) batch.encoder_affinity_mask = _strtoui64(argv[++i], nullptr, 10);
         else if (strcmp(argv[i], "--media-start-seconds") == 0 && i + 1 < argc) batch.media_start_seconds = strtod(argv[++i], nullptr);
         else if (strcmp(argv[i], "--media-duration-seconds") == 0 && i + 1 < argc) batch.media_duration_seconds = strtod(argv[++i], nullptr);
         else pid = static_cast<DWORD>(strtoul(argv[i], nullptr, 10));
     }
     if (!test && !batch.enabled && pid == 0)
     {
-        Log("usage: dlss5-video-host --test | --batch [--input in.rgb24 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--telemetry-file path] [--chunk-ack-map name] [--media-start-seconds N]");
+        Log("usage: dlss5-video-host --test | --batch [--input in.rgb24 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--telemetry-file path] [--chunk-ack-map name] [--encoder-affinity-mask N] [--media-start-seconds N]");
         return 1;
     }
     g_show_window = (!test && !batch.enabled && !hide) || batch.preview;

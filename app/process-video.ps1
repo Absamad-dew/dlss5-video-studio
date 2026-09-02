@@ -409,7 +409,7 @@ function Start-ProtocolProcess([string] $File, [string[]] $Arguments, [string] $
     return $Process
 }
 
-function Get-RealtimeAffinityPartition {
+function Get-PipelineAffinityPartition([bool] $IncludeEncoder) {
     # Partition only CPUs already available to this process. This respects
     # CoreBroker/job-object constraints in tests and the full machine mask in
     # normal launches. Guide/decode is CPU-heavy; the native host is primarily
@@ -426,21 +426,32 @@ function Get-RealtimeAffinityPartition {
     # every CPU, even though their GPU/compute stages are already >2x realtime.
     $ControllerCount = if ($Available.Count -ge 12) { 2 } else { 1 }
     $WorkerCount = $Available.Count-$ControllerCount
+    # Guide and native submission stay on disjoint lanes. The background
+    # encoder may borrow either worker lane at BelowNormal priority: a hard
+    # two/four-thread encoder island made FFmpeg's RGB24 -> NV12 conversion
+    # several times slower at 1440p, while Windows already gives the
+    # AboveNormal guide process first access to these cores.
     $GuideCount = [math]::Min($WorkerCount-2,[math]::Max(4,[int][math]::Ceiling($WorkerCount*0.5625)))
+    $HostCount = $WorkerCount-$GuideCount
+    $EncoderCount = if ($IncludeEncoder) { $WorkerCount } else { 0 }
     [uint64]$GuideMask = 0
     [uint64]$HostMask = 0
+    [uint64]$EncoderMask = 0
     [uint64]$ControllerMask = 0
     for ($Index=0;$Index -lt $WorkerCount;$Index++) {
         $Value = [uint64]1 -shl $Available[$Index]
         if ($Index -lt $GuideCount) { $GuideMask = $GuideMask -bor $Value }
         else { $HostMask = $HostMask -bor $Value }
+        if ($IncludeEncoder) { $EncoderMask = $EncoderMask -bor $Value }
     }
     for ($Index=$WorkerCount;$Index -lt $Available.Count;$Index++) {
         $ControllerMask = $ControllerMask -bor ([uint64]1 -shl $Available[$Index])
     }
     return [pscustomobject]@{
-        GuideMask=[int64]$GuideMask;HostMask=[int64]$HostMask;ControllerMask=[int64]$ControllerMask
-        GuideLogicalProcessors=$GuideCount;HostLogicalProcessors=($WorkerCount-$GuideCount)
+        GuideMask=[int64]$GuideMask;HostMask=[int64]$HostMask;EncoderMask=[int64]$EncoderMask;ControllerMask=[int64]$ControllerMask
+        GuideLogicalProcessors=$GuideCount;HostLogicalProcessors=$HostCount
+        EncoderLogicalProcessors=$EncoderCount
+        EncoderSharesWorkerPool=[bool]$IncludeEncoder
         ControllerLogicalProcessors=$ControllerCount
     }
 }
@@ -713,18 +724,21 @@ $DlssInputHeight = if ($VsrAfterDlss) { $UpscalerInputHeight } else { $RenderHei
 $DlssOutputWidth = if ($VsrAfterDlss) { $UpscalerInputWidth } else { $OutputWidth }
 $DlssOutputHeight = if ($VsrAfterDlss) { $UpscalerInputHeight } else { $OutputHeight }
 $DepthBackendPolicy = 'requested'
-if ($IsPreviewOnly -and $DepthComputeBackend -eq 'Auto' -and
+if ($IsPreviewOnly -and $DepthComputeBackend -eq 'Auto' -and $DepthModelProfile -eq 'DA2Small' -and
     $ResolvedHardwareProfile -eq 'Standard' -and $DlssOutputWidth -ge 2560) {
     # At 1440p the laptop DLSS queue is almost saturated. Running sparse DA2
     # depth on four isolated CPU workers avoids multi-second DirectML GPU
     # scheduling stalls while preserving the same model, input and output size.
+    # Offline recording has no display deadline and DirectML is substantially
+    # faster there, so this latency-oriented fallback intentionally remains
+    # realtime-only. Explicit backend choices remain untouched.
     $DepthComputeBackend = 'Cpu'
     $DepthBackendPolicy = 'laptop-high-resolution-cpu-isolation'
 }
 # Preserve the complete source frame (or downscale only when it exceeds the
 # DLSS render extent). The native cubic path avoids expanding every RGB frame
 # in system RAM; its unaligned RGB24 reads are coalesced in the input shader.
-$RgbTransportGeometry = if ($IsPreviewOnly -and -not $UseExternalUpscaler) {
+$RgbTransportGeometry = if (-not $UseExternalUpscaler) {
     Fit-Geometry $SourceWidth $SourceHeight $DlssInputWidth $DlssInputHeight $false
 } else { @($DlssInputWidth,$DlssInputHeight) }
 $RgbTransportWidth = [int]$RgbTransportGeometry[0]
@@ -869,9 +883,11 @@ $HostEncodedChunkDirectory = if ($VsrAfterDlss) { Join-Path $Work 'encoded-dlss'
 $DlssIntermediate = Join-Path $Work 'dlss-intermediate.mp4'
 $FlatOutput = if ($VRMode -eq 'Off') { $OutputVideo } else { Join-Path $Work 'flat-output.mp4' }
 $VrEncoded = Join-Path $Work 'vr-encoded.mp4'
-# A continuous NVENC pipe can contend with Feature 18 on bandwidth-limited
-# systems, so keep recording and display paths isolated.
-$DirectEncode = $false
+# Feed one persistent NV12/NVENC process directly from the native output ring.
+# This avoids RGB chunk files, repeated FFmpeg startup and a second RGB->YUV
+# conversion. VSR-after-DLSS still needs independently addressable chunks as
+# the intermediate hand-off format.
+$DirectEncode = -not $IsPreviewOnly -and -not $VsrAfterDlss
 if (-not $IsPreviewOnly) {
     New-Item -ItemType Directory -Force -Path $EncodedChunkDirectory | Out-Null
     if ($VsrAfterDlss) { New-Item -ItemType Directory -Force -Path $HostEncodedChunkDirectory | Out-Null }
@@ -949,11 +965,9 @@ $UseSharedRgbTransport = -not $KeepTemporaryFiles -and -not $VsrBeforeDlss -and 
 $UseSharedGuideTransport = $UseSharedRgbTransport -and $VRMode -ne 'DepthSBS'
 $SharedRgbNamePrefix = 'd5rgb_' + (($RunId -replace '[^A-Za-z0-9_-]','_'))
 $SharedGuideNamePrefix = 'd5guide_' + (($RunId -replace '[^A-Za-z0-9_-]','_'))
-$RealtimeChunkAckMapName = if ($IsPreviewOnly) {
-    'Local\DLSS5VideoStudioChunkAckMap_' + (($RunId -replace '[^A-Za-z0-9_-]','_'))
-} else { $null }
-$RealtimeChunkAckMap = $null
-$RealtimeChunkAckCounter = $null
+$ChunkAckMapName = 'Local\DLSS5VideoStudioChunkAckMap_' + (($RunId -replace '[^A-Za-z0-9_-]','_'))
+$ChunkAckMap = $null
+$ChunkAckCounter = $null
 $ChunkOffsets = New-Object 'Collections.Generic.List[int]'
 $ChunkEndFrames = New-Object 'Collections.Generic.List[int]'
 $ChunkCursor = 0
@@ -993,12 +1007,12 @@ $UpscalerReservedVramMb = 0
 $script:TemporalAtlasMetrics = $null
 $DepthProvider = 'unknown'
 $MotionProvider = $null
-$RealtimeAffinityPartition = if ($IsPreviewOnly) { Get-RealtimeAffinityPartition } else { $null }
-$RealtimeHostOpenMpThreads = if ($RealtimeAffinityPartition) {
-    [int][math]::Min(8,$RealtimeAffinityPartition.HostLogicalProcessors)
+$PipelineAffinityPartition = Get-PipelineAffinityPartition (-not $IsPreviewOnly)
+$PipelineHostOpenMpThreads = if ($PipelineAffinityPartition) {
+    [int][math]::Min(8,$PipelineAffinityPartition.HostLogicalProcessors)
 } else { 0 }
-$HostOpenMpThreads = if ($RealtimeHostOpenMpThreads -gt 0) {
-    $RealtimeHostOpenMpThreads
+$HostOpenMpThreads = if ($PipelineHostOpenMpThreads -gt 0) {
+    $PipelineHostOpenMpThreads
 } else {
     # The native upload/conversion helpers are bandwidth bound. An unbounded
     # OpenMP pool steals cores from FFmpeg and the guide worker without making
@@ -1074,14 +1088,16 @@ $Plan = [ordered]@{
     realtime_guide_transport=if($IsPreviewOnly){if($UseSharedGuideTransport){'shared-memory'}else{'ssd-file'}}else{$null}
     rgb_transport=if($UseSharedRgbTransport){'shared-memory'}else{'ssd-file'}
     guide_transport=if($UseSharedGuideTransport){'shared-memory'}else{'ssd-file'}
-    realtime_ack_transport=if($IsPreviewOnly){'shared-monotonic-counter'}else{$null}
+    chunk_ack_transport='shared-monotonic-counter'
     host_openmp_threads=$HostOpenMpThreads
     realtime_shared_rgb_planned_mb=if($IsPreviewOnly){[math]::Round($SharedRgbPlannedBytes/1MB,1)}else{$null}
     realtime_shared_guide_planned_mb=if($IsPreviewOnly){[math]::Round($SharedGuidePlannedBytes/1MB,1)}else{$null}
-    realtime_cpu_partition=if($RealtimeAffinityPartition){[ordered]@{
-        guide_logical_processors=$RealtimeAffinityPartition.GuideLogicalProcessors
-        host_logical_processors=$RealtimeAffinityPartition.HostLogicalProcessors
-        controller_reserved_logical_processors=$RealtimeAffinityPartition.ControllerLogicalProcessors
+    hardware_cpu_partition=if($PipelineAffinityPartition){[ordered]@{
+        guide_logical_processors=$PipelineAffinityPartition.GuideLogicalProcessors
+        host_logical_processors=$PipelineAffinityPartition.HostLogicalProcessors
+        encoder_logical_processors=$PipelineAffinityPartition.EncoderLogicalProcessors
+        encoder_shares_worker_pool=$PipelineAffinityPartition.EncoderSharesWorkerPool
+        controller_reserved_logical_processors=$PipelineAffinityPartition.ControllerLogicalProcessors
     }}else{$null}
     source_kind=if($IsNetworkSource){'network'}else{'file'}
     source_page=if($ResolvedOnlineSource){$ResolvedOnlineSource.PageUrl}else{$null}
@@ -1108,13 +1124,14 @@ Write-Output ('STUDIO_PLAN '+($Plan|ConvertTo-Json -Compress -Depth 4))
 Emit-Progress 'Setup' 'Preparing engines and temporary workspace' 1 0 $TotalFrames 0
 
 try {
-    if ($IsPreviewOnly) {
-        $RealtimeChunkAckMap = [IO.MemoryMappedFiles.MemoryMappedFile]::CreateNew(
-            $RealtimeChunkAckMapName, 4096, [IO.MemoryMappedFiles.MemoryMappedFileAccess]::ReadWrite)
-        $RealtimeChunkAckCounter = $RealtimeChunkAckMap.CreateViewAccessor(
-            0, 8, [IO.MemoryMappedFiles.MemoryMappedFileAccess]::ReadWrite)
-        $RealtimeChunkAckCounter.Write(0,[long]0)
-    }
+    # The native host updates one monotonic counter after it has copied every
+    # byte of a chunk. Recording now uses the same low-latency acknowledgement
+    # path as realtime instead of synchronously parsing redirected stdout.
+    $ChunkAckMap = [IO.MemoryMappedFiles.MemoryMappedFile]::CreateNew(
+        $ChunkAckMapName, 4096, [IO.MemoryMappedFiles.MemoryMappedFileAccess]::ReadWrite)
+    $ChunkAckCounter = $ChunkAckMap.CreateViewAccessor(
+        0, 8, [IO.MemoryMappedFiles.MemoryMappedFileAccess]::ReadWrite)
+    $ChunkAckCounter.Write(0,[long]0)
     Stage 2 8 $(if ($VsrBeforeDlss) { "Starting persistent $Upscaler, DLSS5 and guide engines" } elseif ($VsrAfterDlss) { "Starting DLSS5 and guide engines; $Upscaler follows" } else { 'Starting persistent DLSS5 and guide engines' })
     $EngineConfig = Join-Path $Engine 'ReShade.ini'
     Copy-Item -LiteralPath $ConfigPath -Destination $EngineConfig -Force
@@ -1188,10 +1205,14 @@ try {
         '--frames',$TotalFrames,'--fps',$Fps,'--codec',$CodecName,'--quality',$Quality,
         '--timings','--quiet-frames'
     )
+    $HostArgs += @('--chunk-ack-map',$ChunkAckMapName)
+    if (-not $IsPreviewOnly -and $PipelineAffinityPartition -and $PipelineAffinityPartition.EncoderMask -ne 0) {
+        $EncoderMaskText = ([uint64][int64]$PipelineAffinityPartition.EncoderMask).ToString([Globalization.CultureInfo]::InvariantCulture)
+        $HostArgs += @('--encoder-affinity-mask',$EncoderMaskText)
+    }
     if (-not $UseExternalUpscaler) { $HostArgs += '--fast-start' }
     if ($IsPreviewOnly) {
         $HostArgs += @('--preview-only','--media-start-seconds',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.######}',$StartSeconds)),'--media-duration-seconds',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.######}',$Duration)))
-        $HostArgs += @('--chunk-ack-map',$RealtimeChunkAckMapName)
         if ($RealtimeControlPath) {
             $ResolvedControlPath = [IO.Path]::GetFullPath($RealtimeControlPath)
             $HostArgs += @('--control-file',$ResolvedControlPath,'--telemetry-file',($ResolvedControlPath + '.telemetry'))
@@ -1225,14 +1246,12 @@ try {
     # Keeping the old frozen exe here also
     # made offline mode reject newer motion/depth controls.
     $GuideProcess = Start-ProtocolProcess $UpscalerPython (@('-s','-B',$GuideGeneratorScript)+$GuideArgs) $Root
-    if ($IsPreviewOnly) {
-        # FFmpeg is spawned by this process and inherits its class. Matching the
-        # native preview host prevents high-resolution rendering from starving
-        # decode/motion/depth for a whole display chunk.
-        try { $GuideProcess.PriorityClass = [Diagnostics.ProcessPriorityClass]::AboveNormal } catch {}
-        if ($RealtimeAffinityPartition) {
-            try { $GuideProcess.ProcessorAffinity = [intptr]$RealtimeAffinityPartition.GuideMask } catch {}
-        }
+    # FFmpeg is spawned by this process and inherits its class. Keep the guide
+    # engine on its own cores in recording as well, so decode/depth cannot be
+    # starved by native submission or NVENC at 2K/4K.
+    try { $GuideProcess.PriorityClass = [Diagnostics.ProcessPriorityClass]::AboveNormal } catch {}
+    if ($PipelineAffinityPartition) {
+        try { $GuideProcess.ProcessorAffinity = [intptr]$PipelineAffinityPartition.GuideMask } catch {}
     }
     if ($VsrBeforeDlss) {
         $UpscalerArgs = @(
@@ -1258,9 +1277,9 @@ try {
         $env:OMP_NUM_THREADS = $PreviousOmpThreads
         $env:OMP_WAIT_POLICY = $PreviousOmpWaitPolicy
     }
-    if ($RealtimeAffinityPartition) {
-        try { $HostProcess.ProcessorAffinity = [intptr]$RealtimeAffinityPartition.HostMask } catch {}
-        try { (Get-Process -Id $PID).ProcessorAffinity = [intptr]$RealtimeAffinityPartition.ControllerMask } catch {}
+    if ($PipelineAffinityPartition) {
+        try { $HostProcess.ProcessorAffinity = [intptr]$PipelineAffinityPartition.HostMask } catch {}
+        try { (Get-Process -Id $PID).ProcessorAffinity = [intptr]$PipelineAffinityPartition.ControllerMask } catch {}
         # Buffer control does almost no compute, but it must wake within a few
         # milliseconds even when the two AboveNormal worker processes saturate
         # a CoreBroker/job-object CPU set that cannot be narrowed by affinity.
@@ -1301,9 +1320,9 @@ try {
         $ReleaseCommand = [ordered]@{cmd='release';inputs=@($References)} | ConvertTo-Json -Compress
         $GuideProcess.StandardInput.WriteLine($ReleaseCommand)
         $GuideProcess.StandardInput.Flush()
-        if (-not $IsPreviewOnly) {
-            Wait-ProtocolLine $GuideProcess 'GUIDE_RELEASED ' 'Guide shared-memory release'
-        }
+        # Release is ordered on the guide command stream and no longer blocks
+        # recording. The next protocol wait naturally consumes GUIDE_RELEASED
+        # before its own response, matching the proven realtime path.
     }
 
     Stage 3 8 $(if ($VsrBeforeDlss) { "$Upscaler x4 -> DLSS5" } elseif ($VsrAfterDlss) { "DLSS5 at model input resolution -> $Upscaler x4" } else { "DLSS5 with adaptive motion/depth ($PerformanceProfile)" })
@@ -1390,7 +1409,7 @@ try {
                 }
             } elseif ($IsPreviewOnly) {
                 while (($SentFrames-$AcknowledgedFrames+$ThisFrames) -gt $RealtimeBufferCapacityFrames) {
-                    Wait-HostChunkSubmitted $HostProcess $RealtimeChunkAckCounter ($AcknowledgedChunks+1)
+                    Wait-HostChunkSubmitted $HostProcess $ChunkAckCounter ($AcknowledgedChunks+1)
                     if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
                     $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
                     $AcknowledgedChunks++
@@ -1409,7 +1428,7 @@ try {
             } else {
                 $HostProcess.StandardInput.WriteLine($HostCommand)
                 $SentChunks++;$SentFrames += $ThisFrames
-                Wait-HostChunkSubmitted $HostProcess $RealtimeChunkAckCounter ($AcknowledgedChunks+1)
+                Wait-HostChunkSubmitted $HostProcess $ChunkAckCounter ($AcknowledgedChunks+1)
                 if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
                 $AcknowledgedFrames += [int]$ThisFrames
                 $AcknowledgedChunks++
@@ -1469,7 +1488,7 @@ try {
                 $DecoderSeconds += $DecodeWatch.Elapsed.TotalSeconds
             }
             if (-not $IsPreviewOnly) {
-                Wait-HostChunkSubmitted $HostProcess $RealtimeChunkAckCounter ($AcknowledgedChunks+1)
+                Wait-HostChunkSubmitted $HostProcess $ChunkAckCounter ($AcknowledgedChunks+1)
                 if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
                 $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
                 $AcknowledgedChunks++
@@ -1539,7 +1558,7 @@ try {
             $ReleasedAfterPublish = New-Object 'Collections.Generic.List[int]'
             $LastAckElapsedSeconds = $null
             while (($SentFrames-$AcknowledgedFrames+$ThisFrames) -gt $RealtimeBufferCapacityFrames) {
-                Wait-HostChunkSubmitted $HostProcess $RealtimeChunkAckCounter ($AcknowledgedChunks+1)
+                Wait-HostChunkSubmitted $HostProcess $ChunkAckCounter ($AcknowledgedChunks+1)
                 $LastAckElapsedSeconds = $PrimaryPhaseWatch.Elapsed.TotalSeconds
                 if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
                 $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
@@ -1592,7 +1611,7 @@ try {
 
     Stage 4 8 $(if ($IsPreviewOnly) { 'Displaying the remaining DLSS5 frames' } elseif ($DirectEncode) { 'Draining the DLSS5 GPU pipeline and continuous NVENC stream' } else { 'Draining the DLSS5 GPU pipeline and NVENC encoder' })
     while ($AcknowledgedChunks -lt $Chunks) {
-        Wait-HostChunkSubmitted $HostProcess $RealtimeChunkAckCounter ($AcknowledgedChunks+1)
+        Wait-HostChunkSubmitted $HostProcess $ChunkAckCounter ($AcknowledgedChunks+1)
         if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
         $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
         $AcknowledgedChunks++
@@ -1612,6 +1631,14 @@ try {
     Wait-ProtocolLine $HostProcess 'HOST_STREAM_DONE ' 'DLSS5 host'
     $HostProcess.WaitForExit()
     if ($HostProcess.ExitCode -ne 0) { throw "DLSS5 host failed: $($HostProcess.StandardError.ReadToEnd())" }
+
+    # The primary guide/DLSS/NVENC pipeline is drained. Return the controller to
+    # its original CPU set before concat, audio mux, optional VSR and VR tools;
+    # otherwise those later child processes inherit only the tiny IPC lane.
+    if ($PipelineAffinityPartition) {
+        try { (Get-Process -Id $PID).ProcessorAffinity = [intptr]$PreviousControllerAffinity } catch {}
+        try { (Get-Process -Id $PID).PriorityClass = $PreviousControllerPriority } catch {}
+    }
 
     $HostLog = Join-Path $Engine 'dlss5-video-host.log'
     $ReShadeLog = Join-Path $Engine 'ReShade.log'
@@ -1980,12 +2007,20 @@ try {
     $TimingMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*per_frame_ms=(?<ms>[0-9.]+)')
     $MeanMs = if ($TimingMatch.Success) { [double]::Parse($TimingMatch.Groups['ms'].Value, [Globalization.CultureInfo]::InvariantCulture) } else { 0.0 }
     $TotalTimingMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\stotal_ms=(?<total>[0-9.]+)')
+    $RecordingPipelineMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\srecording_pipeline_ms=(?<ms>[0-9.]+)')
     $EncodeTimingMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\schunk_encode_ms=(?<encode>[0-9.]+)')
+    $EncodeWaitMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\schunk_encode_wait_ms=(?<ms>[0-9.]+)')
+    $EncodeOverlapMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\schunk_encode_overlap_ms=(?<ms>[0-9.]+)')
+    $WriterWaitMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\swriter_wait_ms=(?<ms>[0-9.]+)')
+    $WriteMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\swrite_ms=(?<ms>[0-9.]+)')
     $PreviewFpsMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\spreview_present_fps=(?<fps>[0-9.]+)')
     $MfgStatsMatch = [regex]::Match($HostText, '(?:HOST_DLSSG_STATS real_frames=|\[streamline\] aggregate real=)(?<real>[0-9]+) presented=(?<presented>[0-9]+) generated=(?<generated>[0-9]+) (?:actual_)?multiplier=(?<multiplier>[0-9.]+) max_per_render=(?<max>[0-9]+)')
     $UnderrunMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\sbuffer_underruns=(?<count>[0-9]+)')
     $MaxStreamWaitMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\sbuffer_underrun_max_ms=(?<ms>[0-9.]+)')
-    $HostDeliveryFps = if ($TotalTimingMatch.Success -and $EncodeTimingMatch.Success) {
+    $HostDeliveryFps = if ($RecordingPipelineMatch.Success) {
+        $HostDeliveryMs = [double]::Parse($RecordingPipelineMatch.Groups['ms'].Value,[Globalization.CultureInfo]::InvariantCulture)
+        if ($HostDeliveryMs -gt 0) { 1000.0 * $TotalFrames / $HostDeliveryMs } else { 0.0 }
+    } elseif ($TotalTimingMatch.Success -and $EncodeTimingMatch.Success) {
         $HostDeliveryMs = [double]::Parse($TotalTimingMatch.Groups['total'].Value, [Globalization.CultureInfo]::InvariantCulture) + [double]::Parse($EncodeTimingMatch.Groups['encode'].Value, [Globalization.CultureInfo]::InvariantCulture)
         if ($HostDeliveryMs -gt 0) { 1000.0 * $TotalFrames / $HostDeliveryMs } else { 0.0 }
     } else { 0.0 }
@@ -2004,7 +2039,7 @@ try {
     $WallFps = if ($ProcessingElapsedSeconds -gt 0) { $TotalFrames / $ProcessingElapsedSeconds } else { 0.0 }
     $DisplayFps = if ($PreviewFpsMatch.Success) { [double]::Parse($PreviewFpsMatch.Groups['fps'].Value, [Globalization.CultureInfo]::InvariantCulture) } else { 0.0 }
     $Result = [ordered]@{
-        schema = 'dlss5-video-studio-run/9'
+        schema = 'dlss5-video-studio-run/10'
         status = 'ok'
         input_video = if ($IsNetworkSource) { '[network stream]' } else { $InputVideo }
         source_kind = if ($IsNetworkSource) { 'network' } else { 'file' }
@@ -2115,6 +2150,20 @@ try {
         gpu_compact_guide_expansion = $true
         fast_start = -not $UseExternalUpscaler
         continuous_nvenc = [bool]$DirectEncode
+        asynchronous_chunk_nvenc = [bool](-not $IsPreviewOnly -and -not $DirectEncode)
+        chunk_ack_transport = 'shared-monotonic-counter'
+        hardware_cpu_partition = if($PipelineAffinityPartition){[ordered]@{
+            guide_logical_processors=$PipelineAffinityPartition.GuideLogicalProcessors
+            host_logical_processors=$PipelineAffinityPartition.HostLogicalProcessors
+            encoder_logical_processors=$PipelineAffinityPartition.EncoderLogicalProcessors
+            encoder_shares_worker_pool=$PipelineAffinityPartition.EncoderSharesWorkerPool
+            controller_reserved_logical_processors=$PipelineAffinityPartition.ControllerLogicalProcessors
+        }}else{$null}
+        nvenc_encode_seconds = if(-not $DirectEncode -and $EncodeTimingMatch.Success){[double]::Parse($EncodeTimingMatch.Groups['encode'].Value,[Globalization.CultureInfo]::InvariantCulture)/1000.0}else{$null}
+        nvenc_wait_seconds = if(-not $DirectEncode -and $EncodeWaitMatch.Success){[double]::Parse($EncodeWaitMatch.Groups['ms'].Value,[Globalization.CultureInfo]::InvariantCulture)/1000.0}else{$null}
+        nvenc_overlap_seconds = if(-not $DirectEncode -and $EncodeOverlapMatch.Success){[double]::Parse($EncodeOverlapMatch.Groups['ms'].Value,[Globalization.CultureInfo]::InvariantCulture)/1000.0}else{$null}
+        continuous_nvenc_feed_ms_per_frame = if($DirectEncode -and $WriteMatch.Success){[double]::Parse($WriteMatch.Groups['ms'].Value,[Globalization.CultureInfo]::InvariantCulture)}else{$null}
+        continuous_nvenc_backpressure_ms_per_frame = if($DirectEncode -and $WriterWaitMatch.Success){[double]::Parse($WriterWaitMatch.Groups['ms'].Value,[Globalization.CultureInfo]::InvariantCulture)}else{$null}
         guide_ready_seconds = [double]$GuideReadySeconds
         host_ready_seconds = [double]$HostReadySeconds
         first_guide_chunk_seconds = [double]$FirstGuideChunkSeconds
@@ -2175,8 +2224,8 @@ try {
             try { & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null } catch {}
         }
     }
-    if ($RealtimeChunkAckCounter) { try { $RealtimeChunkAckCounter.Dispose() } catch {} }
-    if ($RealtimeChunkAckMap) { try { $RealtimeChunkAckMap.Dispose() } catch {} }
+    if ($ChunkAckCounter) { try { $ChunkAckCounter.Dispose() } catch {} }
+    if ($ChunkAckMap) { try { $ChunkAckMap.Dispose() } catch {} }
     if (-not $KeepTemporaryFiles -and (Test-Path -LiteralPath $Work)) {
         Remove-Item -LiteralPath $Work -Recurse -Force
     }

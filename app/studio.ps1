@@ -26,7 +26,7 @@ $Invariant = [Globalization.CultureInfo]::InvariantCulture
 $Xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DLSS5 Video Studio 19 · Temporal Atlas 2K/4K VR" Width="1500" Height="960"
+        Title="DLSS5 Video Studio 20 · Hardware-pipelined recording" Width="1500" Height="960"
         MinWidth="1120" MinHeight="720" WindowStartupLocation="CenterScreen"
         Background="#090D14" Foreground="#DCE7F5" FontFamily="Segoe UI">
   <Window.Resources>
@@ -237,6 +237,7 @@ $Xaml = @'
           <GroupBox x:Name="RecordingPanel" Header="ЗАПИСЬ И ТОЧНЫЕ MOTION / DEPTH-КАРТЫ">
             <StackPanel>
               <TextBlock Text="Универсальный профиль выше одновременно настраивает guide-разрешение, частоту нейроглубины, optical flow и размер чанка. Программа сама выбирает аппаратный класс по VRAM; названия видеокарт больше не нужны." Foreground="#96AB82" TextWrapping="Wrap" Margin="0,0,0,7"/>
+              <Border Background="#0B2022" BorderBrush="#267A75" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,8"><TextBlock Text="Аппаратный конвейер записи: source-RGB передаётся через общую память и расширяется на GPU; guide, DLSS и controller изолированы по CPU, а кадры идут прямо в один фоновый NV12/NVENC поток без временных RGB-файлов. Выбранные разрешение и качество не снижаются." Foreground="#72DCCB" TextWrapping="Wrap"/></Border>
               <CheckBox x:Name="RecordFineGuideCheck" Content="Переопределить профиль и настроить карты вручную" IsChecked="False"/>
               <Expander x:Name="RecordFineGuideExpander" Header="ТОНКАЯ НАСТРОЙКА ЗАПИСИ / VR" Foreground="#B6C5D8" IsExpanded="False">
                 <Border BorderBrush="#33452C" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
@@ -972,7 +973,7 @@ function Update-ProfileUi {
     } else {
         $LivePreviewCheck.IsEnabled = (Get-PipelineOrder) -ne 'DLSSThenVSR'
         $RunButton.Content = 'ЗАПУСТИТЬ ЗАПИСЬ'
-        $RuntimeStatus.Text = '● Persistent DLSS5 pipeline'
+        $RuntimeStatus.Text = '● ЗАПИСЬ · GPU-direct + async NVENC'
         $ProgressHint.Text = 'Имя готового видео будет сформировано автоматически.'
         $RangeHint.Text = 'Для быстрого подбора настроек начните с 8–24 кадров.'
     }
