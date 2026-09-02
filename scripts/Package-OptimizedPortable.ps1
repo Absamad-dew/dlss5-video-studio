@@ -59,7 +59,16 @@ if (-not [string]::IsNullOrWhiteSpace($MainModelSource)) {
         }
     }
 }
-Copy-Item -LiteralPath (Join-Path $Base 'tools\ffmpeg.exe'),(Join-Path $Base 'tools\ffprobe.exe'),(Join-Path $Base 'tools\ffplay.exe') -Destination (Join-Path $Target 'tools') -Force
+$MediaTools = @(
+    (Join-Path $Base 'tools\ffmpeg.exe'),
+    (Join-Path $Base 'tools\ffprobe.exe'),
+    (Join-Path $Base 'tools\ffplay.exe'),
+    (Join-Path $Build 'tools\yt-dlp.exe')
+)
+foreach ($MediaTool in $MediaTools) {
+    if (-not (Test-Path -LiteralPath $MediaTool -PathType Leaf)) { throw "Missing portable media tool: $MediaTool" }
+}
+Copy-Item -LiteralPath $MediaTools -Destination (Join-Path $Target 'tools') -Force
 
 $BasePython = Join-Path $Base 'runtime\python'
 $PortablePython = if (

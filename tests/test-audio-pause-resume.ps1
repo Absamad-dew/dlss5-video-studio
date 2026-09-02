@@ -1,10 +1,17 @@
+param(
+    [string] $PortableRoot = 'D:\DLSS5_VIDEO_STUDIO_PORTABLE_REALTIME_V20',
+    [string] $InputVideo = '',
+    [string] $ConfigPath = ''
+)
 $ErrorActionPreference = 'Stop'
 # End-to-end regression: native pause must preserve one ffplay PID.
-$root = 'D:\DLSS5_VIDEO_STUDIO_PORTABLE_REALTIME_V11'
+$root = $PortableRoot
 $wrapper = Join-Path $root 'app\realtime-player.ps1'
 $runner = Join-Path $root 'app\process-video.ps1'
-$inputVideo = Join-Path $root 'temp\local-av-buffer-sample.mp4'
-$config = 'C:\Users\Lenovo\Documents\Codex\DLSS5_VIDEO_STUDIO_BUILD\qa.ReShade.ini'
+if ([string]::IsNullOrWhiteSpace($InputVideo)) { $InputVideo = Join-Path $root 'temp\local-av-buffer-sample.mp4' }
+if ([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = 'C:\Users\Lenovo\Documents\Codex\DLSS5_VIDEO_STUDIO_BUILD\qa.ReShade.ini' }
+$inputVideo = $InputVideo
+$config = $ConfigPath
 $control = Join-Path $root 'temp\qa-audio-pause-control.txt'
 $powerShell = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)

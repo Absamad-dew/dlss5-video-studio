@@ -51,12 +51,14 @@ function Resolve-OnlineVideoSource {
     if (-not (Test-HttpVideoSource $PageUrl)) { throw 'The URL must start with http:// or https://.' }
     if (-not (Test-Path -LiteralPath $YtDlpPath -PathType Leaf)) { throw 'The yt-dlp network video component is missing.' }
 
-    # Prefer one progressive HTTPS stream: it starts faster and provides
-    # deterministic random access for the player's restart-on-seek model.
+    # Prefer separate AVC/AAC HTTPS tracks. VK commonly advertises a direct
+    # `url1080` entry as "best", but that entry is video-only. Treating it as
+    # progressive made realtime playback silent. Separate direct tracks also
+    # seek more reliably than VK's HLS playlists with their nested TLS URLs.
     $Format = if ($MaxHeight -gt 0) {
-        "best[height<=$MaxHeight][protocol=https]/best[height<=$MaxHeight]/best"
+        "bestvideo[height<=$MaxHeight][protocol=https][ext=mp4]+bestaudio[protocol=https][ext=m4a]/bestvideo[height<=$MaxHeight][protocol=https]+bestaudio[protocol=https]/best[height<=$MaxHeight][protocol=https]/best[height<=$MaxHeight]/best"
     } else {
-        'best[protocol=https]/best'
+        'bestvideo[protocol=https][ext=mp4]+bestaudio[protocol=https][ext=m4a]/bestvideo[protocol=https]+bestaudio[protocol=https]/best[protocol=https]/best'
     }
     $Args = @('--no-playlist','--no-warnings','--dump-single-json','-f',$Format)
     if ($CookiesBrowser -ne 'None') { $Args += @('--cookies-from-browser',$CookiesBrowser) }
@@ -68,36 +70,67 @@ function Resolve-OnlineVideoSource {
         throw "Could not open the URL: $Message"
     }
     try { $Info = $Result.Stdout | ConvertFrom-Json } catch { throw 'The site returned an invalid video stream description.' }
-    if ([string]::IsNullOrWhiteSpace([string]$Info.url)) { throw 'The source description has no direct video stream.' }
+    $RequestedFormatsProperty = $Info.PSObject.Properties['requested_formats']
+    $RequestedFormats = if ($RequestedFormatsProperty -and $RequestedFormatsProperty.Value) { @($RequestedFormatsProperty.Value) } else { @() }
+    $VideoFormat = $Info
+    $AudioFormat = $Info
+    if ($RequestedFormats.Count -gt 0) {
+        $VideoFormat = $RequestedFormats | Where-Object { [string]$_.vcodec -ne 'none' } | Select-Object -First 1
+        $AudioFormat = $RequestedFormats | Where-Object { [string]$_.acodec -ne 'none' } | Select-Object -First 1
+    }
+    if (-not $VideoFormat -or [string]::IsNullOrWhiteSpace([string]$VideoFormat.url)) { throw 'The source description has no direct video stream.' }
+    if (-not $AudioFormat -or [string]::IsNullOrWhiteSpace([string]$AudioFormat.url)) { $AudioFormat = $VideoFormat }
 
-    $Headers = [ordered]@{}
-    if ($Info.http_headers) {
-        foreach ($Property in $Info.http_headers.PSObject.Properties) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$Property.Value)) {
-                $Headers[[string]$Property.Name] = [string]$Property.Value
+    function Write-TrackHeaders($FormatInfo, [string] $Path) {
+        $Headers = [ordered]@{}
+        $HttpHeadersProperty = $FormatInfo.PSObject.Properties['http_headers']
+        if ($HttpHeadersProperty -and $HttpHeadersProperty.Value) {
+            foreach ($Property in $HttpHeadersProperty.Value.PSObject.Properties) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$Property.Value)) {
+                    $Headers[[string]$Property.Name] = [string]$Property.Value
+                }
             }
         }
+        # yt-dlp exposes per-track cookies in Set-Cookie form. FFmpeg needs a
+        # normal Cookie request header; keep only the leading name=value pair.
+        $CookiesProperty = $FormatInfo.PSObject.Properties['cookies']
+        if ($CookiesProperty -and -not [string]::IsNullOrWhiteSpace([string]$CookiesProperty.Value)) {
+            $CookiePair = (([string]$CookiesProperty.Value -split ';',2)[0]).Trim()
+            if ($CookiePair -match '^[^=;\s]+=[^;]+$') { $Headers['Cookie'] = $CookiePair }
+        }
+        $HeaderDirectory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
+        New-Item -ItemType Directory -Force -Path $HeaderDirectory | Out-Null
+        [IO.File]::WriteAllText($Path,($Headers | ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+        return [IO.Path]::GetFullPath($Path)
     }
-    $HeaderDirectory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($HeadersPath))
-    New-Item -ItemType Directory -Force -Path $HeaderDirectory | Out-Null
-    [IO.File]::WriteAllText($HeadersPath,($Headers | ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
 
-    $MediaUri = [Uri][string]$Info.url
-    $TlsNoVerify = $MediaUri.DnsSafeHost -eq 'okcdn.ru' -or $MediaUri.DnsSafeHost.EndsWith('.okcdn.ru',[StringComparison]::OrdinalIgnoreCase)
-    $WidthProperty = $Info.PSObject.Properties['width']
-    $HeightProperty = $Info.PSObject.Properties['height']
+    $VideoHeadersPath = Write-TrackHeaders $VideoFormat $HeadersPath
+    $AudioHeadersPath = [IO.Path]::ChangeExtension([IO.Path]::GetFullPath($HeadersPath),'.audio.headers.json')
+    $AudioHeadersPath = Write-TrackHeaders $AudioFormat $AudioHeadersPath
+
+    function Test-TrackTlsNoVerify($FormatInfo) {
+        $TrackUri = [Uri][string]$FormatInfo.url
+        return $TrackUri.DnsSafeHost -eq 'okcdn.ru' -or $TrackUri.DnsSafeHost.EndsWith('.okcdn.ru',[StringComparison]::OrdinalIgnoreCase)
+    }
+
+    $WidthProperty = $VideoFormat.PSObject.Properties['width']
+    $HeightProperty = $VideoFormat.PSObject.Properties['height']
     $ExtractorProperty = $Info.PSObject.Properties['extractor_key']
     return [pscustomobject]@{
         PageUrl = $PageUrl
-        MediaUrl = [string]$Info.url
+        MediaUrl = [string]$VideoFormat.url
+        AudioUrl = [string]$AudioFormat.url
         Title = [string]$Info.title
         Duration = [double]$Info.duration
         Height = if ($HeightProperty -and $HeightProperty.Value) { [int]$HeightProperty.Value } else { 0 }
         Width = if ($WidthProperty -and $WidthProperty.Value) { [int]$WidthProperty.Value } else { 0 }
-        FormatId = [string]$Info.format_id
+        FormatId = [string]$VideoFormat.format_id
+        AudioFormatId = [string]$AudioFormat.format_id
         Extractor = if ($ExtractorProperty) { [string]$ExtractorProperty.Value } else { '' }
-        HeadersPath = [IO.Path]::GetFullPath($HeadersPath)
-        TlsNoVerify = $TlsNoVerify
+        HeadersPath = $VideoHeadersPath
+        AudioHeadersPath = $AudioHeadersPath
+        TlsNoVerify = Test-TrackTlsNoVerify $VideoFormat
+        AudioTlsNoVerify = Test-TrackTlsNoVerify $AudioFormat
     }
 }
 

@@ -1,2 +1,2 @@
-20.0.0-recording-hardware-pipeline
-Recording now reuses realtime's source-resolution shared-memory RGB transport, native GPU expansion, monotonic chunk acknowledgements, asynchronous mapping release, isolated CPU lanes, and one persistent NV12/NVENC stream without lowering the selected image quality.
+20.0.1-streaming-audio-hotfix
+Portable builds now always include yt-dlp. Online sources resolve hardware-friendly video and audio tracks separately, preserve per-track headers/cookies, and keep realtime plus recorded audio synchronized instead of selecting a silent VK video-only URL.

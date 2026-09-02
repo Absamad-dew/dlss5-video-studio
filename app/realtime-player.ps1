@@ -123,19 +123,25 @@ if (Test-Path -LiteralPath $NativeEventPath) { Remove-Item -LiteralPath $NativeE
 if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
 
 $ResolvedInput = $InputVideo
+$ResolvedAudioInput = $InputVideo
 $HeadersPath = $null
+$AudioHeadersPath = $null
 $InputTlsNoVerify = $false
+$AudioTlsNoVerify = $false
 $OnlineInfo = $null
 if ($IsOnline) {
     $HeadersPath = $ControlPath + '.headers.json'
     Write-Output 'STUDIO_SOURCE_RESOLVING network-source'
     $OnlineInfo = Resolve-OnlineVideoSource -PageUrl $InputVideo -YtDlpPath $YtDlp -MaxHeight $NetworkMaxHeight -CookiesBrowser $CookiesBrowser -HeadersPath $HeadersPath
     $ResolvedInput = $OnlineInfo.MediaUrl
+    $ResolvedAudioInput = $OnlineInfo.AudioUrl
+    $AudioHeadersPath = $OnlineInfo.AudioHeadersPath
     $InputTlsNoVerify = [bool]$OnlineInfo.TlsNoVerify
+    $AudioTlsNoVerify = [bool]$OnlineInfo.AudioTlsNoVerify
     $Duration = [double]$OnlineInfo.Duration
     Write-Output ('STUDIO_SOURCE_JSON ' + ([ordered]@{
         kind='network'; title=$OnlineInfo.Title; duration_seconds=[math]::Round($Duration,3)
-        width=$OnlineInfo.Width; height=$OnlineInfo.Height; format_id=$OnlineInfo.FormatId
+        width=$OnlineInfo.Width; height=$OnlineInfo.Height; format_id=$OnlineInfo.FormatId; audio_format_id=$OnlineInfo.AudioFormatId
         extractor=$OnlineInfo.Extractor; max_height=$NetworkMaxHeight
     } | ConvertTo-Json -Compress))
 } else {
@@ -191,6 +197,12 @@ if ($HeadersPath -and (Test-Path -LiteralPath $HeadersPath)) {
     $HeaderObject = Get-Content -LiteralPath $HeadersPath -Raw | ConvertFrom-Json
     $HeaderLines = foreach($Property in $HeaderObject.PSObject.Properties){if($Property.Value){'{0}: {1}'-f $Property.Name,$Property.Value}}
     if($HeaderLines){$InputHeaderBlock=($HeaderLines-join "`r`n")+"`r`n"}
+}
+$AudioHeaderBlock = $InputHeaderBlock
+if ($AudioHeadersPath -and (Test-Path -LiteralPath $AudioHeadersPath)) {
+    $AudioHeaderObject = Get-Content -LiteralPath $AudioHeadersPath -Raw | ConvertFrom-Json
+    $AudioHeaderLines = foreach($Property in $AudioHeaderObject.PSObject.Properties){if($Property.Value){'{0}: {1}'-f $Property.Name,$Property.Value}}
+    if($AudioHeaderLines){$AudioHeaderBlock=($AudioHeaderLines-join "`r`n")+"`r`n"}
 }
 
 function Stop-Audio {
@@ -410,10 +422,10 @@ function Start-Audio([double] $Position) {
     # handle and never appears over the video player.
     $AudioArgs=@('-autoexit','-hide_banner','-loglevel','info','-stats','-volume',$Volume,
         '-x','64','-y','64','-left','-32000','-top','-32000','-showmode','1','-window_title',$WindowTitle)
-    if($InputTlsNoVerify){$AudioArgs+=@('-tls_verify','0')}
-    if($InputHeaderBlock){$AudioArgs+=@('-headers',$InputHeaderBlock)}
+    if($AudioTlsNoVerify){$AudioArgs+=@('-tls_verify','0')}
+    if($AudioHeaderBlock){$AudioArgs+=@('-headers',$AudioHeaderBlock)}
     $AudioFilter = 'aresample=async=0,asetpts=N/SR/TB'
-    $AudioArgs+=@('-ss',([string]::Format($Invariant,'{0:0.######}',$SeekPosition)),'-i',$ResolvedInput,
+    $AudioArgs+=@('-ss',([string]::Format($Invariant,'{0:0.######}',$SeekPosition)),'-i',$ResolvedAudioInput,
         '-vn','-sn','-sync','audio','-af',$AudioFilter)
     $Psi=[Diagnostics.ProcessStartInfo]::new();$Psi.FileName=$Ffplay
     $Psi.Arguments=(($AudioArgs|ForEach-Object{Quote-Argument([string]$_)})-join' ')

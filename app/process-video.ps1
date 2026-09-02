@@ -489,6 +489,9 @@ function Wait-HostChunkSubmitted($Process, $AcknowledgementCounter, [long] $Expe
 
 $IsNetworkSource = $InputVideo -match '^https?://'
 $ResolvedOnlineSource = $null
+$InputAudioVideo = $InputVideo
+$InputAudioHeadersPath = $InputHeadersPath
+$InputAudioTlsNoVerify = [bool]$InputTlsNoVerify
 if ($IsNetworkSource -and [string]::IsNullOrWhiteSpace($InputHeadersPath)) {
     if (-not (Test-Path -LiteralPath $SourceResolver -PathType Leaf)) { throw "Required file is missing: $SourceResolver" }
     Import-Module $SourceResolver -Force
@@ -498,10 +501,14 @@ if ($IsNetworkSource -and [string]::IsNullOrWhiteSpace($InputHeadersPath)) {
     $InputVideo = [string]$ResolvedOnlineSource.MediaUrl
     $InputHeadersPath = [string]$ResolvedOnlineSource.HeadersPath
     $InputTlsNoVerify = [bool]$ResolvedOnlineSource.TlsNoVerify
+    $InputAudioVideo = [string]$ResolvedOnlineSource.AudioUrl
+    $InputAudioHeadersPath = [string]$ResolvedOnlineSource.AudioHeadersPath
+    $InputAudioTlsNoVerify = [bool]$ResolvedOnlineSource.AudioTlsNoVerify
     Write-Output ('STUDIO_SOURCE_JSON ' + ([ordered]@{
         kind='network'; title=$ResolvedOnlineSource.Title; duration_seconds=$ResolvedOnlineSource.Duration
         width=$ResolvedOnlineSource.Width; height=$ResolvedOnlineSource.Height; format_id=$ResolvedOnlineSource.FormatId
         extractor=$ResolvedOnlineSource.Extractor; max_height=$NetworkMaxHeight
+        audio_format_id=$ResolvedOnlineSource.AudioFormatId
     } | ConvertTo-Json -Compress))
 }
 $RequiredFiles = @($ConfigPath,$Ffmpeg,$Ffprobe,$GuideGeneratorScript,$UpscalerPython,$VideoHost)
@@ -509,6 +516,7 @@ $RequiredDirectories = @()
 if ($DepthModelProfile -in @('DA3Small','DA3Base','DA3Large')) { $RequiredDirectories += $DepthModel } else { $RequiredFiles += $DepthModel }
 if (-not $IsNetworkSource) { $RequiredFiles += $InputVideo }
 if (-not [string]::IsNullOrWhiteSpace($InputHeadersPath)) { $RequiredFiles += $InputHeadersPath }
+if (-not [string]::IsNullOrWhiteSpace($InputAudioHeadersPath) -and $InputAudioHeadersPath -ne $InputHeadersPath) { $RequiredFiles += $InputAudioHeadersPath }
 if ($Upscaler -ne 'None') { $RequiredFiles += @($UpscalerPython,$UpscalerWorker) }
 if ($PreviewOnly) { $RequiredFiles += @($UpscalerPython,$GuideGeneratorScript) }
 if ($DepthModelProfile -ne 'DA2Small') {
@@ -568,6 +576,8 @@ if ($StartSeconds -lt 0) { throw 'Start time cannot be negative.' }
 
 $InputVideo = if ($IsNetworkSource) { [string]$InputVideo } else { [IO.Path]::GetFullPath($InputVideo) }
 $InputHeadersPath = if ([string]::IsNullOrWhiteSpace($InputHeadersPath)) { $null } else { [IO.Path]::GetFullPath($InputHeadersPath) }
+$InputAudioVideo = if ($IsNetworkSource) { [string]$InputAudioVideo } else { $InputVideo }
+$InputAudioHeadersPath = if ([string]::IsNullOrWhiteSpace($InputAudioHeadersPath)) { $InputHeadersPath } else { [IO.Path]::GetFullPath($InputAudioHeadersPath) }
 $InputHeaderBlock = $null
 if ($InputHeadersPath) {
     try {
@@ -581,6 +591,19 @@ if ($InputHeadersPath) {
 $NetworkInputOptions = @()
 if ($InputTlsNoVerify) { $NetworkInputOptions += @('-tls_verify','0') }
 if ($InputHeaderBlock) { $NetworkInputOptions += @('-headers',$InputHeaderBlock) }
+$InputAudioHeaderBlock = $InputHeaderBlock
+if ($InputAudioHeadersPath -and $InputAudioHeadersPath -ne $InputHeadersPath) {
+    try {
+        $AudioHeaderObject = Get-Content -LiteralPath $InputAudioHeadersPath -Raw | ConvertFrom-Json
+        $AudioHeaderLines = foreach ($Property in $AudioHeaderObject.PSObject.Properties) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$Property.Value)) { '{0}: {1}' -f $Property.Name,$Property.Value }
+        }
+        if ($AudioHeaderLines) { $InputAudioHeaderBlock = ($AudioHeaderLines -join "`r`n") + "`r`n" }
+    } catch { throw 'Input audio HTTP headers file is invalid.' }
+}
+$AudioNetworkInputOptions = @()
+if ($InputAudioTlsNoVerify) { $AudioNetworkInputOptions += @('-tls_verify','0') }
+if ($InputAudioHeaderBlock) { $AudioNetworkInputOptions += @('-headers',$InputAudioHeaderBlock) }
 $IsPreviewOnly = [bool]$PreviewOnly
 $RealtimePlaybackStatePath = if ($IsPreviewOnly -and -not [string]::IsNullOrWhiteSpace($RealtimeControlPath)) {
     [IO.Path]::GetFullPath($RealtimeControlPath) + '.playback'
@@ -1707,8 +1730,8 @@ try {
         Emit-Progress 'Assembly' 'Joining neural-rendered chunks' 91 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
         if (-not $DirectEncode) { Join-EncodedChunks $EncodedChunkDirectory $VideoOnly $Chunks 'chunks-final.txt' }
         $StartText = [string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.######}',$StartSeconds)
-        $MuxArguments = @('-y','-v','error') + $NetworkInputOptions + @(
-            '-ss',$StartText,'-i',$InputVideo,'-i',$VideoOnly,
+        $MuxArguments = @('-y','-v','error') + $AudioNetworkInputOptions + @(
+            '-ss',$StartText,'-i',$InputAudioVideo,'-i',$VideoOnly,
             '-map','1:v:0','-map','0:a?','-c:v','copy','-c:a','aac','-b:a','192k','-shortest','-movflags','+faststart',$FlatOutput
         )
         Run-Tool $Ffmpeg $MuxArguments 'Final audio/video mux failed'
