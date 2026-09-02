@@ -43,6 +43,17 @@ class VrDepthWorkerTests(unittest.TestCase):
         self.assertGreaterEqual(float(normalized.min()), 0.0)
         self.assertLessEqual(float(normalized.max()), 1.0)
 
+    def test_motion_quality_recovers_premultiplied_vectors(self) -> None:
+        motion = np.zeros((8, 10), dtype=vr.MOTION_DTYPE)
+        motion["valid"] = 1
+        motion["confidence"] = 128
+        confidence = 128.0 / 255.0
+        motion["dx"] = np.float16(12.0 * confidence)
+        motion["dy"] = np.float16(5.0 * confidence)
+        mean_confidence, pixels = vr.motion_quality(motion)
+        self.assertAlmostEqual(mean_confidence, confidence, places=3)
+        self.assertAlmostEqual(pixels, 13.0, places=1)
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_layered_splat_fills_disocclusions(self) -> None:
         device = torch.device("cuda")

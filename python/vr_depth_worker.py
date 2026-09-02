@@ -65,16 +65,16 @@ def motion_frames(paths: list[Path]) -> Iterator[tuple[np.ndarray, int, int]]:
                 yield data.reshape(grid_height, grid_width), width, height
 
 
-def read_exact(stream: BinaryIO, extent: int) -> bytes:
-    data = bytearray(extent)
-    view = memoryview(data)
+def read_exact_into(stream: BinaryIO, target: memoryview) -> int:
+    """Fill a reusable (normally CUDA-pinned) host buffer without allocations."""
+    view = target.cast("B")
     offset = 0
-    while offset < extent:
+    while offset < len(view):
         received = stream.readinto(view[offset:])
         if not received:
             break
         offset += received
-    return bytes(view[:offset])
+    return offset
 
 
 def motion_compensated_depth(
@@ -208,6 +208,27 @@ def shape_disparity_delta(delta: torch.Tensor, curve: str, comfort: float) -> to
         comfortable = torch.tanh(work * 2.2) / 2.2
         work = work.lerp(comfortable, amount)
     return work
+
+
+def motion_quality(motion_np: np.ndarray | None) -> tuple[float, float]:
+    """Return mean confidence and robust full-frame motion in pixels."""
+    if motion_np is None:
+        return 1.0, 0.0
+    confidence = (
+        motion_np["valid"].astype(np.float32)
+        * motion_np["confidence"].astype(np.float32)
+        * (1.0 / 255.0)
+    )
+    usable = confidence > (1.0 / 255.0)
+    if not np.any(usable):
+        return 0.0, 0.0
+    denominator = np.maximum(confidence, 1.0 / 255.0)
+    dx = motion_np["dx"].astype(np.float32) / denominator
+    dy = motion_np["dy"].astype(np.float32) / denominator
+    magnitude = np.sqrt(dx * dx + dy * dy)
+    # The 75th percentile responds to camera/subject motion without allowing a
+    # few bad vectors to collapse the stereo effect for the whole frame.
+    return float(np.mean(confidence)), float(np.percentile(magnitude[usable], 75.0))
 
 
 def background_plate(
@@ -486,6 +507,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temporal-fill", type=float, default=0.75)
     parser.add_argument("--temporal-fill-confidence", type=float, default=0.35)
     parser.add_argument("--inpaint-sharpen", type=float, default=0.35)
+    parser.add_argument("--adaptive-comfort", type=float, default=0.65)
+    parser.add_argument("--motion-safety-pixels", type=float, default=14.0)
+    parser.add_argument("--scene-cut-ramp-frames", type=int, default=6)
     parser.add_argument("--edge-feather", type=float, default=1.0)
     parser.add_argument("--temporal-smoothing", type=float, default=0.55)
     parser.add_argument("--max-disparity-percent", type=float, default=2.4)
@@ -561,11 +585,23 @@ def main() -> int:
         torch.arange(eye_height, device=device, dtype=torch.int64)[:, None] * eye_width
     ).expand(-1, eye_width)
     extent = width * height * 3
+    # Flat RGB pipes are still required for the portable FFmpeg build, but the
+    # old loop allocated and copied two 25 MB host buffers per 4K frame. Keep
+    # reusable page-locked staging on both sides so CUDA DMA can use the copy
+    # engines and Python never materializes frame.tobytes().
+    input_staging = torch.empty((height, width, 3), dtype=torch.uint8, pin_memory=True)
+    input_staging_view = memoryview(input_staging.numpy())
+    output_staging = torch.empty(
+        (output_height, output_width, 3), dtype=torch.uint8, pin_memory=True
+    )
+    output_staging_view = memoryview(output_staging.numpy()).cast("B")
     started = time.perf_counter()
     processed = 0
     hole_sum = 0.0
     temporal_repair_sum = 0.0
     convergence_sum = 0.0
+    adaptive_scale_sum = 0.0
+    motion_pixels_sum = 0.0
     previous_depth: torch.Tensor | None = None
     motion_grid_cache: dict[tuple[int, int], torch.Tensor] = {}
     history_grid_cache: dict[tuple[int, int, int, int], torch.Tensor] = {}
@@ -575,29 +611,22 @@ def main() -> int:
     previous_right_valid: torch.Tensor | None = None
     previous_range: tuple[float, float] | None = None
     previous_convergence: float | None = None
+    previous_adaptive_scale: float | None = None
+    frames_since_scene_cut = max(0, args.scene_cut_ramp_frames)
     try:
         with torch.inference_mode():
             for index, (depth_np, _, _) in enumerate(depth_frames(depth_paths)):
                 if index >= args.frames:
                     break
-                raw = read_exact(decoder.stdout, extent)
-                if len(raw) != extent:
+                received = read_exact_into(decoder.stdout, input_staging_view)
+                if received != extent:
                     details = decoder.stderr.read().decode("utf-8", errors="replace").strip()
                     raise RuntimeError(f"video decoder ended at frame {index}: {details}")
-                frame_np = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3).copy()
-                frame = torch.from_numpy(frame_np).to(device=device, non_blocking=True)
+                frame = input_staging.to(device=device, non_blocking=True)
                 frame = frame.permute(2, 0, 1)[None].to(dtype=dtype).div_(255.0)
                 depth = torch.from_numpy(depth_np.astype(np.float32, copy=False)).to(device)[None, None]
                 motion_np = next(motion_iterator)[0] if motion_iterator is not None else None
-                motion_confidence = 0.0
-                if motion_np is not None:
-                    motion_confidence = float(
-                        np.mean(
-                            motion_np["valid"].astype(np.float32)
-                            * motion_np["confidence"].astype(np.float32)
-                            * (1.0 / 255.0)
-                        )
-                    )
+                motion_confidence, motion_pixels = motion_quality(motion_np)
                 scene_change = motion_np is not None and motion_confidence < 0.035
                 if scene_change:
                     previous_depth = None
@@ -605,6 +634,10 @@ def main() -> int:
                     previous_left_valid = previous_right_valid = None
                     previous_range = None
                     previous_convergence = None
+                    previous_adaptive_scale = None
+                    frames_since_scene_cut = 0
+                else:
+                    frames_since_scene_cut += 1
                 temporal = max(0.0, min(0.95, args.temporal_smoothing))
                 if args.temporal_mode == "off":
                     temporal = 0.0
@@ -646,6 +679,31 @@ def main() -> int:
                 delta = torch.where(delta >= 0, delta * foreground, delta * background)
                 limit = eye_width * (min(5.0, max(0.5, args.max_disparity_percent)) / 100.0)
                 disparity = delta * (limit * max(0.1, min(3.0, args.eye_separation)))
+                adaptive = max(0.0, min(1.0, args.adaptive_comfort))
+                safety_pixels = max(1.0, min(40.0, args.motion_safety_pixels))
+                motion_risk = min(1.0, motion_pixels / safety_pixels)
+                confidence_risk = max(0.0, min(1.0, (0.35 - motion_confidence) / 0.35))
+                adaptive_target = 1.0 - adaptive * (0.38 * motion_risk + 0.24 * confidence_risk)
+                ramp_frames = max(0, min(24, args.scene_cut_ramp_frames))
+                if ramp_frames > 0 and frames_since_scene_cut < ramp_frames:
+                    cut_progress = (frames_since_scene_cut + 1) / float(ramp_frames)
+                    # Never collapse the intended stereo impact. The ramp only
+                    # removes the uncomfortable instantaneous jump at a cut.
+                    adaptive_target *= 0.70 + 0.30 * cut_progress
+                adaptive_target = max(0.35, min(1.0, adaptive_target))
+                if previous_adaptive_scale is None:
+                    adaptive_scale = adaptive_target
+                else:
+                    # Reduce quickly for comfort, restore slowly so the volume
+                    # never "breathes" when motion confidence oscillates.
+                    follow = 0.55 if adaptive_target < previous_adaptive_scale else 0.30
+                    adaptive_scale = previous_adaptive_scale + follow * (
+                        adaptive_target - previous_adaptive_scale
+                    )
+                previous_adaptive_scale = adaptive_scale
+                disparity = disparity * adaptive_scale
+                adaptive_scale_sum += adaptive_scale
+                motion_pixels_sum += motion_pixels
                 if args.eye_anchor == "left":
                     left_shift, right_shift = 0.0, -2.0
                 elif args.eye_anchor == "right":
@@ -739,8 +797,12 @@ def main() -> int:
                     stereo = torch.cat((left, right), dim=3)
                 else:
                     stereo = torch.cat((left, right), dim=2)
-                stereo_np = stereo[0].permute(1, 2, 0).mul_(255.0).clamp_(0, 255).byte().cpu().numpy()
-                encoder_process.stdin.write(stereo_np.tobytes())
+                stereo_u8 = (
+                    stereo[0].permute(1, 2, 0).mul_(255.0).clamp_(0, 255).byte().contiguous()
+                )
+                output_staging.copy_(stereo_u8, non_blocking=True)
+                torch.cuda.current_stream().synchronize()
+                encoder_process.stdin.write(output_staging_view)
                 processed += 1
                 if processed == 1 or processed % 30 == 0 or processed == args.frames:
                     elapsed = time.perf_counter() - started
@@ -752,6 +814,8 @@ def main() -> int:
                                 "holes_percent": 100.0 * hole_sum / processed,
                                 "temporal_repair_percent": 100.0 * temporal_repair_sum / processed,
                                 "convergence": convergence_sum / processed,
+                                "adaptive_stereo_scale": adaptive_scale_sum / processed,
+                                "motion_pixels_p75": motion_pixels_sum / processed,
                                 "method": args.stereo_method,
                                 "temporal": "motion" if use_motion else args.temporal_mode,
                             }, separators=(",", ":"),
@@ -777,6 +841,8 @@ def main() -> int:
                 "holes_percent": 100.0 * hole_sum / max(processed, 1),
                 "temporal_repair_percent": 100.0 * temporal_repair_sum / max(processed, 1),
                 "mean_convergence": convergence_sum / max(processed, 1),
+                "mean_adaptive_stereo_scale": adaptive_scale_sum / max(processed, 1),
+                "mean_motion_pixels_p75": motion_pixels_sum / max(processed, 1),
                 "method": args.stereo_method,
                 "temporal": "motion" if use_motion else args.temporal_mode,
                 "pixel_format": args.pixel_format, "output": str(args.output_video),

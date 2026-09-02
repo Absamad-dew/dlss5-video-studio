@@ -88,9 +88,20 @@ try {
     $starts = [regex]::Matches($text,'(?m)^STUDIO_PLAYER_AUDIO_STARTED position=(?<position>[0-9.]+) rate=(?<rate>[0-9.]+) pid=(?<pid>[0-9]+)$')
     $holds = [regex]::Matches($text,'(?m)^STUDIO_PLAYER_AUDIO_HOLD drift=(?<drift>[0-9.]+)')
     $maxHoldDrift = if ($holds.Count) { ($holds | ForEach-Object { [double]$_.Groups['drift'].Value } | Measure-Object -Maximum).Maximum } else { 0.0 }
+    $syncSamples = [regex]::Matches($text,'(?m)^STUDIO_PLAYER_AUDIO_SYNC video=(?<video>[0-9.]+) audio=[0-9.]+ drift=(?<drift>-?[0-9.]+)$')
+    # The first published sample can precede the first full native telemetry
+    # interval. Measure steady playback after one media second.
+    $steadySyncSamples = @($syncSamples | Where-Object { [double]$_.Groups['video'].Value -ge 1.0 })
+    $maxAbsoluteSyncDrift = if ($steadySyncSamples.Count) {
+        ($steadySyncSamples | ForEach-Object { [math]::Abs([double]$_.Groups['drift'].Value) } | Measure-Object -Maximum).Maximum
+    } else { [double]::PositiveInfinity }
     if (-not $closeSent -or $starts.Count -ne 1) {
         $audioEvents = @($lines | Where-Object { $_ -match '^STUDIO_PLAYER_AUDIO_' })
         throw "audio endpoint was not stable: starts=$($starts.Count) close=$closeSent events=$($audioEvents -join ' || ')"
+    }
+    if ($holds.Count -ne 0 -or $steadySyncSamples.Count -lt 4 -or $maxAbsoluteSyncDrift -gt 0.15) {
+        $syncLines = @($lines | Where-Object { $_ -match '^STUDIO_PLAYER_AUDIO_SYNC ' })
+        throw "audio timeline was unstable: holds=$($holds.Count) samples=$($syncSamples.Count) max_drift=$maxAbsoluteSyncDrift timeline=$($syncLines -join ' || ')"
     }
     [ordered]@{
         status='ok';output_mode=$OutputMode;performance_profile=$PerformanceProfile;render_preset=$RenderPreset
@@ -99,6 +110,7 @@ try {
         initial_media_position=[double]$starts[0].Groups['position'].Value
         selected_playback_rate=[double]$starts[0].Groups['rate'].Value
         drift_holds=$holds.Count;max_hold_drift_seconds=[math]::Round([double]$maxHoldDrift,3)
+        sync_samples=$syncSamples.Count;steady_sync_samples=$steadySyncSamples.Count;max_absolute_sync_drift_seconds=[math]::Round([double]$maxAbsoluteSyncDrift,3)
         audio_exits=([regex]::Matches($text,'(?m)^STUDIO_PLAYER_AUDIO_EXITED ')).Count
         audio_errors=([regex]::Matches($text,'(?m)^STUDIO_PLAYER_AUDIO_ERROR ')).Count
         elapsed_seconds=[math]::Round($watch.Elapsed.TotalSeconds,2)

@@ -1,16 +1,16 @@
-# DLSS5 Video Studio 15
+# DLSS5 Video Studio 16
 
 Windows video player/processor that reconstructs motion and depth from ordinary video, evaluates NVIDIA NGX through a D3D12 host, and can present the result with official NVIDIA DLSS Frame Generation through Streamline + Reflex.
 
 The repository contains source code and dependency installers. It intentionally excludes proprietary NVIDIA DLLs, the user's custom `nvngx_dlssnr.dll`, FFmpeg binaries, ReShade binaries, portable Python, and very large optional model weights. A small open-licensed core model pack for an existing V11 portable folder is available from [GitHub Releases](https://github.com/Absamad-dew/dlss5-video-studio/releases).
 
-## Version 15 highlights
+## Version 16 highlights
 
 - three dedicated workspaces: Realtime, Recording, and VR / 3D;
 - five universal profiles — Ultra Fast, Fast, Medium, Heavy, and Maximum — with automatic adaptation by VRAM, resolution, and CPU capacity;
 - true multi-chunk prebuffering, adjustable 3–30 second startup buffer and chunk size, plus measured underrun diagnostics;
 - exact live buffer telemetry in seconds with refill FPS/rate, optional maximum-speed pause filling, and a measured sample-clock/displayed-frame timeline instead of an independent wall-clock audio process;
-- pause and short rebuffer events now pause the actual SDL audio endpoint and preserve one decoder PID; queued native events are drained/coalesced so obsolete buffer timestamps cannot disturb playback later;
+- audio is decoded and its SDL/WASAPI endpoint is prewarmed while the neural buffer fills, so playback starts on the same media clock; pause/rebuffer freeze the real sample clock, and periodic drift muting/restarts have been removed;
 - unconditional loading and log validation of the adjacent ReShade/DLSS5 add-on, so Feature 18 is active even when NVIDIA Frame Generation is disabled;
 - source-resolution RGB transport through pagefile-backed shared memory, followed by a single D3D12 cubic expansion pass that also reconstructs compact motion/depth guides;
 - an isolated portable Python runtime, preventing a user-level CPU-only ONNX Runtime from shadowing the bundled DirectML provider;
@@ -27,6 +27,9 @@ The repository contains source code and dependency installers. It intentionally 
 - selectable source-stream resolution for network URLs and an optional right-hand preview pane;
 - H.264/H.265 recording from local files or supported page URLs, with automatic output names;
 - fine recording and VR overrides for guide resolution, depth cadence, adaptive thresholds, scene cuts, DIS/RAFT motion, RAFT updates, and chunk size.
+- recording and VR reuse realtime's pagefile-backed RGB/guide transport and bounded passive OpenMP scheduling; depth VR preserves only the sidecars it needs instead of writing full RGB chunks to disk;
+- adaptive stereo comfort measures robust motion and vector confidence, damps unsafe parallax on difficult motion, ramps depth after shot cuts, and slowly returns full 3D impact without breathing;
+- the CUDA stereo worker reuses page-locked input/output buffers, removing repeated large host allocations and `tobytes()` copies from high-resolution VR export.
 
 The program no longer exposes GPU-model-specific profiles. `Auto` classifies available VRAM internally, while the five user-facing levels control the accuracy/cadence of guide, motion, and depth generation. Output geometry and the internal DLSS render preset remain independent controls.
 
@@ -45,6 +48,8 @@ Version 13.8 removes the remaining high-resolution realtime stalls. RGB plus pac
 Version 14 rebuilds DepthSBS output around a motion-stabilized layered renderer. Laptop tests rendered the new depth stereo stage at 76.46 FPS for a 60-frame 606×1080 Half-SBS job and 57.88 FPS at 810×1440 using one anchored source eye. Both produced all 60 requested frames and validated as HEVC Main/yuv420p. The optional DA3 Large checkpoint also completed together with DLSS5 and RAFT inside the RTX 4060 Laptop's 8 GB VRAM; after warm-up its individual 392-pixel depth passes were about 87–141 ms, so it is exposed as an offline maximum-quality choice rather than a realtime default.
 
 Version 15 adds Temporal LDI and three VR presets. A laptop end-to-end smoke test completed source decoding, guide generation, genuine Feature 18, stereo synthesis, audio mux, metadata injection, and first-frame validation for all eight requested frames. The direct 604×540 Full-SBS Temporal LDI stage measured 19.19 FPS including both generated eyes. A separate test verified the maximum path with three genuine Feature 18 evaluations: one before stereo and one independently for each eye; the resulting HEVC Main/yuv420p file contained every requested frame and decoded successfully.
+
+Version 16 removes the recurring audio hold/release loop. A 25-second laptop playback kept one prewarmed audio PID and produced no forced holds; the stricter sampled-clock regression measured at most 51 ms steady drift. Three pause/resume cycles preserved the same device and the paused sample clock moved by at most 38 ms. Recording and DepthSBS smoke tests used shared RGB memory, completed every requested frame, and decoded successfully. The adaptive Temporal LDI test reports its actual scene/motion stereo scale in progress telemetry rather than silently changing strength.
 
 The model and renderer trade-offs, including DepthCrafter, StereoCrafter, and M2SVid, are documented in VR_RESEARCH_RU.md.
 

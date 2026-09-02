@@ -164,13 +164,15 @@ $AudioSeekPosition = 0.0
 $AudioPlaybackRate = 1.0
 $AudioClockMedia = [double]::NaN
 $AudioClockObservedWall = 0.0
-$LatestVideoRate = 1.0
 $AudioPendingStart = $false
 $AudioPendingSince = 0.0
 $AudioPendingPosition = 0.0
 $VideoPaused = $false
 $BufferingPaused = $false
 $LastAudioStartWall = 0.0
+$AudioDriftViolationSince = 0.0
+$LastAudioDriftPublishWall = 0.0
+$LastAudioSyncSampleWall = 0.0
 $LastTelemetryWall = 0.0
 $LastTelemetryFrame = -1L
 $VideoPlaybackStarted = $false
@@ -433,6 +435,7 @@ function Start-Audio([double] $Position) {
     $script:AudioClockMedia=[double]::NaN
     $script:AudioClockObservedWall=0.0
     $script:LastAudioStartWall=Get-MonotonicSeconds
+    $script:AudioDriftViolationSince=0.0
     Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_STARTED position={0:0.######} rate={1:0.###} pid={2}',$SeekPosition,$script:AudioPlaybackRate,$script:AudioProcess.Id))
 }
 
@@ -450,7 +453,7 @@ function Suspend-Audio([double] $Position,[string] $Reason = 'explicit') {
     }
 }
 
-function Resume-Audio([double] $Position) {
+function Resume-Audio([double] $Position,[switch] $ForceAlign) {
     if (-not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused -or $script:BufferingPaused) { return }
     if ($script:AudioProcess -and -not $script:AudioProcess.HasExited) {
         if ($script:AudioPausePending -and -not $script:AudioSuspended) {
@@ -468,9 +471,17 @@ function Resume-Audio([double] $Position) {
         }
         $AudioPosition = Get-EstimatedAudioPosition
         $ResumeDelta = if ([double]::IsNaN($AudioPosition)) { 0.0 } else { [math]::Abs($Position-$AudioPosition) }
-        # Pause/rebuffer must never reopen a healthy endpoint. If the clocks
-        # differ, the continuous drift controller holds or releases this same
-        # device; a new seek is reserved for an actual player SEEK operation.
+        # A paused SDL endpoint is cheap to preserve, but it is only safe when
+        # its sample clock still describes the exact video position. Buffer
+        # underruns and a pause on a chunk boundary can arrive a little late.
+        # Re-open once at the authoritative native timestamp instead of
+        # resuming permanently ahead and then chopping sound on every frame.
+        if ($ForceAlign -and -not [double]::IsNaN($AudioPosition) -and $ResumeDelta -gt 0.12) {
+            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_REALIGN transition position={0:0.######} audio={1:0.######} drift={2:0.###}',
+                $Position,$AudioPosition,$ResumeDelta))
+            Start-Audio $Position
+            return
+        }
         if (Set-AudioDevicePaused $false $Position '') {
             Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RESUMED position={0:0.######} audio={1:0.######} drift={2:0.###} pid={3}',$Position,$AudioPosition,$ResumeDelta,$script:AudioProcess.Id))
             return
@@ -487,24 +498,23 @@ function Update-AudioClockFromTelemetry {
     if ($Telemetry -notmatch 'media_seconds=(?<p>[0-9.]+)\s+real_fps=(?<r>[0-9.]+)\s+display_fps=(?<d>[0-9.]+)\s+real_frames=(?<f>[0-9]+)') { return }
     $Frame = [long]$Matches.f
     $Position = [double]::Parse($Matches.p,$Invariant)
-    $RealFps = [double]::Parse($Matches.r,$Invariant)
     $Now = Get-MonotonicSeconds
     if ($Frame -ne $script:LastTelemetryFrame) {
         $script:LastTelemetryFrame = $Frame
         $script:LastTelemetryWall = $Now
         $script:LatestVideoPosition = $Position
         $script:LatestRealFrames = $Frame
-        if ($script:ProducerFps -gt 0.1 -and $RealFps -gt 0.1) {
-            $ObservedRate = [math]::Max(0.1,[math]::Min(1.0,$RealFps/$script:ProducerFps))
-            $script:LatestVideoRate = $ObservedRate
-        }
     } else {
         $Position = $script:LatestVideoPosition
     }
     if (-not $script:VideoPlaybackStarted -or -not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused -or $script:BufferingPaused) { return }
     if ($script:AudioPendingStart) {
         if (($Now-$script:AudioPendingSince) -lt 0.22) { return }
-        $StartPosition = $script:LatestVideoPosition + [math]::Max(0.0,$Now-$script:LastTelemetryWall)*$script:LatestVideoRate
+        # Once playback is released from a prepared buffer, the native player
+        # advances media time at source speed. real_fps is a throughput sample,
+        # not a playback-rate clock; using it here made audio start late after a
+        # momentary slow chunk and then try to catch up audibly.
+        $StartPosition = $script:LatestVideoPosition + [math]::Max(0.0,$Now-$script:LastTelemetryWall)
         $StartPosition = [math]::Max($script:AudioPendingPosition,$StartPosition)
         # Keep one normal-speed audio endpoint for the whole playback session.
         # Early display-rate telemetry is deliberately ignored here: startup
@@ -525,20 +535,33 @@ function Update-AudioClockFromTelemetry {
         return
     }
 
-    # Fine sync uses the actual ffplay sample clock. Hold only audio when it is
-    # ahead; resume after the next displayed frames close the gap. This also
-    # bounds drift if display progress temporarily falls behind source speed.
+    # Both endpoints run from monotonic time after the prepared buffer starts.
+    # Do not bang-bang pause or periodically reopen audio for telemetry jitter:
+    # both behaviours create audible holes. Exact alignment is performed at
+    # startup, seek, resume and BUFFER_READY; ordinary underruns are therefore
+    # handled only by their authoritative native transition.
     $AudioPosition = Get-EstimatedAudioPosition $Now
     if (-not [double]::IsNaN($AudioPosition)) {
-        $VideoPosition = $Position + [math]::Max(0.0,$Now-$script:LastTelemetryWall)*$script:LatestVideoRate
+        $VideoPosition = $Position + [math]::Max(0.0,$Now-$script:LastTelemetryWall)
         $Drift = $AudioPosition-$VideoPosition
-        if (-not $script:AudioSuspended -and $Drift -gt 0.18) {
-            Suspend-Audio $VideoPosition 'drift'
-            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_HOLD drift={0:0.###} audio={1:0.###} video={2:0.###}',$Drift,$AudioPosition,$VideoPosition))
-        } elseif ($script:AudioSuspended -and $script:AudioSuspendReason -eq 'drift' -and $Drift -le 0.025) {
-            if (Set-AudioDevicePaused $false $VideoPosition '') {
-                Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RELEASE drift={0:0.###} audio={1:0.###} video={2:0.###}',$Drift,$AudioPosition,$VideoPosition))
+        if (($Now-$script:LastAudioSyncSampleWall) -ge 1.0) {
+            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_SYNC video={0:0.###} audio={1:0.###} drift={2:0.###}',
+                $VideoPosition,$AudioPosition,$Drift))
+            $script:LastAudioSyncSampleWall = $Now
+        }
+        if ([math]::Abs($Drift) -gt 0.35) {
+            if ($script:AudioDriftViolationSince -le 0.0) {
+                $script:AudioDriftViolationSince = $Now
+            } elseif (($Now-$script:AudioDriftViolationSince) -ge 1.25 -and
+                      ($Now-$script:LastAudioDriftPublishWall) -ge 10.0) {
+                if (($Now-$script:LastAudioDriftPublishWall) -ge 1.0) {
+                    Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_DRIFT_DIAGNOSTIC position={0:0.###} audio={1:0.###} drift={2:0.###}',
+                        $VideoPosition,$AudioPosition,$Drift))
+                    $script:LastAudioDriftPublishWall = $Now
+                }
             }
+        } else {
+            $script:AudioDriftViolationSince = 0.0
         }
     }
 }
@@ -559,9 +582,10 @@ while ($true) {
     Set-PlaybackState 'buffering'
     if (Test-Path -LiteralPath $BufferStatePath) { Remove-Item -LiteralPath $BufferStatePath -Force }
     $script:LastTelemetryWall=0.0;$script:LastTelemetryFrame=-1L;$script:LastAudioStartWall=0.0
+    $script:AudioDriftViolationSince=0.0;$script:LastAudioDriftPublishWall=0.0;$script:LastAudioSyncSampleWall=0.0
     $script:AudioSuspended=$false;$script:AudioSuspendedPosition=0.0;$script:AudioSuspendReason=''
     $script:AudioPausePending=$false;$script:AudioPausePendingPosition=0.0;$script:AudioPausePendingReason=''
-    $script:AudioPlaybackRate=1.0;$script:LatestVideoRate=1.0
+    $script:AudioPlaybackRate=1.0
     $script:AudioPendingStart=$false;$script:AudioPendingSince=0.0;$script:AudioPendingPosition=$CurrentStart
     $script:VideoPlaybackStarted=$false;$script:VideoPaused=$false;$script:BufferingPaused=$false;$script:LatestVideoPosition=$CurrentStart
     $script:LatestRealFrames=0L;$script:ProducerSentFrames=0L;$script:ProducerTargetFrames=0L;$script:ProducerFps=0.0
@@ -607,6 +631,17 @@ while ($true) {
     $Child.StartInfo = $Psi
     if (-not $Child.Start()) { throw 'Could not start the realtime processing pipeline.' }
 
+    # Open and pause the audio endpoint while the neural buffer is being built.
+    # Decoder/device startup previously happened after the first video frame,
+    # leaving sound 0.6-1.8 seconds late. The prewarmed endpoint starts both
+    # clocks together without muting or dropping any samples during playback.
+    if ($EnableAudio -and -not $script:AudioMuted) {
+        Start-Audio $CurrentStart
+        Suspend-Audio $CurrentStart 'startup'
+        $script:BufferingPaused = $true
+        Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_PREWARMED position={0:0.###}',$CurrentStart))
+    }
+
     Write-Output ('STUDIO_PLAYER_SESSION ' + (@{start_seconds=[math]::Round($CurrentStart,3);pid=$Child.Id}|ConvertTo-Json -Compress))
     $Stdout = $Child.StandardOutput.ReadLineAsync()
     $Stderr = $Child.StandardError.ReadLineAsync()
@@ -639,9 +674,9 @@ while ($true) {
 
         Update-AudioClockFromTelemetry
         Publish-LiveBufferStatus
-        # The actual ffplay sample clock is continuously compared with the
-        # media position of displayed frames. Pause, buffering and sustained
-        # render slowdown are all handled by the same timeline controller.
+        # The sample clock is observed for diagnostics; state transitions from
+        # the native displayed-frame timeline are the only synchronization
+        # authority.
 
         try {
             $Commands = [Collections.Generic.List[string]]::new()
@@ -681,7 +716,7 @@ while ($true) {
                         $Action = 'seek'
                     }
                 } elseif ($Command -match '^PLAYING\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
-                    $script:VideoPaused=$false
+                    $script:VideoPaused=$false;$script:BufferingPaused=$false
                     $Position=[double]::Parse($Matches.s,$Invariant)
                     $script:VideoPlaybackStarted=$true
                     Set-PlaybackState 'playing'
@@ -698,7 +733,7 @@ while ($true) {
                         $script:AudioPendingSince=Get-MonotonicSeconds
                         $script:AudioPendingPosition=$AudioPosition
                     } else {
-                        Resume-Audio $AudioPosition
+                        Resume-Audio $AudioPosition -ForceAlign
                     }
                     Write-Output ('STUDIO_PLAYER_PLAYING ' + (@{
                         position_seconds=[math]::Round($Position,3);audio_position_seconds=[math]::Round($AudioPosition,3)
@@ -710,14 +745,14 @@ while ($true) {
                     Write-Output ('STUDIO_PLAYER_REBUFFERING ' + $Matches.s)
                 } elseif ($Command -match '^BUFFER_READY\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
                     $script:BufferingPaused=$false
-                    if(-not $script:VideoPaused){Set-PlaybackState 'playing';Resume-Audio ([double]::Parse($Matches.s,$Invariant))}
+                    if(-not $script:VideoPaused){Set-PlaybackState 'playing';Resume-Audio ([double]::Parse($Matches.s,$Invariant)) -ForceAlign}
                     Publish-LiveBufferStatus -Force
                     Write-Output ('STUDIO_PLAYER_REBUFFERED ' + $Matches.s)
                 } elseif ($Command -match '^PAUSE\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
                     $script:VideoPaused=$true;Set-PlaybackState 'paused';Suspend-Audio ([double]::Parse($Matches.s,$Invariant)) 'user';Publish-LiveBufferStatus -Force
                     Write-Output ('STUDIO_PLAYER_PAUSED ' + $Matches.s)
                 } elseif ($Command -match '^RESUME\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
-                    $script:VideoPaused=$false;Set-PlaybackState 'playing';Resume-Audio ([double]::Parse($Matches.s,$Invariant));Publish-LiveBufferStatus -Force
+                    $script:VideoPaused=$false;Set-PlaybackState 'playing';Resume-Audio ([double]::Parse($Matches.s,$Invariant)) -ForceAlign;Publish-LiveBufferStatus -Force
                     Write-Output ('STUDIO_PLAYER_RESUMED ' + $Matches.s)
                 } elseif ($Command -match '^MUTE\s+(?<s>[0-9]+(?:\.[0-9]+)?)$') {
                     $script:AudioMuted=$true;Stop-Audio

@@ -45,6 +45,9 @@ param(
     [ValidateRange(0.0,1.0)] [double] $VRTemporalFill = 0.75,
     [ValidateRange(0.0,1.0)] [double] $VRTemporalFillConfidence = 0.35,
     [ValidateRange(0.0,1.0)] [double] $VRInpaintSharpen = 0.35,
+    [ValidateRange(0.0,1.0)] [double] $VRAdaptiveComfort = 0.65,
+    [ValidateRange(1.0,40.0)] [double] $VRMotionSafetyPixels = 14.0,
+    [ValidateRange(0,24)] [int] $VRSceneCutRampFrames = 6,
     [ValidateSet(0,72,90,120)] [int] $VRTargetFps = 0,
     [switch] $VREyeSwap,
     [double] $StartSeconds = 0,
@@ -819,23 +822,29 @@ $PhysicalMemoryBytes = try {
     [long](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory
 } catch { 16GB }
 $SharedTransportBudgetBytes = [long][math]::Min([double]6GB,[math]::Max([double]1GB,[double]$PhysicalMemoryBytes*0.25))
-$SharedRgbPlannedBytes = if ($IsPreviewOnly) {
-    [long]($RealtimeBufferCapacityFrames+2*$ChunkSize)*[long]$RgbTransportWidth*[long]$RgbTransportHeight*3L
-} else { 0L }
+$SharedTransportWindowFrames = if ($IsPreviewOnly) {
+    [int]($RealtimeBufferCapacityFrames+2*$ChunkSize)
+} else {
+    # Recording/VR only has the current, prefetched and GPU-submitted chunk
+    # live at once. Reuse the realtime pagefile-backed transport for that
+    # bounded window instead of round-tripping every RGB frame through an SSD.
+    [int][math]::Min($TotalFrames,3*$ChunkSize)
+}
+$SharedRgbPlannedBytes = [long]$SharedTransportWindowFrames*[long]$RgbTransportWidth*[long]$RgbTransportHeight*3L
 $SharedGuideTile = [int][math]::Max(1,[math]::Ceiling($DlssInputWidth/[double][math]::Max(64,$GuideWidth)))
 $SharedGuideWidth = [int][math]::Ceiling($DlssInputWidth/[double]$SharedGuideTile)
 $SharedGuideHeight = [int][math]::Ceiling($DlssInputHeight/[double]$SharedGuideTile)
-$SharedGuidePlannedBytes = if ($IsPreviewOnly) {
+$SharedGuidePlannedBytes = if ($VRMode -ne 'DepthSBS') {
     # Six packed motion bytes plus one FP16 depth value per guide pixel.
-    [long]($RealtimeBufferCapacityFrames+2*$ChunkSize)*[long]$SharedGuideWidth*[long]$SharedGuideHeight*8L
+    [long]$SharedTransportWindowFrames*[long]$SharedGuideWidth*[long]$SharedGuideHeight*8L
 } else { 0L }
 $SharedTransportPlannedBytes = $SharedRgbPlannedBytes + $SharedGuidePlannedBytes
 # Pagefile-backed named mappings remove both RGB and compact motion/depth from
 # the SSD path. Keep a strict RAM/commit budget so long buffers fall back to
 # files instead of pressuring the machine.
-$UseSharedRgbTransport = $IsPreviewOnly -and -not $VsrBeforeDlss -and `
+$UseSharedRgbTransport = -not $KeepTemporaryFiles -and -not $VsrBeforeDlss -and `
     $SharedTransportPlannedBytes -gt 0 -and $SharedTransportPlannedBytes -le $SharedTransportBudgetBytes
-$UseSharedGuideTransport = $UseSharedRgbTransport
+$UseSharedGuideTransport = $UseSharedRgbTransport -and $VRMode -ne 'DepthSBS'
 $SharedRgbNamePrefix = 'd5rgb_' + (($RunId -replace '[^A-Za-z0-9_-]','_'))
 $SharedGuideNamePrefix = 'd5guide_' + (($RunId -replace '[^A-Za-z0-9_-]','_'))
 $RealtimeChunkAckMapName = if ($IsPreviewOnly) {
@@ -885,6 +894,15 @@ $RealtimeAffinityPartition = if ($IsPreviewOnly) { Get-RealtimeAffinityPartition
 $RealtimeHostOpenMpThreads = if ($RealtimeAffinityPartition) {
     [int][math]::Min(8,$RealtimeAffinityPartition.HostLogicalProcessors)
 } else { 0 }
+$HostOpenMpThreads = if ($RealtimeHostOpenMpThreads -gt 0) {
+    $RealtimeHostOpenMpThreads
+} else {
+    # The native upload/conversion helpers are bandwidth bound. An unbounded
+    # OpenMP pool steals cores from FFmpeg and the guide worker without making
+    # Feature 18 faster; use the same passive, bounded policy in every mode.
+    $LogicalProcessors = [Environment]::ProcessorCount
+    [int][math]::Max(2,[math]::Min(12,[math]::Ceiling($LogicalProcessors/2.0)))
+}
 $PreviousControllerAffinity = [int64](Get-Process -Id $PID).ProcessorAffinity
 $PreviousControllerPriority = (Get-Process -Id $PID).PriorityClass
 $PipelineLabel = switch ($PipelineOrder) { 'DLSSThenVSR' { "DLSS5 -> $Upscaler" } 'VSRThenDLSS' { "$Upscaler -> DLSS5" } default { 'DLSS5' } }
@@ -931,6 +949,9 @@ $Plan = [ordered]@{
     vr_temporal_fill=if($VRMode-eq'DepthSBS'){$VRTemporalFill}else{$null}
     vr_temporal_fill_confidence=if($VRMode-eq'DepthSBS'){$VRTemporalFillConfidence}else{$null}
     vr_inpaint_sharpen=if($VRMode-eq'DepthSBS'){$VRInpaintSharpen}else{$null}
+    vr_adaptive_comfort=if($VRMode-eq'DepthSBS'){$VRAdaptiveComfort}else{$null}
+    vr_motion_safety_pixels=if($VRMode-eq'DepthSBS'){$VRMotionSafetyPixels}else{$null}
+    vr_scene_cut_ramp_frames=if($VRMode-eq'DepthSBS'){$VRSceneCutRampFrames}else{$null}
     vr_target_fps=if($VRMode-ne'Off' -and $VRTargetFps-gt 0){$VRTargetFps}else{$null}
     vr_eye_swap=if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
     realtime_buffer_seconds=if($IsPreviewOnly){$RealtimeBufferSeconds}else{$null}
@@ -942,8 +963,10 @@ $Plan = [ordered]@{
     realtime_fill_buffer_on_pause=if($IsPreviewOnly){[bool]$RealtimeFillBufferOnPause}else{$null}
     realtime_rgb_transport=if($IsPreviewOnly){if($UseSharedRgbTransport){'shared-memory'}else{'ssd-file'}}else{$null}
     realtime_guide_transport=if($IsPreviewOnly){if($UseSharedGuideTransport){'shared-memory'}else{'ssd-file'}}else{$null}
+    rgb_transport=if($UseSharedRgbTransport){'shared-memory'}else{'ssd-file'}
+    guide_transport=if($UseSharedGuideTransport){'shared-memory'}else{'ssd-file'}
     realtime_ack_transport=if($IsPreviewOnly){'shared-monotonic-counter'}else{$null}
-    realtime_host_openmp_threads=if($IsPreviewOnly -and $RealtimeAffinityPartition){$RealtimeHostOpenMpThreads}else{$null}
+    host_openmp_threads=$HostOpenMpThreads
     realtime_shared_rgb_planned_mb=if($IsPreviewOnly){[math]::Round($SharedRgbPlannedBytes/1MB,1)}else{$null}
     realtime_shared_guide_planned_mb=if($IsPreviewOnly){[math]::Round($SharedGuidePlannedBytes/1MB,1)}else{$null}
     realtime_cpu_partition=if($RealtimeAffinityPartition){[ordered]@{
@@ -1116,12 +1139,11 @@ try {
     $PreviousOmpThreads = $env:OMP_NUM_THREADS
     $PreviousOmpWaitPolicy = $env:OMP_WAIT_POLICY
     try {
-        if ($IsPreviewOnly -and $RealtimeAffinityPartition) {
-            # A bounded, passive OpenMP pool prevents the native upload helpers
-            # from spin-waiting across every CPU while D3D12 is presenting.
-            $env:OMP_NUM_THREADS = [string]$RealtimeHostOpenMpThreads
-            $env:OMP_WAIT_POLICY = 'PASSIVE'
-        }
+        # A bounded, passive OpenMP pool prevents native upload helpers from
+        # spin-waiting across every CPU while FFmpeg and guide generation are
+        # active. This is useful for recording and VR as well as realtime.
+        $env:OMP_NUM_THREADS = [string]$HostOpenMpThreads
+        $env:OMP_WAIT_POLICY = 'PASSIVE'
         $HostProcess = Start-ProtocolProcess $VideoHost $HostArgs $Engine
     } finally {
         $env:OMP_NUM_THREADS = $PreviousOmpThreads
@@ -1616,6 +1638,9 @@ try {
                 '--temporal-fill',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRTemporalFill)),
                 '--temporal-fill-confidence',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRTemporalFillConfidence)),
                 '--inpaint-sharpen',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRInpaintSharpen)),
+                '--adaptive-comfort',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRAdaptiveComfort)),
+                '--motion-safety-pixels',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRMotionSafetyPixels)),
+                '--scene-cut-ramp-frames',$VRSceneCutRampFrames,
                 '--pixel-format',$VrDepthPixelFormat,
                 '--codec',$CodecNameVr,'--quality',$Quality
             )
@@ -1750,6 +1775,9 @@ try {
         vr_temporal_fill = if($VRMode-eq'DepthSBS'){$VRTemporalFill}else{$null}
         vr_temporal_fill_confidence = if($VRMode-eq'DepthSBS'){$VRTemporalFillConfidence}else{$null}
         vr_inpaint_sharpen = if($VRMode-eq'DepthSBS'){$VRInpaintSharpen}else{$null}
+        vr_adaptive_comfort = if($VRMode-eq'DepthSBS'){$VRAdaptiveComfort}else{$null}
+        vr_motion_safety_pixels = if($VRMode-eq'DepthSBS'){$VRMotionSafetyPixels}else{$null}
+        vr_scene_cut_ramp_frames = if($VRMode-eq'DepthSBS'){$VRSceneCutRampFrames}else{$null}
         vr_target_fps = if($VRMode-ne'Off' -and $VRTargetFps-gt 0){$VRTargetFps}else{$null}
         vr_eye_swap = if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
         output_mode = $Mode
@@ -1795,8 +1823,8 @@ try {
         persistent_decoder = -not $VsrBeforeDlss
         rgb_transport = if($UseSharedRgbTransport){'shared-memory'}else{'ssd-file'}
         guide_transport = if($UseSharedGuideTransport){'shared-memory'}else{'ssd-file'}
-        shared_rgb_planned_mb = if($IsPreviewOnly){[math]::Round($SharedRgbPlannedBytes/1MB,1)}else{0.0}
-        shared_guide_planned_mb = if($IsPreviewOnly){[math]::Round($SharedGuidePlannedBytes/1MB,1)}else{0.0}
+        shared_rgb_planned_mb = [math]::Round($SharedRgbPlannedBytes/1MB,1)
+        shared_guide_planned_mb = [math]::Round($SharedGuidePlannedBytes/1MB,1)
         gpu_compact_guide_expansion = $true
         fast_start = -not $UseExternalUpscaler
         continuous_nvenc = [bool]$DirectEncode

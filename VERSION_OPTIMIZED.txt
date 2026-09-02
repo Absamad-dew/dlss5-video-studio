@@ -1,2 +1,2 @@
-15.0.0-neural-stereo-ldi
-VR now includes configurable gradient-aware Temporal LDI, robust temporally stabilized depth ranges, automatic convergence, background/disocclusion reconstruction, motion-guided temporal repair, and real optional DLSS5 refinement independently per eye.
+16.0.0-adaptive-vr-audio
+Adaptive VR comfort now reacts to motion confidence and scene cuts, offline modes inherit shared-memory/CPU scheduling optimizations, 4K stereo uses pinned staging, and realtime audio starts from a prewarmed sample clock without periodic hold/dropout correction.
