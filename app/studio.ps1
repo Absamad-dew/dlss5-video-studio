@@ -9,12 +9,16 @@ $RealtimeRunner = Join-Path $ScriptDirectory 'realtime-player.ps1'
 $Ffprobe = Join-Path $Root 'tools\ffprobe.exe'
 $PresetStore = Join-Path $Root 'settings\presets.json'
 $DLoRALCheckpoint = Join-Path $Root 'models\upscalers\dloral\model.pkl'
+$M2SVidCheckpoint = Join-Path $Root 'models\vr\m2svid\m2svid_weights.pt'
+$M2SVidOpenClip = Join-Path $Root 'models\vr\m2svid\open_clip_pytorch_model.bin'
+$M2SVidInstallStatus = Join-Path $Root 'models\vr\m2svid\install.json'
+$M2SVidCode = Join-Path $Root 'third_party\m2svid\m2svid\models_for_sgm\m2svid_model.py'
 $Invariant = [Globalization.CultureInfo]::InvariantCulture
 
 $Xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DLSS5 Video Studio 16 · Adaptive VR / Realtime / Recording" Width="1500" Height="960"
+        Title="DLSS5 Video Studio 17 · Generative VR / Realtime / Recording" Width="1500" Height="960"
         MinWidth="1120" MinHeight="720" WindowStartupLocation="CenterScreen"
         Background="#090D14" Foreground="#DCE7F5" FontFamily="Segoe UI">
   <Window.Resources>
@@ -40,7 +44,7 @@ $Xaml = @'
     <Grid.RowDefinitions><RowDefinition Height="88"/><RowDefinition Height="*"/><RowDefinition Height="76"/></Grid.RowDefinitions>
     <Border Grid.Row="0" Background="#111824" BorderBrush="#26354D" BorderThickness="1" CornerRadius="14" Padding="18,10" Margin="0,0,0,12">
       <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <StackPanel><TextBlock Text="DLSS5 VIDEO STUDIO" FontSize="24" FontWeight="SemiBold" Foreground="#F5F9FF"/><TextBlock Text="Feature 18 · Temporal LDI · gradient-aware stereo · motion/depth · аппаратная автоадаптация" Foreground="#7F91AA" Margin="0,3,0,0"/></StackPanel>
+        <StackPanel><TextBlock Text="DLSS5 VIDEO STUDIO" FontSize="24" FontWeight="SemiBold" Foreground="#F5F9FF"/><TextBlock Text="Feature 18 · Temporal LDI · M2SVid generative second eye · motion/depth · аппаратная автоадаптация" Foreground="#7F91AA" Margin="0,3,0,0"/></StackPanel>
         <Button x:Name="PreviewPaneButton" Grid.Column="1" Content="Скрыть просмотр" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="Правая панель не участвует в обработке. Её можно убрать, чтобы освободить место настройкам."/>
         <Border Grid.Column="2" Background="#102923" BorderBrush="#268C78" BorderThickness="1" CornerRadius="10" Padding="15,8" VerticalAlignment="Center"><TextBlock x:Name="RuntimeStatus" Text="● Persistent DLSS5 pipeline" Foreground="#6BE0C3"/></Border>
       </Grid>
@@ -79,7 +83,7 @@ $Xaml = @'
           <TabControl x:Name="WorkspaceTabs" Height="112" Margin="0,0,0,12" Background="#0A1019" BorderBrush="#334B6D">
             <TabItem Header="▶  REALTIME" Tag="Realtime"><Border Background="#0D1822" Padding="14"><StackPanel><TextBlock Text="Живой GPU-вывод" FontSize="18" FontWeight="SemiBold" Foreground="#61D9FF"/><TextBlock Text="Буфер, перемотка, полноэкранный плеер, DLSS-G и отдельные настройки задержки." Foreground="#93A8C2" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
             <TabItem Header="●  ЗАПИСЬ" Tag="Recording"><Border Background="#14170F" Padding="14"><StackPanel><TextBlock Text="Файл H.264 / H.265" FontSize="18" FontWeight="SemiBold" Foreground="#B7E36E"/><TextBlock Text="Локальное видео или ссылка; детальные motion/depth-параметры и автоматическое имя результата." Foreground="#A8B696" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
-            <TabItem Header="◉  VR / 3D" Tag="VR"><Border Background="#151224" Padding="14"><StackPanel><TextBlock Text="Отдельный VR-конвейер" FontSize="18" FontWeight="SemiBold" Foreground="#B59CFF"/><TextBlock Text="SBS/Over-Under, настоящие depth-ракурсы, параллакс, окклюзии и временная стабилизация." Foreground="#AEA3CE" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
+            <TabItem Header="◉  VR / 3D" Tag="VR"><Border Background="#151224" Padding="14"><StackPanel><TextBlock Text="Отдельный VR-конвейер" FontSize="18" FontWeight="SemiBold" Foreground="#B59CFF"/><TextBlock Text="SBS/Over-Under, depth-геометрия, M2SVid-дорисовка второго глаза, DLSS5 и временная стабилизация." Foreground="#AEA3CE" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
           </TabControl>
 
           <GroupBox x:Name="QuickGroup" Header="БЫСТРЫЙ ЗАПУСК">
@@ -105,6 +109,20 @@ $Xaml = @'
                 <StackPanel><TextBlock Text="Частота готового VR-видео"/><ComboBox x:Name="VrTargetFpsCombo"><ComboBoxItem Content="Как в исходнике" Tag="0"/><ComboBoxItem Content="72 FPS · стандарт VR" Tag="72"/><ComboBoxItem Content="90 FPS · плавно" Tag="90"/><ComboBoxItem Content="120 FPS · максимум плавности" Tag="120"/></ComboBox></StackPanel>
                 <StackPanel Grid.Column="2"><TextBlock Text="Метод плавности"/><TextBlock Text="Motion-compensated bidirectional interpolation после DLSS5 и стереосинтеза. Увеличивает время записи, но не число DLSS5-проходов." Foreground="#9387B8" TextWrapping="Wrap" Margin="0,5,0,0"/></StackPanel>
               </Grid>
+              <Expander Header="ГЕНЕРАТИВНОЕ ВОССТАНОВЛЕНИЕ ВТОРОГО ГЛАЗА" Foreground="#7DE3C7" Margin="2,4,2,9">
+                <Border Background="#0D211F" BorderBrush="#2B7B6B" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
+                  <TextBlock Text="Temporal LDI строит точную геометрию и маску, затем M2SVid дорисовывает реально скрытые поверхности и уточняет правый глаз. Это офлайн-режим максимального качества, а не realtime-фильтр." Foreground="#9CCFC2" TextWrapping="Wrap"/>
+                  <Grid Margin="0,7,0,0"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                    <StackPanel><TextBlock Text="Генеративная модель"/><ComboBox x:Name="VRGenerativeBackendCombo"><ComboBoxItem Content="Выключена · только Temporal LDI" Tag="Off"/><ComboBoxItem Content="M2SVid Hybrid · рекомендуется" Tag="M2SVidHybrid"/><ComboBoxItem Content="M2SVid Full · модель на весь глаз" Tag="M2SVidFull"/></ComboBox></StackPanel>
+                    <StackPanel Grid.Column="2"><TextBlock Text="Внутреннее разрешение модели"/><ComboBox x:Name="VRGenerativeResolutionCombo"><ComboBoxItem Content="Авто по VRAM" Tag="Auto"/><ComboBoxItem Content="384 · экономия памяти" Tag="384"/><ComboBoxItem Content="512 · баланс" Tag="512"/><ComboBoxItem Content="640 · высокое" Tag="640"/><ComboBoxItem Content="768 · максимум" Tag="768"/></ComboBox></StackPanel>
+                  </Grid>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Дорисовка раскрытых областей"/><TextBlock x:Name="VRGenerativeHoleValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#7DE3C7"/></Grid><Slider x:Name="VRGenerativeHoleSlider" Minimum="0" Maximum="1" Value="1" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Глобальное уточнение правого глаза"/><TextBlock x:Name="VRGenerativeRefineValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#7DE3C7"/></Grid><Slider x:Name="VRGenerativeRefineSlider" Minimum="0" Maximum="1" Value="0.3" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Кадров в окне модели (0 = авто)"/><TextBlock x:Name="VRGenerativeChunkValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#7DE3C7"/></Grid><Slider x:Name="VRGenerativeChunkSlider" Minimum="0" Maximum="25" Value="0" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="64"/></Grid.ColumnDefinitions><TextBlock Text="Перекрытие окон"/><TextBlock x:Name="VRGenerativeOverlapValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#7DE3C7"/></Grid><Slider x:Name="VRGenerativeOverlapSlider" Minimum="0" Maximum="8" Value="2" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                  <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="150"/></Grid.ColumnDefinitions><TextBlock x:Name="VRGenerativeStatusText" Text="M2SVid: проверка установки…" Foreground="#A7B8C8" TextWrapping="Wrap" VerticalAlignment="Center"/><Button x:Name="InstallVRModelsButton" Grid.Column="1" Content="Установить ~9 ГБ"/></Grid>
+                </StackPanel></Border>
+              </Expander>
               <Expander Header="ТОНКАЯ НАСТРОЙКА DEPTH-СТЕРЕО" Foreground="#C1B4EE" Margin="2,4,2,9">
                 <Border BorderBrush="#3A315B" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
@@ -334,7 +352,10 @@ $AdditionalNames = @(
     'VRTemporalConfidenceSlider','VRTemporalConfidenceValue','VREdgeProtectionSlider','VREdgeProtectionValue',
     'VRDepthTrimSlider','VRDepthTrimValue','VRComfortSlider','VRComfortValue','VRInpaintSharpenSlider','VRInpaintSharpenValue',
     'VRAdaptiveComfortSlider','VRAdaptiveComfortValue','VRMotionSafetySlider','VRMotionSafetyValue','VRSceneCutRampSlider','VRSceneCutRampValue',
-    'VRConvergenceSmoothingSlider','VRConvergenceSmoothingValue','VRDepthRangeSmoothingSlider','VRDepthRangeSmoothingValue'
+    'VRConvergenceSmoothingSlider','VRConvergenceSmoothingValue','VRDepthRangeSmoothingSlider','VRDepthRangeSmoothingValue',
+    'VRGenerativeBackendCombo','VRGenerativeResolutionCombo','VRGenerativeHoleSlider','VRGenerativeHoleValue',
+    'VRGenerativeRefineSlider','VRGenerativeRefineValue','VRGenerativeChunkSlider','VRGenerativeChunkValue',
+    'VRGenerativeOverlapSlider','VRGenerativeOverlapValue','VRGenerativeStatusText','InstallVRModelsButton'
 )
 foreach ($Name in $AdditionalNames) { Set-Variable -Name $Name -Value $Window.FindName($Name) -Scope Script }
 
@@ -387,6 +408,26 @@ function Select-Tag($Combo,[int]$Value) { foreach($Item in $Combo.Items){ if([in
 function F([double]$Value) { $Value.ToString('0.00',$Invariant) }
 function Combo-Tag($Combo) { if ($Combo.SelectedItem) { return [string]$Combo.SelectedItem.Tag }; return '' }
 function Select-StringTag($Combo,[string]$Value) { foreach($Item in $Combo.Items){ if([string]$Item.Tag -eq $Value){$Combo.SelectedItem=$Item;break} } }
+function Test-M2SVidInstalled {
+    return (Test-Path -LiteralPath $M2SVidCode -PathType Leaf) -and
+        (Test-Path -LiteralPath $M2SVidInstallStatus -PathType Leaf) -and
+        (Test-Path -LiteralPath $M2SVidCheckpoint -PathType Leaf) -and
+        (Get-Item -LiteralPath $M2SVidCheckpoint).Length -eq 4978220327 -and
+        (Test-Path -LiteralPath $M2SVidOpenClip -PathType Leaf) -and
+        (Get-Item -LiteralPath $M2SVidOpenClip).Length -eq 3944692325
+}
+function Refresh-VrGenerativeStatus {
+    $script:M2SVidReady = Test-M2SVidInstalled
+    if($script:M2SVidReady){
+        $VRGenerativeStatusText.Text='M2SVid Full Attention готов · Temporal LDI + генеративная дорисовка'
+        $VRGenerativeStatusText.Foreground='#70E0C0'
+        $InstallVRModelsButton.Content='Проверить / обновить'
+    } else {
+        $VRGenerativeStatusText.Text='M2SVid не установлен · нажмите справа, загрузка около 9 ГБ с возобновлением'
+        $VRGenerativeStatusText.Foreground='#E7B878'
+        $InstallVRModelsButton.Content='Установить ~9 ГБ'
+    }
+}
 function Format-Time([double]$Seconds) {
     if ([double]::IsNaN($Seconds) -or [double]::IsInfinity($Seconds) -or $Seconds -lt 0) { return '—' }
     $Span = [TimeSpan]::FromSeconds([math]::Ceiling($Seconds))
@@ -415,6 +456,9 @@ function Refresh-Labels {
     $VREdgeProtectionValue.Text=F $VREdgeProtectionSlider.Value;$VRDepthTrimValue.Text=(F $VRDepthTrimSlider.Value)+'%';$VRComfortValue.Text=F $VRComfortSlider.Value;$VRInpaintSharpenValue.Text=F $VRInpaintSharpenSlider.Value
     $VRAdaptiveComfortValue.Text=F $VRAdaptiveComfortSlider.Value;$VRMotionSafetyValue.Text=([string][int]$VRMotionSafetySlider.Value)+' px';$VRSceneCutRampValue.Text=([string][int]$VRSceneCutRampSlider.Value)+' к.'
     $VRConvergenceSmoothingValue.Text=F $VRConvergenceSmoothingSlider.Value;$VRDepthRangeSmoothingValue.Text=F $VRDepthRangeSmoothingSlider.Value
+    $VRGenerativeHoleValue.Text=F $VRGenerativeHoleSlider.Value;$VRGenerativeRefineValue.Text=F $VRGenerativeRefineSlider.Value
+    $VRGenerativeChunkValue.Text=if([int]$VRGenerativeChunkSlider.Value-eq 0){'Авто'}else{[string][int]$VRGenerativeChunkSlider.Value}
+    $VRGenerativeOverlapValue.Text=([string][int]$VRGenerativeOverlapSlider.Value)+' к.'
     if($IntensitySlider.Value -ge 1.8 -or $StructureSlider.Value -ge 1.9){$AggressionText.Text='Сильное влияние: возможна лишняя дорисовка и изменение лица.';$AggressionText.Foreground='#FF9A9A'}elseif($IntensitySlider.Value -le 1.1){$AggressionText.Text='Мягкое влияние: минимальный риск перерисовки.';$AggressionText.Foreground='#8DD8C5'}else{$AggressionText.Text='Выраженная детализация без максимального общего веса.';$AggressionText.Foreground='#A9BAD0'}
 }
 function Get-WorkspaceMode {
@@ -492,14 +536,17 @@ function Apply-VrProfile {
         switch($Name){
             'Fast' {
                 Select-StringTag $DepthModelCombo 'DA2Small';Select-StringTag $VRStereoMethodCombo 'Layered';Select-StringTag $VRDLSSModeCombo 'PreStereo';Select-StringTag $VRDisparityCurveCombo 'Comfort';Select-StringTag $VrLayoutCombo 'HalfSBS'
+                Select-StringTag $VRGenerativeBackendCombo 'Off';Select-StringTag $VRGenerativeResolutionCombo 'Auto';$VRGenerativeChunkSlider.Value=0;$VRGenerativeOverlapSlider.Value=2;$VRGenerativeHoleSlider.Value=1.0;$VRGenerativeRefineSlider.Value=0.2
                 $VREyeSlider.Value=0.85;$VRConvergenceSlider.Value=0.50;$VRDepthGammaSlider.Value=1.0;$VRForegroundSlider.Value=0.90;$VRBackgroundSlider.Value=0.65;$VRZBufferSlider.Value=4.0;$VROcclusionSlider.Value=0.65;$VRHoleFillSlider.Value=8;$VRLDILayersSlider.Value=4;$VRBackgroundExpansionSlider.Value=10;$VRTemporalFillSlider.Value=0.55;$VRTemporalConfidenceSlider.Value=0.45;$VREdgeProtectionSlider.Value=0.55;$VRDepthTrimSlider.Value=2.0;$VRComfortSlider.Value=0.60;$VRAdaptiveComfortSlider.Value=0.85;$VRMotionSafetySlider.Value=10;$VRSceneCutRampSlider.Value=8;$VRInpaintSharpenSlider.Value=0.20;$VRConvergenceSmoothingSlider.Value=0.86;$VRDepthRangeSmoothingSlider.Value=0.86;$VREdgeSlider.Value=2;$VRTemporalSlider.Value=0.48;$VRDisparitySlider.Value=1.8
             }
             'Maximum' {
                 Select-StringTag $DepthModelCombo 'DA3Large';Select-StringTag $VRStereoMethodCombo 'TemporalLDI';Select-StringTag $VRDLSSModeCombo 'PreAndPerEye';Select-StringTag $VRDisparityCurveCombo 'Cinematic';Select-StringTag $VrLayoutCombo 'FullSBS'
+                Select-StringTag $VRGenerativeBackendCombo $(if($script:M2SVidReady){'M2SVidHybrid'}else{'Off'});Select-StringTag $VRGenerativeResolutionCombo 'Auto';$VRGenerativeChunkSlider.Value=0;$VRGenerativeOverlapSlider.Value=3;$VRGenerativeHoleSlider.Value=1.0;$VRGenerativeRefineSlider.Value=0.45
                 $VREyeSlider.Value=1.15;$VRConvergenceSlider.Value=0.48;$VRDepthGammaSlider.Value=1.05;$VRForegroundSlider.Value=1.15;$VRBackgroundSlider.Value=0.82;$VRZBufferSlider.Value=7.0;$VROcclusionSlider.Value=0.82;$VRHoleFillSlider.Value=24;$VRLDILayersSlider.Value=10;$VRBackgroundExpansionSlider.Value=32;$VRTemporalFillSlider.Value=0.88;$VRTemporalConfidenceSlider.Value=0.42;$VREdgeProtectionSlider.Value=0.92;$VRDepthTrimSlider.Value=1.0;$VRComfortSlider.Value=0.20;$VRAdaptiveComfortSlider.Value=0.55;$VRMotionSafetySlider.Value=18;$VRSceneCutRampSlider.Value=4;$VRInpaintSharpenSlider.Value=0.55;$VRConvergenceSmoothingSlider.Value=0.94;$VRDepthRangeSmoothingSlider.Value=0.94;$VREdgeSlider.Value=1;$VRTemporalSlider.Value=0.68;$VRDisparitySlider.Value=2.8
             }
             default {
                 Select-StringTag $DepthModelCombo 'VideoDepthSmall';Select-StringTag $VRStereoMethodCombo 'TemporalLDI';Select-StringTag $VRDLSSModeCombo 'PreStereo';Select-StringTag $VRDisparityCurveCombo 'Cinematic';Select-StringTag $VrLayoutCombo 'FullSBS'
+                Select-StringTag $VRGenerativeBackendCombo $(if($script:M2SVidReady){'M2SVidHybrid'}else{'Off'});Select-StringTag $VRGenerativeResolutionCombo 'Auto';$VRGenerativeChunkSlider.Value=0;$VRGenerativeOverlapSlider.Value=2;$VRGenerativeHoleSlider.Value=1.0;$VRGenerativeRefineSlider.Value=0.3
                 $VREyeSlider.Value=1.0;$VRConvergenceSlider.Value=0.48;$VRDepthGammaSlider.Value=1.0;$VRForegroundSlider.Value=1.0;$VRBackgroundSlider.Value=0.75;$VRZBufferSlider.Value=5.5;$VROcclusionSlider.Value=0.75;$VRHoleFillSlider.Value=16;$VRLDILayersSlider.Value=6;$VRBackgroundExpansionSlider.Value=20;$VRTemporalFillSlider.Value=0.75;$VRTemporalConfidenceSlider.Value=0.35;$VREdgeProtectionSlider.Value=0.75;$VRDepthTrimSlider.Value=1.5;$VRComfortSlider.Value=0.30;$VRAdaptiveComfortSlider.Value=0.70;$VRMotionSafetySlider.Value=14;$VRSceneCutRampSlider.Value=6;$VRInpaintSharpenSlider.Value=0.35;$VRConvergenceSmoothingSlider.Value=0.88;$VRDepthRangeSmoothingSlider.Value=0.90;$VREdgeSlider.Value=2;$VRTemporalSlider.Value=0.55;$VRDisparitySlider.Value=2.4
             }
         }
@@ -672,7 +719,13 @@ function Update-VrUi {
     $VrMode=Combo-Tag $VrModeCombo
     $VrLayoutCombo.IsEnabled = $VrMode -in @('CinemaSBS','DepthSBS') -and (Get-WorkspaceMode) -ne 'Realtime'
     $DepthStereo=$VrMode-eq'DepthSBS'
-    foreach($Control in @($VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VREyeSwapCheck,$VRStereoMethodCombo,$VRTemporalModeCombo,$VREyeAnchorCombo,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRDLSSModeCombo,$VRQualityPresetCombo,$VRConvergenceModeCombo,$VRDisparityCurveCombo,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRAdaptiveComfortSlider,$VRMotionSafetySlider,$VRSceneCutRampSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider)){$Control.IsEnabled=$DepthStereo}
+    foreach($Control in @($VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VREyeSwapCheck,$VRStereoMethodCombo,$VRTemporalModeCombo,$VREyeAnchorCombo,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRDLSSModeCombo,$VRQualityPresetCombo,$VRConvergenceModeCombo,$VRDisparityCurveCombo,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRAdaptiveComfortSlider,$VRMotionSafetySlider,$VRSceneCutRampSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider,$VRGenerativeBackendCombo)){$Control.IsEnabled=$DepthStereo}
+    $Generative=$DepthStereo -and (Combo-Tag $VRGenerativeBackendCombo)-ne'Off'
+    if($Generative -and (Combo-Tag $VRStereoMethodCombo)-ne'TemporalLDI'){Select-StringTag $VRStereoMethodCombo 'TemporalLDI'}
+    foreach($Control in @($VRGenerativeResolutionCombo,$VRGenerativeChunkSlider,$VRGenerativeOverlapSlider)){$Control.IsEnabled=$Generative}
+    $Hybrid=$Generative -and (Combo-Tag $VRGenerativeBackendCombo)-eq'M2SVidHybrid'
+    $VRGenerativeHoleSlider.IsEnabled=$Hybrid;$VRGenerativeRefineSlider.IsEnabled=$Hybrid
+    $VREyeAnchorCombo.IsEnabled=$DepthStereo -and -not $Generative
     $VRPixelFormatCombo.IsEnabled=$VrMode-ne'Off' -and (Combo-Tag $CodecCombo)-eq'H265'
     if((Combo-Tag $CodecCombo)-eq'H264'){Select-StringTag $VRPixelFormatCombo 'Compatible8Bit'}
     $LayeredStereo=$DepthStereo -and (Combo-Tag $VRStereoMethodCombo)-in @('Layered','TemporalLDI')
@@ -682,7 +735,7 @@ function Update-VrUi {
     foreach($Control in @($VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VRInpaintSharpenSlider)){$Control.IsEnabled=$TemporalLdi}
     $VRConvergenceSmoothingSlider.IsEnabled=$DepthStereo -and (Combo-Tag $VRConvergenceModeCombo)-ne'Manual'
     switch($VrMode){
-        'DepthSBS' { $VrInfo.Text='Рекомендуемый современный путь: DLSS5 → DA3/VDA → gradient-aware Temporal LDI → motion-guided disocclusion repair. Режим «до + по глазам» действительно запускает ещё два DLSS5-прохода, а не имитирует их фильтром.' }
+        'DepthSBS' { $VrInfo.Text=if($Generative){'Максимальный путь: DLSS5 → neural depth/motion → Temporal LDI → M2SVid Full Attention → управляемое смешивание по настоящей маске раскрытия. Исходный левый глаз сохраняется, поэтому модель не заставляет оба ракурса «плыть» одновременно.'}else{'Быстрый путь: DLSS5 → DA3/VDA → gradient-aware Temporal LDI → motion-guided disocclusion repair. Включите M2SVid выше для большого скачка качества скрытых поверхностей.'} }
         'CinemaSBS' { $VrInfo.Text='Два одинаковых ракурса left/right для VR-кинотеатра. Это комфортный просмотр плоского видео, а не выдуманная стереоглубина. Full-SBS сохраняет полное разрешение каждого глаза.' }
         'Equirect360' { $VrInfo.Text='Для уже снятого/сшитого панорамного исходника 2:1. Программа проверит геометрию и добавит стандартные spherical-video v2 метаданные.' }
         default { $VrInfo.Text='Обычный плоский файл без VR-компоновки и пространственных метаданных.' }
@@ -722,6 +775,12 @@ function Update-Estimate {
             if((Combo-Tag $VrLayoutCombo)-in @('FullSBS','FullOU')){$Seconds*=1.18}
             if((Combo-Tag $VRStereoMethodCombo)-eq'Layered'){$Seconds*=1.08}
             elseif((Combo-Tag $VRStereoMethodCombo)-eq'TemporalLDI'){$Seconds*=1.22}
+            if((Combo-Tag $VRGenerativeBackendCombo)-ne'Off'){
+                $GenerativeSide=if((Combo-Tag $VRGenerativeResolutionCombo)-eq'Auto'){512}else{[int](Combo-Tag $VRGenerativeResolutionCombo)}
+                $GenerativeFps=0.42/[math]::Max(0.35,[math]::Pow($GenerativeSide/512.0,2.0))
+                if((Combo-Tag $VRGenerativeBackendCombo)-eq'M2SVidFull'){$GenerativeFps*=0.92}
+                $Seconds+=24.0+$Frames/[math]::Max(0.03,$GenerativeFps)
+            }
             if((Combo-Tag $VRDLSSModeCombo)-eq'PreAndPerEye'){$Seconds*=2.65}
         }
         if([int](Combo-Tag $VrTargetFpsCombo)-gt 0){$Seconds*=1.65}
@@ -875,7 +934,7 @@ function Update-RecordFineUi {
     $RecordRaftSlider.IsEnabled=$Enabled -and (Combo-Tag $RecordMotionBackendCombo)-eq'raft'
 }
 
-foreach($S in @($IntensitySlider,$ToneSlider,$StructureSlider,$SkinSlider,$MotionXSlider,$MotionYSlider,$TransferSlider,$ColorSlider,$PaperSlider,$QualitySlider,$UpscalerStrengthSlider,$VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRAdaptiveComfortSlider,$VRMotionSafetySlider,$VRSceneCutRampSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider,$RecordGuideWidthSlider,$RecordDepthIntervalSlider,$RecordDepthMinSlider,$RecordConfidenceSlider,$RecordMotionSlider,$RecordTemporalSlider,$RecordSceneSlider,$RecordRaftSlider,$RecordChunkSlider,$RecordWorkerSlider,$GuideWorkerSlider)){$S.Add_ValueChanged({Refresh-Labels})}
+foreach($S in @($IntensitySlider,$ToneSlider,$StructureSlider,$SkinSlider,$MotionXSlider,$MotionYSlider,$TransferSlider,$ColorSlider,$PaperSlider,$QualitySlider,$UpscalerStrengthSlider,$VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRAdaptiveComfortSlider,$VRMotionSafetySlider,$VRSceneCutRampSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider,$VRGenerativeHoleSlider,$VRGenerativeRefineSlider,$VRGenerativeChunkSlider,$VRGenerativeOverlapSlider,$RecordGuideWidthSlider,$RecordDepthIntervalSlider,$RecordDepthMinSlider,$RecordConfidenceSlider,$RecordMotionSlider,$RecordTemporalSlider,$RecordSceneSlider,$RecordRaftSlider,$RecordChunkSlider,$RecordWorkerSlider,$GuideWorkerSlider)){$S.Add_ValueChanged({Refresh-Labels})}
 $RealtimeBufferSlider.Add_ValueChanged({Refresh-Labels;Update-Estimate})
 $RealtimeChunkSlider.Add_ValueChanged({Refresh-Labels})
 $RealtimeQualityCombo.Add_SelectionChanged({
@@ -898,11 +957,28 @@ $VrTargetFpsCombo.Add_SelectionChanged({Update-Estimate})
 $VRStereoMethodCombo.Add_SelectionChanged({Update-VrUi})
 $VRConvergenceModeCombo.Add_SelectionChanged({Update-VrUi})
 $VRDLSSModeCombo.Add_SelectionChanged({Update-Estimate})
+$VRGenerativeBackendCombo.Add_SelectionChanged({
+    if((Combo-Tag $VRGenerativeBackendCombo)-ne'Off' -and -not (Test-M2SVidInstalled)){
+        [Windows.MessageBox]::Show('M2SVid ещё не установлен. Нажмите «Установить ~9 ГБ», дождитесь проверки и перезапустите Studio.','Генеративный VR',[Windows.MessageBoxButton]::OK,[Windows.MessageBoxImage]::Information)|Out-Null
+        Select-StringTag $VRGenerativeBackendCombo 'Off'
+    }
+    Mark-VrCustom
+})
+$VRGenerativeResolutionCombo.Add_SelectionChanged({Mark-VrCustom})
 $VRQualityPresetCombo.Add_SelectionChanged({Apply-VrProfile})
 $VrLayoutCombo.Add_SelectionChanged({Mark-VrCustom})
-foreach($S in @($VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRAdaptiveComfortSlider,$VRMotionSafetySlider,$VRSceneCutRampSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider)){$S.Add_ValueChanged({Mark-VrCustom})}
+foreach($S in @($VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRAdaptiveComfortSlider,$VRMotionSafetySlider,$VRSceneCutRampSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider,$VRGenerativeHoleSlider,$VRGenerativeRefineSlider,$VRGenerativeChunkSlider,$VRGenerativeOverlapSlider)){$S.Add_ValueChanged({Mark-VrCustom})}
 foreach($C in @($VRStereoMethodCombo,$VRTemporalModeCombo,$VREyeAnchorCombo,$VRDLSSModeCombo,$VRConvergenceModeCombo,$VRDisparityCurveCombo,$DepthModelCombo)){$C.Add_SelectionChanged({Mark-VrCustom})}
 $VREyeSwapCheck.Add_Click({Mark-VrCustom})
+$InstallVRModelsButton.Add_Click({
+    $Installer=Join-Path $Root 'INSTALL_VR_MODELS.cmd'
+    if(-not(Test-Path -LiteralPath $Installer -PathType Leaf)){
+        [Windows.MessageBox]::Show('INSTALL_VR_MODELS.cmd отсутствует в папке программы. Обновите portable-сборку.','Установщик не найден',[Windows.MessageBoxButton]::OK,[Windows.MessageBoxImage]::Error)|Out-Null
+        return
+    }
+    Start-Process -FilePath "$env:WINDIR\System32\cmd.exe" -ArgumentList @('/c',('"'+$Installer+'"')) | Out-Null
+    $VRGenerativeStatusText.Text='Установщик открыт отдельно. После строки VR_GENERATIVE_MODELS_READY перезапустите Studio.'
+})
 $CodecCombo.Add_SelectionChanged({Update-VrUi;Update-Estimate})
 $DepthModelCombo.Add_SelectionChanged({Update-Estimate})
 $RenderPresetCombo.Add_SelectionChanged({Update-Estimate})
@@ -951,6 +1027,13 @@ $HelpText=[ordered]@{
     DepthModelCombo='DA2 Small быстрее; Video Depth устойчивее во времени; DA3 Small/Base точнее геометрически; DA3 Large — самый тяжёлый и детальный вариант для офлайн VR-записи.'
     VRQualityPresetCombo='Cinematic использует Temporal LDI и стабильную видеоглубину. Fast экономит на стереорендере. Maximum включает DA3 Large, Full-SBS, десять LDI-слоёв и настоящий отдельный DLSS5-проход для каждого глаза. После ручного изменения выбирается «Вручную».'
     VRDLSSModeCombo='«До стерео» — один настоящий проход DLSS5 Feature 18. «До + по глазам» после создания двух ракурсов запускает DLSS5 ещё раз отдельно для левого и правого глаза; это намного медленнее, но детали глаз не смешиваются через шов SBS.'
+    VRGenerativeBackendCombo='Off оставляет быстрый Temporal LDI. M2SVid Hybrid применяет генерацию полностью в раскрытых областях и мягко уточняет остальной правый глаз. Full отдаёт модели весь правый глаз и сильнее меняет исходный вид.'
+    VRGenerativeResolutionCombo='Разрешение, на котором работает тяжёлая SVD-модель. Авто выбирает 384 для 8 ГБ VRAM, 640 для 16 ГБ и 768 для 24+ ГБ; готовый глаз затем масштабируется до целевого размера.'
+    VRGenerativeHoleSlider='Вес M2SVid только внутри маски настоящих disocclusion-областей. 1.0 полностью заменяет эвристическое заполнение генеративным восстановлением.'
+    VRGenerativeRefineSlider='Насколько M2SVid может менять уже видимую часть правого глаза. 0.2–0.45 обычно улучшает согласованность без лишней перерисовки; 1.0 равен Full.'
+    VRGenerativeChunkSlider='M2SVid обучен максимум на 25 кадрах. Меньшее окно экономит VRAM, большее лучше удерживает временную согласованность. 0 выбирает размер по видеопамяти.'
+    VRGenerativeOverlapSlider='Повторные кадры между окнами модели смешиваются крест-накрест, скрывая швы чанков. 2–4 обычно достаточно.'
+    InstallVRModelsButton='Скачивает официальный код M2SVid, full-attention checkpoint и OpenCLIP ViT-H. Общий объём около 9 ГБ; незавершённые файлы продолжаются при следующем запуске.'
     VRStereoMethodCombo='Temporal LDI добавляет дальний скрытый слой, sparse-заполнение и перенос раскрытых областей из соседних кадров. Layered z-splat быстрее, но восстанавливает фон проще. Inverse warp — режим максимального FPS.'
     VRTemporalModeCombo='Motion-compensated переносит предыдущую глубину по optical flow перед смешиванием и не приклеивает объём к экрану. EMA дешевле, но может плыть; Off полезен для диагностики.'
     VRConvergenceModeCombo='По главному объекту удерживает нулевой параллакс около центрального персонажа. Comfort выбирает устойчивый средний диапазон. Manual использует только ползунок плоскости фокуса.'
@@ -1225,6 +1308,21 @@ $Timer.Add_Tick({
                     elseif($U.stage-eq'ready'){$DetailText.Text="Модель готова · $($U.resolved_variant) · VRAM $($U.allocated_vram_mb) MiB"}
                     elseif($U.stage-eq'chunk'){$DetailText.Text="$($U.frames) кадров в текущей порции · модель уже находится в GPU"}
                 }catch{Add-Log ('Upscaler status JSON: '+$_.Exception.Message)}
+            } elseif ($L -match '^VR_GENERATIVE_(?<k>STATUS|PROGRESS|DONE) (?<j>.+)$') {
+                try {
+                    $G=$Matches.j|ConvertFrom-Json
+                    if($Matches.k-eq'PROGRESS'){
+                        $StatusText.Text='M2SVid: генеративная реконструкция второго глаза'
+                        $DetailText.Text="$($G.frames) из $($G.total) кадров · canvas $($G.model_canvas)"
+                        if([double]$G.fps-gt 0){$SpeedText.Text=('{0:0.00} gen FPS' -f [double]$G.fps)}
+                    }elseif($Matches.k-eq'DONE'){
+                        $DetailText.Text="M2SVid завершён · $($G.frames) кадров · $($G.model_canvas)"
+                    }elseif($G.stage-eq'model-ready'){
+                        $DetailText.Text="M2SVid загружен в VRAM · attention: $($G.attention)"
+                    }elseif($G.stage-eq'initializing'){
+                        $DetailText.Text="$($G.gpu) · $($G.model_canvas) · окно $($G.chunk_frames) кадров"
+                    }
+                }catch{Add-Log ('Generative VR status JSON: '+$_.Exception.Message)}
             } elseif ($L -match '^STUDIO_RESULT (?<j>.+)$') {
                 try { $script:Result = $Matches.j | ConvertFrom-Json } catch { Add-Log ('Result JSON: ' + $_.Exception.Message) }
             } elseif ($L -match '^STUDIO_ERROR (?<m>.+)$') {
@@ -1254,6 +1352,9 @@ $RunButton.Add_Click({
         if (-not $IsOnlineSource -and -not (Test-Path -LiteralPath $InputBox.Text -PathType Leaf)) { throw 'Выберите существующий входной видеофайл.' }
         if ([string]$UpscalerCombo.SelectedItem.Tag -eq 'DLoRAL' -and -not (Test-Path -LiteralPath $DLoRALCheckpoint -PathType Leaf)) {
             throw 'DLoRAL checkpoint ещё не скачан: Google Drive превысил квоту. Запустите INSTALL_MODELS.cmd позже; NanoVSR, AnimeSR v2 и FlashVSR уже готовы.'
+        }
+        if($WorkspaceMode-eq'VR' -and (Combo-Tag $VRGenerativeBackendCombo)-ne'Off' -and -not (Test-M2SVidInstalled)){
+            throw 'M2SVid не установлен полностью. Нажмите «Установить ~9 ГБ», дождитесь строки VR_GENERATIVE_MODELS_READY и перезапустите Studio.'
         }
         $Start = 0.0
         if (-not [double]::TryParse($StartBox.Text,[Globalization.NumberStyles]::Float,$Invariant,[ref]$Start) -or $Start -lt 0) { throw 'Некорректное время старта.' }
@@ -1339,6 +1440,10 @@ $RunButton.Add_Click({
                 '-VRTemporalSmoothing',([string]::Format($Invariant,'{0:0.###}',[double]$VRTemporalSlider.Value)),
                 '-VRMaxDisparityPercent',([string]::Format($Invariant,'{0:0.###}',[double]$VRDisparitySlider.Value)),
                 '-VRStereoMethod',(Combo-Tag $VRStereoMethodCombo),'-VRDLSSMode',(Combo-Tag $VRDLSSModeCombo),'-VREyeAnchor',(Combo-Tag $VREyeAnchorCombo),
+                '-VRGenerativeBackend',(Combo-Tag $VRGenerativeBackendCombo),'-VRGenerativeResolution',(Combo-Tag $VRGenerativeResolutionCombo),
+                '-VRGenerativeChunkFrames',[int]$VRGenerativeChunkSlider.Value,'-VRGenerativeOverlapFrames',[int]$VRGenerativeOverlapSlider.Value,
+                '-VRGenerativeHoleStrength',([string]::Format($Invariant,'{0:0.###}',[double]$VRGenerativeHoleSlider.Value)),
+                '-VRGenerativeRefineStrength',([string]::Format($Invariant,'{0:0.###}',[double]$VRGenerativeRefineSlider.Value)),
                 '-VRTemporalMode',(Combo-Tag $VRTemporalModeCombo),'-VRPixelFormat',(Combo-Tag $VRPixelFormatCombo),
                 '-VRConvergenceMode',(Combo-Tag $VRConvergenceModeCombo),'-VRDisparityCurve',(Combo-Tag $VRDisparityCurveCombo),
                 '-VRConvergenceSmoothing',([string]::Format($Invariant,'{0:0.###}',[double]$VRConvergenceSmoothingSlider.Value)),
@@ -1474,6 +1579,8 @@ $VRTemporalModeCombo.SelectedIndex=0
 $VREyeAnchorCombo.SelectedIndex=0
 $VRPixelFormatCombo.SelectedIndex=0
 $VRDLSSModeCombo.SelectedIndex=0
+$VRGenerativeBackendCombo.SelectedIndex=0
+$VRGenerativeResolutionCombo.SelectedIndex=0
 $VRConvergenceModeCombo.SelectedIndex=0
 $VRDisparityCurveCombo.SelectedIndex=0
 $HardwareCombo.SelectedIndex=0
@@ -1497,12 +1604,14 @@ $GuideMotionBackendCombo.SelectedIndex=0
 $RecordMotionPresetCombo.SelectedIndex=1
 $RecordMotionBackendCombo.SelectedIndex=0
 $RealtimeQualityCombo.SelectedIndex=2
+Refresh-VrGenerativeStatus
 $VRQualityPresetCombo.SelectedIndex=0
 $OutputBox.Text=Join-Path $Root 'output'
 Load-Presets
 Apply-Settings $BuiltIn['Balanced · рекомендовано']
 Apply-RealtimeProfile 'Medium'
 Refresh-Labels
+Refresh-VrGenerativeStatus
 Update-RealtimeQualityInfo
 Update-RecordFineUi
 Update-UpscalerUi

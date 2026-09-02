@@ -23,10 +23,10 @@ if (Test-Path -LiteralPath $Target) {
 }
 
 $Directories = @(
-    'app','engine','licenses','licenses\upscalers','models','models\upscalers',
+    'app','engine','licenses','licenses\upscalers','licenses\vr','models','models\upscalers','models\vr','models\vr\m2svid',
     'models\upscalers\nanovsr','models\upscalers\animesr','models\depth','output','settings','temp',
     'runtime','runtime\python','third_party','third_party\FlashVSR_Ultra_Fast','third_party\DLoRAL','third_party\spatial-media',
-    'tools','tools\guidegen','tools\upscaler','tools\upscaler\backends','tools\spatialmedia','tools\vr_depth','scripts'
+    'tools','tools\guidegen','tools\upscaler','tools\upscaler\backends','tools\spatialmedia','tools\vr_depth','tools\vr_generative','scripts'
 )
 foreach ($Relative in $Directories) {
     New-Item -ItemType Directory -Force -Path (Join-Path $Target $Relative) | Out-Null
@@ -126,8 +126,11 @@ Copy-Item -LiteralPath (Join-Path $Build 'dist\engine\dlss5-video-host.exe') -De
 Copy-Item -Path (Join-Path $Build 'dist\guidegen\*') -Destination (Join-Path $Target 'tools\guidegen') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\guidegen.py') -Destination (Join-Path $Target 'tools\guidegen') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\vr_depth_worker.py') -Destination (Join-Path $Target 'tools\vr_depth') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'python\m2svid_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\install_depth_models.py') -Destination (Join-Path $Target 'tools') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'scripts\Install-DepthModels.ps1') -Destination (Join-Path $Target 'scripts') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_VR_MODELS.cmd') -Destination $Target -Force
+Copy-Item -LiteralPath (Join-Path $Build 'scripts\Install-VRGenerativeModels.ps1') -Destination (Join-Path $Target 'scripts') -Force
 Copy-Item -LiteralPath `
     (Join-Path $Build 'app\process-video.ps1'), `
     (Join-Path $Build 'app\realtime-player.ps1'), `

@@ -470,6 +470,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-directory", required=True, type=Path)
     parser.add_argument("--motion-directory", type=Path)
     parser.add_argument("--output-video", required=True, type=Path)
+    parser.add_argument("--right-seed-output", type=Path)
+    parser.add_argument("--right-mask-output", type=Path)
     parser.add_argument("--width", required=True, type=int)
     parser.add_argument("--height", required=True, type=int)
     parser.add_argument("--frames", required=True, type=int)
@@ -543,6 +545,8 @@ def main() -> int:
     width, height = args.width, args.height
     output_width = width * 2 if args.layout == "full-sbs" else width
     output_height = height * 2 if args.layout == "full-ou" else height
+    eye_width = width // 2 if args.layout == "half-sbs" else width
+    eye_height = height // 2 if args.layout == "half-ou" else height
     decoder_command = [
         str(args.ffmpeg), "-nostdin", "-v", "error", "-i", str(args.input_video),
         "-vf", f"scale={width}:{height}:flags=lanczos,format=rgb24",
@@ -556,6 +560,25 @@ def main() -> int:
     ] + encode_options(args.codec, args.pixel_format, args.quality)
     encoder_command += ["-frames:v", str(args.frames), "-movflags", "+faststart", str(args.output_video)]
 
+    right_seed_command = None
+    right_mask_command = None
+    if args.right_seed_output is not None:
+        right_seed_command = [
+            str(args.ffmpeg), "-y", "-nostdin", "-v", "error",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s:v", f"{eye_width}x{eye_height}",
+            "-r", f"{args.fps:.9g}", "-i", "pipe:0", "-an", "-c:v", "ffv1",
+            "-level", "3", "-coder", "1", "-context", "1", "-pix_fmt", "bgr0",
+            "-frames:v", str(args.frames), str(args.right_seed_output),
+        ]
+    if args.right_mask_output is not None:
+        right_mask_command = [
+            str(args.ffmpeg), "-y", "-nostdin", "-v", "error",
+            "-f", "rawvideo", "-pix_fmt", "gray", "-s:v", f"{eye_width}x{eye_height}",
+            "-r", f"{args.fps:.9g}", "-i", "pipe:0", "-an", "-c:v", "ffv1",
+            "-level", "3", "-coder", "1", "-context", "1", "-pix_fmt", "gray",
+            "-frames:v", str(args.frames), str(args.right_mask_output),
+        ]
+
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     decoder = subprocess.Popen(
         decoder_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -565,6 +588,20 @@ def main() -> int:
         encoder_command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE, creationflags=creation_flags,
     )
+    right_seed_process = (
+        subprocess.Popen(
+            right_seed_command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, creationflags=creation_flags,
+        )
+        if right_seed_command is not None else None
+    )
+    right_mask_process = (
+        subprocess.Popen(
+            right_mask_command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, creationflags=creation_flags,
+        )
+        if right_mask_command is not None else None
+    )
     if decoder.stdout is None or encoder_process.stdin is None:
         raise RuntimeError("could not create VR video pipes")
 
@@ -573,8 +610,6 @@ def main() -> int:
     torch.set_grad_enabled(False)
     device = torch.device("cuda")
     dtype = torch.float16
-    eye_width = width // 2 if args.layout == "half-sbs" else width
-    eye_height = height // 2 if args.layout == "half-ou" else height
     y, x = torch.meshgrid(
         torch.linspace(-1.0, 1.0, eye_height, device=device, dtype=dtype),
         torch.linspace(-1.0, 1.0, eye_width, device=device, dtype=dtype),
@@ -595,6 +630,22 @@ def main() -> int:
         (output_height, output_width, 3), dtype=torch.uint8, pin_memory=True
     )
     output_staging_view = memoryview(output_staging.numpy()).cast("B")
+    right_seed_staging = (
+        torch.empty((eye_height, eye_width, 3), dtype=torch.uint8, pin_memory=True)
+        if right_seed_process is not None else None
+    )
+    right_mask_staging = (
+        torch.empty((eye_height, eye_width), dtype=torch.uint8, pin_memory=True)
+        if right_mask_process is not None else None
+    )
+    right_seed_staging_view = (
+        memoryview(right_seed_staging.numpy()).cast("B")
+        if right_seed_staging is not None else None
+    )
+    right_mask_staging_view = (
+        memoryview(right_mask_staging.numpy()).cast("B")
+        if right_mask_staging is not None else None
+    )
     started = time.perf_counter()
     processed = 0
     hole_sum = 0.0
@@ -791,6 +842,19 @@ def main() -> int:
                 previous_right = right.detach().clone()
                 previous_left_valid = left_valid.detach().clone()
                 previous_right_valid = right_valid.detach().clone()
+                # The generative second-eye backend consumes the geometrically
+                # correct right-eye seed and the original disocclusion mask.
+                # Export these before optional eye swapping and before packing
+                # into a squeezed headset layout so the network always sees an
+                # undistorted full eye.
+                if right_seed_process is not None and right_seed_staging is not None:
+                    right_seed_u8 = (
+                        right[0].permute(1, 2, 0).mul(255.0).clamp_(0, 255).byte().contiguous()
+                    )
+                    right_seed_staging.copy_(right_seed_u8, non_blocking=True)
+                if right_mask_process is not None and right_mask_staging is not None:
+                    right_mask_u8 = right_hole_mask[0, 0].mul(255.0).byte().contiguous()
+                    right_mask_staging.copy_(right_mask_u8, non_blocking=True)
                 if args.eye_swap:
                     left, right = right, left
                 if args.layout in ("half-sbs", "full-sbs"):
@@ -803,6 +867,10 @@ def main() -> int:
                 output_staging.copy_(stereo_u8, non_blocking=True)
                 torch.cuda.current_stream().synchronize()
                 encoder_process.stdin.write(output_staging_view)
+                if right_seed_process is not None and right_seed_process.stdin is not None:
+                    right_seed_process.stdin.write(right_seed_staging_view)
+                if right_mask_process is not None and right_mask_process.stdin is not None:
+                    right_mask_process.stdin.write(right_mask_staging_view)
                 processed += 1
                 if processed == 1 or processed % 30 == 0 or processed == args.frames:
                     elapsed = time.perf_counter() - started
@@ -824,13 +892,31 @@ def main() -> int:
     finally:
         decoder.stdout.close()
         encoder_process.stdin.close()
+        if right_seed_process is not None and right_seed_process.stdin is not None:
+            right_seed_process.stdin.close()
+        if right_mask_process is not None and right_mask_process.stdin is not None:
+            right_mask_process.stdin.close()
 
     decoder.wait(timeout=30)
     encoder_process.wait(timeout=120)
+    if right_seed_process is not None:
+        right_seed_process.wait(timeout=120)
+    if right_mask_process is not None:
+        right_mask_process.wait(timeout=120)
     if decoder.returncode != 0:
         raise RuntimeError("VR decoder failed: " + decoder.stderr.read().decode("utf-8", errors="replace"))
     if encoder_process.returncode != 0:
         raise RuntimeError("VR encoder failed: " + encoder_process.stderr.read().decode("utf-8", errors="replace"))
+    if right_seed_process is not None and right_seed_process.returncode != 0:
+        raise RuntimeError(
+            "VR right-eye seed encoder failed: "
+            + right_seed_process.stderr.read().decode("utf-8", errors="replace")
+        )
+    if right_mask_process is not None and right_mask_process.returncode != 0:
+        raise RuntimeError(
+            "VR disocclusion-mask encoder failed: "
+            + right_mask_process.stderr.read().decode("utf-8", errors="replace")
+        )
     if processed != args.frames:
         raise RuntimeError(f"depth sidecars contain {processed} frames, expected {args.frames}")
     elapsed = time.perf_counter() - started
@@ -846,6 +932,8 @@ def main() -> int:
                 "method": args.stereo_method,
                 "temporal": "motion" if use_motion else args.temporal_mode,
                 "pixel_format": args.pixel_format, "output": str(args.output_video),
+                "right_seed_output": str(args.right_seed_output) if args.right_seed_output else None,
+                "right_mask_output": str(args.right_mask_output) if args.right_mask_output else None,
             }, separators=(",", ":"),
         ), flush=True,
     )

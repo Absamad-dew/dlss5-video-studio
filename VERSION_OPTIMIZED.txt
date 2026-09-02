@@ -1,2 +1,2 @@
-16.0.0-adaptive-vr-audio
-Adaptive VR comfort now reacts to motion confidence and scene cuts, offline modes inherit shared-memory/CPU scheduling optimizations, 4K stereo uses pinned staging, and realtime audio starts from a prewarmed sample clock without periodic hold/dropout correction.
+17.0.0-generative-vr
+VR now supports an optional official M2SVid full-attention second-eye backend: Temporal LDI supplies geometry and disocclusion masks, long clips use overlapping model windows, hybrid blending preserves the source eye, and Auto selects 384/640/768 model resolution by VRAM.

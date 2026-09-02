@@ -23,3 +23,19 @@ Relevant upstream projects:
 - TorchVision RAFT Small C_T_V2: BSD-3-Clause code distribution; https://docs.pytorch.org/vision/main/models/generated/torchvision.models.optical_flow.raft_small.html
 
 The release archive carries local copies of the applicable license texts. Dataset-derived restrictions, if any, remain the responsibility of the user as described by the upstream TorchVision documentation.
+# M2SVid
+
+Optional generative VR inference uses the official Google Research M2SVid source and checkpoint, pinned by the installer to commit `11b0133093d6abfcc6ff953890edf05457975318`.
+
+- Project: https://github.com/google-research/m2svid
+- License: Apache License 2.0
+- Local license after installation: `licenses/vr/M2SVid-Apache-2.0.txt`
+
+# OpenCLIP
+
+M2SVid conditioning uses the LAION OpenCLIP ViT-H-14 checkpoint through OpenCLIP.
+
+- Project: https://github.com/mlfoundations/open_clip
+- Checkpoint: https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+- License: MIT
+- Local license after installation: `licenses/vr/OpenCLIP-MIT.txt`

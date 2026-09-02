@@ -26,6 +26,12 @@ param(
     [ValidateRange(0.5,5.0)] [double] $VRMaxDisparityPercent = 2.4,
     [ValidateSet('Inverse','Layered','TemporalLDI')] [string] $VRStereoMethod = 'TemporalLDI',
     [ValidateSet('PreStereo','PreAndPerEye')] [string] $VRDLSSMode = 'PreStereo',
+    [ValidateSet('Off','M2SVidHybrid','M2SVidFull')] [string] $VRGenerativeBackend = 'Off',
+    [ValidateSet('Auto','384','512','640','768')] [string] $VRGenerativeResolution = 'Auto',
+    [ValidateRange(0,25)] [int] $VRGenerativeChunkFrames = 0,
+    [ValidateRange(0,8)] [int] $VRGenerativeOverlapFrames = 2,
+    [ValidateRange(0.0,1.0)] [double] $VRGenerativeHoleStrength = 1.0,
+    [ValidateRange(0.0,1.0)] [double] $VRGenerativeRefineStrength = 0.30,
     [ValidateSet('Symmetric','Left','Right')] [string] $VREyeAnchor = 'Symmetric',
     [ValidateSet('Off','EMA','Motion')] [string] $VRTemporalMode = 'Motion',
     [ValidateSet('Manual','Subject','Comfort')] [string] $VRConvergenceMode = 'Subject',
@@ -141,6 +147,11 @@ $UpscalerThirdParty = Join-Path $Root 'third_party'
 $RaftWeights = Join-Path $Root 'models\motion\raft_small_C_T_V2-01064c6d.pth'
 $SpatialMediaTool = Join-Path $Tools 'spatialmedia\__main__.py'
 $VRDepthWorker = Join-Path $Tools 'vr_depth\vr_depth_worker.py'
+$M2SVidWorker = Join-Path $Tools 'vr_generative\m2svid_worker.py'
+$M2SVidRepository = Join-Path $Root 'third_party\m2svid'
+$M2SVidCheckpoint = Join-Path $Root 'models\vr\m2svid\m2svid_weights.pt'
+$M2SVidOpenClip = Join-Path $Root 'models\vr\m2svid\open_clip_pytorch_model.bin'
+$M2SVidInstallStatus = Join-Path $Root 'models\vr\m2svid\install.json'
 $SourceResolver = Join-Path $PSScriptRoot 'source-resolver.psm1'
 $YtDlp = Join-Path $Tools 'yt-dlp.exe'
 
@@ -174,8 +185,21 @@ function Join-EncodedChunks([string] $Directory, [string] $Destination, [int] $E
 }
 
 function Run-Tool([string] $File, [object[]] $Arguments, [string] $Failure) {
-    & $File @Arguments 2>&1 | ForEach-Object { Write-Output ([string]$_) }
-    if ($LASTEXITCODE -ne 0) { throw "$Failure (exit code $LASTEXITCODE)" }
+    # Windows PowerShell 5 wraps every native stderr line in an ErrorRecord.
+    # With the script-wide Stop policy, harmless PyTorch/FFmpeg warnings used
+    # to abort the pipeline before their process could return an exit code.
+    # Keep the diagnostic text visible and judge native success exclusively by
+    # the process exit code, which still catches genuine worker failures.
+    $PreviousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $File @Arguments 2>&1 | ForEach-Object { Write-Output ([string]$_) }
+        $NativeExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorAction
+    }
+    if ($NativeExitCode -ne 0) { throw "$Failure (exit code $NativeExitCode)" }
 }
 
 function Get-VrCodecArguments([string] $SelectedCodec, [string] $SelectedPixelFormat) {
@@ -439,6 +463,19 @@ if (($PreviewOnly -and $RealtimeMotionBackend -eq 'raft') -or
 }
 if ($VRMode -ne 'Off') { $RequiredFiles += @($UpscalerPython,$SpatialMediaTool) }
 if ($VRMode -eq 'DepthSBS') { $RequiredFiles += $VRDepthWorker }
+if ($VRMode -eq 'DepthSBS' -and $VRGenerativeBackend -ne 'Off') {
+    $RequiredFiles += @(
+        $M2SVidWorker,$M2SVidCheckpoint,$M2SVidOpenClip,$M2SVidInstallStatus,
+        (Join-Path $M2SVidRepository 'configs\m2svid.yaml'),
+        (Join-Path $M2SVidRepository 'm2svid\models_for_sgm\m2svid_model.py')
+    )
+}
+if ($VRMode -eq 'DepthSBS' -and $VRGenerativeBackend -ne 'Off' -and
+    (-not (Test-Path -LiteralPath $M2SVidInstallStatus -PathType Leaf) -or
+     -not (Test-Path -LiteralPath $M2SVidCheckpoint -PathType Leaf) -or
+     -not (Test-Path -LiteralPath $M2SVidOpenClip -PathType Leaf))) {
+    throw 'Generative VR requires M2SVid and OpenCLIP weights. Run INSTALL_VR_MODELS.cmd in the program folder, then restart Studio.'
+}
 foreach ($Path in $RequiredFiles) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Required file is missing: $Path" }
 }
@@ -922,6 +959,12 @@ $Plan = [ordered]@{
     duration_seconds=$Duration; total_frames=$TotalFrames; pipeline_order=$PipelineOrder
     pipeline_label=$PipelineLabel; vr_mode=$VRMode; vr_layout=$VRSbsLayout
     vr_dlss5_mode=if($VRMode-eq'DepthSBS'){$VRDLSSMode}else{$null}
+    vr_generative_backend=if($VRMode-eq'DepthSBS'){$VRGenerativeBackend}else{$null}
+    vr_generative_resolution=if($VRMode-eq'DepthSBS' -and $VRGenerativeBackend-ne'Off'){$VRGenerativeResolution}else{$null}
+    vr_generative_chunk_frames=if($VRMode-eq'DepthSBS' -and $VRGenerativeBackend-ne'Off'){$VRGenerativeChunkFrames}else{$null}
+    vr_generative_overlap_frames=if($VRMode-eq'DepthSBS' -and $VRGenerativeBackend-ne'Off'){$VRGenerativeOverlapFrames}else{$null}
+    vr_generative_hole_strength=if($VRMode-eq'DepthSBS' -and $VRGenerativeBackend-ne'Off'){$VRGenerativeHoleStrength}else{$null}
+    vr_generative_refine_strength=if($VRMode-eq'DepthSBS' -and $VRGenerativeBackend-ne'Off'){$VRGenerativeRefineStrength}else{$null}
     vr_eye_separation=if($VRMode-eq'DepthSBS'){$VREyeSeparation}else{$null}
     vr_convergence=if($VRMode-eq'DepthSBS'){$VRConvergence}else{$null}
     vr_depth_gamma=if($VRMode-eq'DepthSBS'){$VRDepthGamma}else{$null}
@@ -1605,6 +1648,14 @@ try {
             Emit-Progress '3D VR' 'Synthesizing distinct left/right views from neural depth' 95 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
             $VrDepthVideoOnly = Join-Path $Work 'vr-depth-video-only.mp4'
             $LayoutName = switch ($VRSbsLayout) { 'FullSBS' {'full-sbs'} 'HalfOU' {'half-ou'} 'FullOU' {'full-ou'} default {'half-sbs'} }
+            $UseGenerativeVr = $VRGenerativeBackend -ne 'Off'
+            # M2SVid must see an undistorted, full-resolution left anchor and
+            # right-eye reprojection. Final Half-SBS/Half-OU packing happens
+            # only after the model has reconstructed the second view.
+            $VrWorkerLayout = if ($UseGenerativeVr) { 'full-sbs' } else { $LayoutName }
+            $VrWorkerEyeAnchor = if ($UseGenerativeVr) { 'left' } else { $VREyeAnchor.ToLowerInvariant() }
+            $VrRightSeed = Join-Path $Work 'vr-right-seed.mkv'
+            $VrRightMask = Join-Path $Work 'vr-right-disocclusion-mask.mkv'
             $CodecNameVr = if ($Codec -eq 'H265') { 'h265' } else { 'h264' }
             $VrDepthPixelFormat = if($Codec-eq'H265' -and $VRPixelFormat-eq'HEVC10Bit'){'p010le'}else{'yuv420p'}
             $VrStereoMethodName = if($VRStereoMethod-eq'TemporalLDI'){'temporal-ldi'}else{$VRStereoMethod.ToLowerInvariant()}
@@ -1612,7 +1663,7 @@ try {
                 '-s','-B',$VRDepthWorker,'--ffmpeg',$Ffmpeg,'--input-video',$FlatOutput,
                 '--depth-directory',$ChunkDirectory,'--motion-directory',$ChunkDirectory,'--output-video',$VrDepthVideoOnly,
                 '--width',$OutputWidth,'--height',$OutputHeight,'--frames',$TotalFrames,'--fps',$Fps,
-                '--layout',$LayoutName,
+                '--layout',$VrWorkerLayout,
                 '--eye-separation',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VREyeSeparation)),
                 '--convergence',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRConvergence)),
                 '--depth-gamma',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRDepthGamma)),
@@ -1621,7 +1672,7 @@ try {
                 '--temporal-smoothing',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRTemporalSmoothing)),
                 '--max-disparity-percent',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRMaxDisparityPercent)),
                 '--stereo-method',$VrStereoMethodName,
-                '--eye-anchor',$VREyeAnchor.ToLowerInvariant(),
+                '--eye-anchor',$VrWorkerEyeAnchor,
                 '--temporal-mode',$VRTemporalMode.ToLowerInvariant(),
                 '--convergence-mode',$VRConvergenceMode.ToLowerInvariant(),
                 '--disparity-curve',$VRDisparityCurve.ToLowerInvariant(),
@@ -1644,8 +1695,58 @@ try {
                 '--pixel-format',$VrDepthPixelFormat,
                 '--codec',$CodecNameVr,'--quality',$Quality
             )
-            if ($VREyeSwap) { $VrDepthArgs += '--eye-swap' }
+            if ($UseGenerativeVr) {
+                $VrDepthArgs += @('--right-seed-output',$VrRightSeed,'--right-mask-output',$VrRightMask)
+            } elseif ($VREyeSwap) {
+                $VrDepthArgs += '--eye-swap'
+            }
             Run-Tool $UpscalerPython $VrDepthArgs 'Depth-warped VR synthesis failed'
+            if ($UseGenerativeVr) {
+                Emit-Progress 'Generative VR' 'M2SVid is reconstructing and refining the second eye' 96 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
+                $M2SVidGenerated = Join-Path $Work 'vr-m2svid-generated.mkv'
+                $M2MaxSide = if ($VRGenerativeResolution -eq 'Auto') { 0 } else { [int]$VRGenerativeResolution }
+                $M2Args = @(
+                    '-s','-B',$M2SVidWorker,'--ffmpeg',$Ffmpeg,
+                    '--repository',$M2SVidRepository,'--checkpoint',$M2SVidCheckpoint,'--open-clip',$M2SVidOpenClip,
+                    '--input-video',$FlatOutput,'--reprojected-video',$VrRightSeed,'--mask-video',$VrRightMask,
+                    '--output-video',$M2SVidGenerated,'--width',$OutputWidth,'--height',$OutputHeight,
+                    '--frames',$TotalFrames,'--fps',$Fps,'--max-side',$M2MaxSide,
+                    '--chunk-frames',$VRGenerativeChunkFrames,'--overlap-frames',$VRGenerativeOverlapFrames
+                )
+                Run-Tool $UpscalerPython $M2Args 'M2SVid generative second-eye reconstruction failed'
+
+                $VrGenerativeStereo = Join-Path $Work 'vr-generative-stereo.mp4'
+                $GenerativeRefine = if ($VRGenerativeBackend -eq 'M2SVidFull') { 1.0 } else { $VRGenerativeRefineStrength }
+                $GenerativeHoles = if ($VRGenerativeBackend -eq 'M2SVidFull') { 1.0 } else { $VRGenerativeHoleStrength }
+                $RefineText = [string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.####}',$GenerativeRefine)
+                $HoleText = [string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.####}',$GenerativeHoles)
+                # maskedmerge shares format negotiation across its three
+                # inputs.  Without explicit color formats FFmpeg can select
+                # the gray mask format for the entire graph and silently turn
+                # both eyes monochrome. Keep the image legs planar RGB while
+                # the third leg remains an 8-bit mask.
+                $EyeFilterPrefix = "[0:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[seed];[1:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[gen];[seed][gen]blend=all_expr='A*(1-$RefineText)+B*$RefineText'[refined];[2:v]scale=$($OutputWidth):$($OutputHeight):flags=neighbor,format=gray,lut=y='val*$HoleText'[mask];[refined][gen][mask]maskedmerge[right];[3:v]scale=$($OutputWidth):$($OutputHeight):flags=lanczos,setsar=1,format=gbrp[left];"
+                $FirstEye = if ($VREyeSwap) { 'right' } else { 'left' }
+                $SecondEye = if ($VREyeSwap) { 'left' } else { 'right' }
+                $PackFilter = switch ($VRSbsLayout) {
+                    'FullSBS' { "[$FirstEye][$SecondEye]hstack=inputs=2[v]" }
+                    'HalfOU' { "[$FirstEye]scale=$($OutputWidth):$([int]($OutputHeight/2)):flags=lanczos[a];[$SecondEye]scale=$($OutputWidth):$([int]($OutputHeight/2)):flags=lanczos[b];[a][b]vstack=inputs=2[v]" }
+                    'FullOU' { "[$FirstEye][$SecondEye]vstack=inputs=2[v]" }
+                    default { "[$FirstEye]scale=$([int]($OutputWidth/2)):$($OutputHeight):flags=lanczos[a];[$SecondEye]scale=$([int]($OutputWidth/2)):$($OutputHeight):flags=lanczos[b];[a][b]hstack=inputs=2[v]" }
+                }
+                $VrCodecArguments = Get-VrCodecArguments $Codec $VRPixelFormat
+                $VrEncoder = if ($Codec -eq 'H265') { 'hevc_nvenc' } else { 'h264_nvenc' }
+                Run-Tool $Ffmpeg (@(
+                    '-y','-v','error','-i',$VrRightSeed,'-i',$M2SVidGenerated,'-i',$VrRightMask,'-i',$FlatOutput,
+                    '-filter_complex',($EyeFilterPrefix+$PackFilter),'-map','[v]','-frames:v',$TotalFrames,
+                    '-c:v',$VrEncoder,'-preset','p2','-rc','constqp','-qp',$Quality
+                )+$VrCodecArguments+@('-movflags','+faststart',$VrGenerativeStereo)) 'Generative VR eye compositing failed'
+                $VrDepthVideoOnly = $VrGenerativeStereo
+                Write-Output ('VR_GENERATIVE_COMPOSITE_JSON '+([ordered]@{
+                    backend=$VRGenerativeBackend;hole_strength=$GenerativeHoles;refine_strength=$GenerativeRefine
+                    source_geometry='TemporalLDI';eye_anchor='Left';layout=$VRSbsLayout;output=$VrDepthVideoOnly
+                }|ConvertTo-Json -Compress))
+            }
             if ($VRDLSSMode -eq 'PreAndPerEye') {
                 Emit-Progress '3D VR + DLSS5' 'Running a real DLSS5 refinement pass for each eye' 97 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
                 $VrPerEyeDlss = Join-Path $Work 'vr-depth-per-eye-dlss.mp4'
@@ -1748,6 +1849,12 @@ try {
         vr_mode = $VRMode
         vr_sbs_layout = if ($VRMode -in @('CinemaSBS','DepthSBS')) { $VRSbsLayout } else { $null }
         vr_dlss5_mode = if($VRMode-eq'DepthSBS'){$VRDLSSMode}else{$null}
+        vr_generative_backend = if($VRMode-eq'DepthSBS'){$VRGenerativeBackend}else{$null}
+        vr_generative_resolution = if($VRMode-eq'DepthSBS' -and $VRGenerativeBackend-ne'Off'){$VRGenerativeResolution}else{$null}
+        vr_generative_chunk_frames = if($VRMode-eq'DepthSBS' -and $VRGenerativeBackend-ne'Off'){$VRGenerativeChunkFrames}else{$null}
+        vr_generative_overlap_frames = if($VRMode-eq'DepthSBS' -and $VRGenerativeBackend-ne'Off'){$VRGenerativeOverlapFrames}else{$null}
+        vr_generative_hole_strength = if($VRMode-eq'DepthSBS' -and $VRGenerativeBackend-ne'Off'){$VRGenerativeHoleStrength}else{$null}
+        vr_generative_refine_strength = if($VRMode-eq'DepthSBS' -and $VRGenerativeBackend-ne'Off'){$VRGenerativeRefineStrength}else{$null}
         vr_eye_separation = if($VRMode-eq'DepthSBS'){$VREyeSeparation}else{$null}
         vr_convergence = if($VRMode-eq'DepthSBS'){$VRConvergence}else{$null}
         vr_depth_gamma = if($VRMode-eq'DepthSBS'){$VRDepthGamma}else{$null}
