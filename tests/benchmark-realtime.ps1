@@ -6,6 +6,7 @@ param(
     [ValidateSet('dis','raft')] [string] $MotionBackend = 'raft',
     [ValidateSet('Auto','Standard','HighVram')] [string] $HardwareProfile = 'Auto',
     [ValidateSet('Auto','Native','Quality','Balanced','Performance')] [string] $RenderPreset = 'Auto',
+    [ValidateSet('Auto','Dml','Cpu')] [string] $DepthComputeBackend = 'Auto',
     [ValidateSet('Source','Double','60','72','90','120')] [string] $FpsMode = 'Source',
     [ValidateSet('Off','MotionGPU','CompatibilityBlend','NvidiaDLSSGx2','NvidiaMFGx3','NvidiaMFGx4','NvidiaDynamicMFG')] [string] $FrameGeneration = 'Off',
     [ValidateSet(0,60,72,90,120)] [int] $TargetFps = 0,
@@ -27,7 +28,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $Root 'engine\ReShade.ini') -Destination $Config -Force
     & $Runner -InputVideo $InputVideo -ConfigPath $Config -OutputMode $OutputMode `
         -PerformanceProfile Fast -Upscaler None -PipelineOrder DLSSOnly `
-        -HardwareProfile $HardwareProfile -RealtimeRenderPreset $RenderPreset `
+        -HardwareProfile $HardwareProfile -RealtimeRenderPreset $RenderPreset -DepthComputeBackend $DepthComputeBackend `
         -StartSeconds $StartSeconds -FrameCount $Frames -PreviewOnly -RealtimeBufferSeconds 3 `
         -RealtimeControlPath $Control -RealtimeGuideWidth $GuideWidth `
         -RealtimeDepthInterval $DepthInterval -RealtimeDepthMinInterval ([math]::Max(1,[math]::Floor($DepthInterval/2))) `

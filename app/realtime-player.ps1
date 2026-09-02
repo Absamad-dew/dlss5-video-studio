@@ -164,10 +164,6 @@ $AudioSeekPosition = 0.0
 $AudioPlaybackRate = 1.0
 $AudioClockMedia = [double]::NaN
 $AudioClockObservedWall = 0.0
-$AudioRateEstimate = [double]::NaN
-$AudioRateCandidate = 1.0
-$AudioRateCandidateSince = 0.0
-$LastAudioRateChangeWall = 0.0
 $LatestVideoRate = 1.0
 $AudioPendingStart = $false
 $AudioPendingSince = 0.0
@@ -231,11 +227,6 @@ function Get-MonotonicSeconds {
     return [Diagnostics.Stopwatch]::GetTimestamp() / [double][Diagnostics.Stopwatch]::Frequency
 }
 
-function Get-TargetAudioRate {
-    if ([double]::IsNaN($script:AudioRateEstimate) -or $script:AudioRateEstimate -ge 0.965) { return 1.0 }
-    return [math]::Max(0.5,[math]::Min(0.95,[math]::Round($script:AudioRateEstimate*0.985,2)))
-}
-
 function Find-AudioWindow([int] $WaitMilliseconds = 0) {
     if (-not $script:AudioProcess -or $script:AudioProcess.HasExited) { return [IntPtr]::Zero }
     $Deadline = (Get-MonotonicSeconds) + ($WaitMilliseconds/1000.0)
@@ -287,8 +278,8 @@ function Poll-AudioStatus {
             $RawClock = 0.0
             $LatestClockMatch = $ClockMatches[$ClockMatches.Count-1]
             if ([double]::TryParse($LatestClockMatch.Groups['clock'].Value,[Globalization.NumberStyles]::Float,$Invariant,[ref]$RawClock)) {
-                # ffplay's master clock is output time. With atempo applied,
-                # source-media time advances by output clock * playback rate.
+                # ffplay runs at source speed, so its master clock maps directly
+                # onto the source-media timeline after the seek offset.
                 $script:AudioClockMedia = $script:AudioSeekPosition + [math]::Max(0.0,$RawClock)*$script:AudioPlaybackRate
                 $script:AudioClockObservedWall = Get-MonotonicSeconds
             }
@@ -419,9 +410,7 @@ function Start-Audio([double] $Position) {
         '-x','64','-y','64','-left','-32000','-top','-32000','-showmode','1','-window_title',$WindowTitle)
     if($InputTlsNoVerify){$AudioArgs+=@('-tls_verify','0')}
     if($InputHeaderBlock){$AudioArgs+=@('-headers',$InputHeaderBlock)}
-    $RateText = [string]::Format($Invariant,'{0:0.###}',[math]::Max(0.5,[math]::Min(1.0,$script:AudioPlaybackRate)))
     $AudioFilter = 'aresample=async=0,asetpts=N/SR/TB'
-    if ([math]::Abs($script:AudioPlaybackRate-1.0) -gt 0.005) { $AudioFilter += ',atempo=' + $RateText }
     $AudioArgs+=@('-ss',([string]::Format($Invariant,'{0:0.######}',$SeekPosition)),'-i',$ResolvedInput,
         '-vn','-sn','-sync','audio','-af',$AudioFilter)
     $Psi=[Diagnostics.ProcessStartInfo]::new();$Psi.FileName=$Ffplay
@@ -444,7 +433,6 @@ function Start-Audio([double] $Position) {
     $script:AudioClockMedia=[double]::NaN
     $script:AudioClockObservedWall=0.0
     $script:LastAudioStartWall=Get-MonotonicSeconds
-    $script:LastAudioRateChangeWall=$script:LastAudioStartWall
     Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_STARTED position={0:0.######} rate={1:0.###} pid={2}',$SeekPosition,$script:AudioPlaybackRate,$script:AudioProcess.Id))
 }
 
@@ -509,8 +497,6 @@ function Update-AudioClockFromTelemetry {
         if ($script:ProducerFps -gt 0.1 -and $RealFps -gt 0.1) {
             $ObservedRate = [math]::Max(0.1,[math]::Min(1.0,$RealFps/$script:ProducerFps))
             $script:LatestVideoRate = $ObservedRate
-            if ([double]::IsNaN($script:AudioRateEstimate)) { $script:AudioRateEstimate = $ObservedRate }
-            else { $script:AudioRateEstimate = 0.72*$script:AudioRateEstimate + 0.28*$ObservedRate }
         }
     } else {
         $Position = $script:LatestVideoPosition
@@ -520,12 +506,13 @@ function Update-AudioClockFromTelemetry {
         if (($Now-$script:AudioPendingSince) -lt 0.22) { return }
         $StartPosition = $script:LatestVideoPosition + [math]::Max(0.0,$Now-$script:LastTelemetryWall)*$script:LatestVideoRate
         $StartPosition = [math]::Max($script:AudioPendingPosition,$StartPosition)
-        # The startup buffer normally provides enough measured frames to pick
-        # the correct tempo before the audio device is opened. This avoids a
-        # later audible rate-change restart on heavy resolutions.
-        $script:AudioPlaybackRate = Get-TargetAudioRate
-        $script:AudioRateCandidate = $script:AudioPlaybackRate
-        $script:AudioRateCandidateSince = $Now
+        # Keep one normal-speed audio endpoint for the whole playback session.
+        # Early display-rate telemetry is deliberately ignored here: startup
+        # scheduling can report a transient 0.5x rate even when the prepared
+        # realtime buffer immediately settles at source speed. Reopening ffplay
+        # to change tempo caused the audible dropout/rush cycle. Fine sync and
+        # rebuffering below pause this same SDL device against its sample clock.
+        $script:AudioPlaybackRate = 1.0
         $script:AudioPendingStart = $false
         Start-Audio $StartPosition
         Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_ALIGNED_START position={0:0.###}',$StartPosition))
@@ -538,29 +525,9 @@ function Update-AudioClockFromTelemetry {
         return
     }
 
-    # When the renderer cannot sustain source FPS, normal-speed audio is
-    # mathematically guaranteed to run ahead. Slow it with pitch correction to
-    # the measured media rate. Hysteresis prevents repeated device reopenings.
-    if (-not [double]::IsNaN($script:AudioRateEstimate)) {
-        $TargetRate = Get-TargetAudioRate
-        if ([math]::Abs($TargetRate-$script:AudioRateCandidate) -gt 0.025) {
-            $script:AudioRateCandidate = $TargetRate
-            $script:AudioRateCandidateSince = $Now
-        } elseif ([math]::Abs($TargetRate-$script:AudioPlaybackRate) -ge 0.07 -and
-                  ($Now-$script:AudioRateCandidateSince) -ge 2.4 -and
-                  ($Now-$script:LastAudioRateChangeWall) -ge 6.0) {
-            $OldRate = $script:AudioPlaybackRate
-            $script:AudioPlaybackRate = $TargetRate
-            Start-Audio $Position
-            Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RATE old={0:0.###} new={1:0.###} video_rate={2:0.###} position={3:0.###}',
-                $OldRate,$TargetRate,$script:AudioRateEstimate,$Position))
-            return
-        }
-    }
-
     # Fine sync uses the actual ffplay sample clock. Hold only audio when it is
     # ahead; resume after the next displayed frames close the gap. This also
-    # bounds drift when video is slower than the minimum 0.5x atempo rate.
+    # bounds drift if display progress temporarily falls behind source speed.
     $AudioPosition = Get-EstimatedAudioPosition $Now
     if (-not [double]::IsNaN($AudioPosition)) {
         $VideoPosition = $Position + [math]::Max(0.0,$Now-$script:LastTelemetryWall)*$script:LatestVideoRate
@@ -594,8 +561,7 @@ while ($true) {
     $script:LastTelemetryWall=0.0;$script:LastTelemetryFrame=-1L;$script:LastAudioStartWall=0.0
     $script:AudioSuspended=$false;$script:AudioSuspendedPosition=0.0;$script:AudioSuspendReason=''
     $script:AudioPausePending=$false;$script:AudioPausePendingPosition=0.0;$script:AudioPausePendingReason=''
-    $script:AudioPlaybackRate=1.0;$script:AudioRateEstimate=[double]::NaN;$script:AudioRateCandidate=1.0
-    $script:AudioRateCandidateSince=Get-MonotonicSeconds;$script:LastAudioRateChangeWall=0.0;$script:LatestVideoRate=1.0
+    $script:AudioPlaybackRate=1.0;$script:LatestVideoRate=1.0
     $script:AudioPendingStart=$false;$script:AudioPendingSince=0.0;$script:AudioPendingPosition=$CurrentStart
     $script:VideoPlaybackStarted=$false;$script:VideoPaused=$false;$script:BufferingPaused=$false;$script:LatestVideoPosition=$CurrentStart
     $script:LatestRealFrames=0L;$script:ProducerSentFrames=0L;$script:ProducerTargetFrames=0L;$script:ProducerFps=0.0

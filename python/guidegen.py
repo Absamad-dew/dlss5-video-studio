@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import json
 import math
 import mmap
@@ -34,7 +35,7 @@ def make_console_logging_safe() -> None:
 make_console_logging_safe()
 
 
-MOTION_MAGIC = b"D5MV0002"
+MOTION_MAGIC = b"D5MV0003"
 DEPTH_MAGIC = b"D5DP0002"
 MOTION_HEADER = struct.Struct("<8sIIIIIIII")
 DEPTH_HEADER = struct.Struct("<8sIIIII")
@@ -51,11 +52,11 @@ def atomic_path(path: Path) -> tuple[Path, Path]:
     return final, partial
 
 
-def is_shared_rgb(reference: str | Path) -> bool:
+def is_shared_reference(reference: str | Path) -> bool:
     return str(reference).startswith("shm://")
 
 
-def shared_rgb_tag(reference: str | Path) -> str:
+def shared_memory_tag(reference: str | Path) -> str:
     text = str(reference)
     if not text.startswith("shm://") or len(text) <= len("shm://"):
         raise ValueError("invalid shared RGB reference")
@@ -63,6 +64,44 @@ def shared_rgb_tag(reference: str | Path) -> str:
     if any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in name):
         raise ValueError("shared RGB name contains unsupported characters")
     return "Local\\" + name
+
+
+def is_shared_rgb(reference: str | Path) -> bool:
+    """Compatibility name for callers that still describe the RGB transport."""
+    return is_shared_reference(reference)
+
+
+def shared_rgb_tag(reference: str | Path) -> str:
+    return shared_memory_tag(reference)
+
+
+def open_sidecar_output(
+    reference: Path | str,
+    size: int,
+    shared_inputs: dict[str, mmap.mmap] | None,
+) -> tuple[object, Path | None, Path | None]:
+    """Open a sidecar in named RAM or as an atomic buffered file.
+
+    The mapping stays owned by ``shared_inputs`` until the native consumer
+    acknowledges the chunk. This removes the high-frequency motion/depth SSD
+    round trip from realtime while preserving the exact sidecar ABI.
+    """
+    if is_shared_reference(reference):
+        if shared_inputs is None:
+            raise ValueError("shared sidecar output requires a mapping registry")
+        key = str(reference)
+        if key in shared_inputs:
+            raise RuntimeError(f"shared sidecar mapping already exists: {key}")
+        mapping = mmap.mmap(-1, size, tagname=shared_memory_tag(key), access=mmap.ACCESS_WRITE)
+        shared_inputs[key] = mapping
+        return mapping, None, None
+    final, partial = atomic_path(Path(reference))
+    return partial.open("wb", buffering=8 * 1024 * 1024), final, partial
+
+
+def write_contiguous(stream: object, array: np.ndarray) -> None:
+    contiguous = np.ascontiguousarray(array)
+    stream.write(memoryview(contiguous).cast("B"))
 
 
 def resize_rgb(frame: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -138,6 +177,12 @@ class DepthRuntime:
         options.enable_mem_pattern = False
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        if backend == "cpu":
+            # Realtime CPU depth is sparse (normally one inference per 24
+            # frames). Four intra-op workers keep it comfortably ahead while
+            # leaving CPU capacity for native upload/present and the decoder.
+            options.intra_op_num_threads = 4
+            options.inter_op_num_threads = 1
         failures: list[str] = []
         self.session: ort.InferenceSession | None = None
         for providers in provider_candidates(backend, cache_dir):
@@ -270,6 +315,87 @@ def infer_depth(
     return runtime.infer_frame(frame, output_width, output_height)
 
 
+class DepthPrefetcher:
+    """Serialize depth inference while allowing decode to schedule it ahead.
+
+    DirectML sessions are stateful and should not be called concurrently.  A
+    persistent single-worker executor keeps that guarantee, avoids recreating
+    a thread for every display chunk and lets the decoder submit the exact
+    future periodic frame as soon as its RGB mapping is complete.
+    """
+
+    def __init__(
+        self, runtime, output_width: int, output_height: int, *, threaded: bool = True
+    ) -> None:
+        self.runtime = runtime
+        self.output_width = output_width
+        self.output_height = output_height
+        self.threaded = threaded
+        self.executor = (
+            concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="guide-depth")
+            if threaded
+            else None
+        )
+        self.lock = threading.Lock()
+        self.futures: dict[int, concurrent.futures.Future | np.ndarray] = {}
+
+    def _infer_timed(self, frame: np.ndarray) -> tuple[np.ndarray, float]:
+        started = time.perf_counter()
+        depth = infer_depth(self.runtime, frame, self.output_width, self.output_height)
+        return depth, time.perf_counter() - started
+
+    def schedule(self, global_index: int, frame: np.ndarray) -> bool:
+        with self.lock:
+            if global_index in self.futures:
+                return False
+            # Decoder-owned shared mappings are released after native display.
+            # Copy only the one future depth frame so inference can outlive the
+            # mapping and never hold a multi-frame RGB buffer hostage.
+            owned_frame = np.array(frame, dtype=np.uint8, copy=True, order="C")
+            self.futures[global_index] = (
+                self.executor.submit(self._infer_timed, owned_frame)
+                if self.executor is not None
+                else owned_frame
+            )
+            return True
+
+    def take(
+        self, global_index: int, frame: np.ndarray
+    ) -> tuple[np.ndarray, float, float, bool, int]:
+        with self.lock:
+            future = self.futures.pop(global_index, None)
+            stale_future_indices = [index for index in self.futures if index > global_index]
+            stale_futures = [self.futures.pop(index) for index in stale_future_indices]
+        for stale_future in stale_futures:
+            if isinstance(stale_future, concurrent.futures.Future):
+                stale_future.cancel()
+        prefetched = future is not None
+        if future is None:
+            self.schedule(global_index, frame)
+            with self.lock:
+                future = self.futures.pop(global_index)
+        wait_started = time.perf_counter()
+        if isinstance(future, concurrent.futures.Future):
+            depth, compute_s = future.result()
+            wait_s = time.perf_counter() - wait_started
+        else:
+            depth, compute_s = self._infer_timed(future)
+            wait_s = compute_s
+        return depth, compute_s, wait_s, prefetched, len(stale_futures)
+
+    def discard_before(self, global_index: int) -> None:
+        with self.lock:
+            stale = [index for index in self.futures if index < global_index]
+            for index in stale:
+                future = self.futures.pop(index)
+                if isinstance(future, concurrent.futures.Future):
+                    future.cancel()
+
+    def close(self) -> None:
+        if self.executor is not None:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+
+
 def flow_confidence(
     current: np.ndarray,
     previous: np.ndarray,
@@ -326,16 +452,14 @@ def occlusion_aware_confidence(
     flow: np.ndarray,
 ) -> np.ndarray:
     """Lower history confidence around motion discontinuities/disocclusions."""
+    # OpenCV filters every channel independently. Two vector-flow Sobel calls
+    # are bit-equivalent to four scalar calls but halve thread-pool barriers,
+    # which matters when DLSS is concurrently submitting high-resolution work.
+    grad_x = np.abs(cv2.Sobel(flow, cv2.CV_32F, 1, 0, ksize=3))
+    grad_y = np.abs(cv2.Sobel(flow, cv2.CV_32F, 0, 1, ksize=3))
     grad = np.maximum(
-        np.abs(cv2.Sobel(flow[..., 0], cv2.CV_32F, 1, 0, ksize=3)),
-        np.abs(cv2.Sobel(flow[..., 0], cv2.CV_32F, 0, 1, ksize=3)),
-    )
-    grad = np.maximum(
-        grad,
-        np.maximum(
-            np.abs(cv2.Sobel(flow[..., 1], cv2.CV_32F, 1, 0, ksize=3)),
-            np.abs(cv2.Sobel(flow[..., 1], cv2.CV_32F, 0, 1, ksize=3)),
-        ),
+        np.maximum(grad_x[..., 0], grad_x[..., 1]),
+        np.maximum(grad_y[..., 0], grad_y[..., 1]),
     )
     cv2.multiply(grad, -0.18, grad)
     cv2.exp(grad, grad)
@@ -516,9 +640,10 @@ def generate_chunk(
     state: GuideState,
     input_path: Path | str,
     frames_count: int,
-    motion_output: Path,
-    depth_output: Path,
+    motion_output: Path | str,
+    depth_output: Path | str,
     shared_inputs: dict[str, mmap.mmap] | None = None,
+    depth_prefetcher: DepthPrefetcher | None = None,
 ) -> dict[str, object]:
     expected = args.input_width * args.input_height * frames_count * 3
     if is_shared_rgb(input_path):
@@ -543,8 +668,23 @@ def generate_chunk(
             shape=(frames_count, args.input_height, args.input_width, 3),
         )
     geom = guide_geometry(args.width, args.height, args.guide_width)
-    motion_final, motion_partial = atomic_path(motion_output)
-    depth_final, depth_partial = atomic_path(depth_output)
+    motion_bytes = MOTION_HEADER.size + frames_count * geom.width * geom.height * MOTION_DTYPE.itemsize
+    depth_bytes = DEPTH_HEADER.size + frames_count * geom.width * geom.height * 2
+    motion_stream, motion_final, motion_partial = open_sidecar_output(
+        motion_output, motion_bytes, shared_inputs
+    )
+    try:
+        depth_stream, depth_final, depth_partial = open_sidecar_output(
+            depth_output, depth_bytes, shared_inputs
+        )
+    except BaseException:
+        if is_shared_reference(motion_output) and shared_inputs is not None:
+            shared_inputs.pop(str(motion_output), None).close()
+        else:
+            motion_stream.close()
+            if motion_partial is not None:
+                motion_partial.unlink(missing_ok=True)
+        raise
     records = np.zeros((geom.height, geom.width), dtype=MOTION_DTYPE)
     yy, xx = np.mgrid[0 : geom.height, 0 : geom.width].astype(np.float32)
     depth_frames = 0
@@ -555,9 +695,11 @@ def generate_chunk(
     refresh_deltas: list[float] = []
     depth_scales: list[float] = []
     started = time.perf_counter()
+    chunk_global_start = state.global_frame
     depth_infer_s = 0.0
     depth_wait_s = 0.0
     depth_prefetch_discarded = 0
+    depth_prefetch_hits = 0
     write_s = 0.0
     commit_s = 0.0
 
@@ -579,24 +721,15 @@ def generate_chunk(
     # motion/confidence maps for the intervening frames.  The same model and
     # exact target frames are used, so this removes a serial wait without
     # changing the rendered result.
-    depth_executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix="guide-depth"
-    )
-    depth_future: concurrent.futures.Future | None = None
-    depth_future_index = -1
-
-    def infer_timed(local_index: int) -> tuple[np.ndarray, float]:
-        infer_started = time.perf_counter()
-        inferred = infer_depth(
-            runtime, np.asarray(frames[local_index]), geom.width, geom.height
-        )
-        return inferred, time.perf_counter() - infer_started
+    owns_depth_prefetcher = depth_prefetcher is None
+    if depth_prefetcher is None:
+        depth_prefetcher = DepthPrefetcher(runtime, geom.width, geom.height)
 
     def schedule_depth(local_index: int) -> None:
-        nonlocal depth_future, depth_future_index
         if 0 <= local_index < frames_count:
-            depth_future_index = local_index
-            depth_future = depth_executor.submit(infer_timed, local_index)
+            depth_prefetcher.schedule(
+                chunk_global_start + local_index, np.asarray(frames[local_index])
+            )
 
     first_periodic_index = 0
     if state.previous_depth is not None:
@@ -606,7 +739,11 @@ def generate_chunk(
     schedule_depth(first_periodic_index)
 
     try:
-        with motion_partial.open("wb") as motion_stream, depth_partial.open("wb") as depth_stream:
+        with contextlib.ExitStack() as stack:
+            if motion_partial is not None:
+                stack.callback(motion_stream.close)
+            if depth_partial is not None:
+                stack.callback(depth_stream.close)
             motion_stream.write(
                 MOTION_HEADER.pack(
                     MOTION_MAGIC,
@@ -673,14 +810,24 @@ def generate_chunk(
                                 flow[..., 0] * flow[..., 0] + flow[..., 1] * flow[..., 1]
                             )
                             p95_motion = float(np.quantile(magnitude[::2, ::2], 0.95))
-                        records["dx"] = np.clip(
-                            flow[..., 0] * (args.width / geom.width), -32752, 32752
-                        )
-                        records["dy"] = np.clip(
-                            flow[..., 1] * (args.height / geom.height), -32752, 32752
-                        )
                         records["valid"] = valid
-                        records["confidence"] = np.rint(np.clip(confidence, 0, 1) * 255)
+                        quantized_confidence = np.rint(np.clip(confidence, 0, 1) * 255).astype(
+                            np.uint8, copy=False
+                        )
+                        records["confidence"] = quantized_confidence
+                        # V3 stores confidence-premultiplied half motion. The
+                        # native host can upload this packed grid directly and
+                        # unpremultiply after bilinear sampling, avoiding a
+                        # full CPU conversion pass for every displayed frame.
+                        confidence_scale = quantized_confidence.astype(np.float32) * (1.0 / 255.0)
+                        records["dx"] = (
+                            np.clip(flow[..., 0] * (args.width / geom.width), -32752, 32752)
+                            * confidence_scale
+                        )
+                        records["dy"] = (
+                            np.clip(flow[..., 1] * (args.height / geom.height), -32752, 32752)
+                            * confidence_scale
+                        )
                         low_confidence_pixels += int(np.count_nonzero(confidence < 0.55))
                         motion_pixels += int(confidence.size)
                         if state.previous_depth is not None:
@@ -703,31 +850,13 @@ def generate_chunk(
                     )
                 needs_depth = state.previous_depth is None or scene_cut or periodic_due or adaptive_due
                 if needs_depth:
-                    if depth_future is not None and depth_future_index != local_index:
-                        # A scene cut or adaptive refresh arrived before the
-                        # predictable periodic refresh.  Finish the single
-                        # in-flight model call before reusing the stateful
-                        # runtime, then reschedule from the new refresh point.
-                        wait_started = time.perf_counter()
-                        _, discarded_compute = depth_future.result()
-                        depth_wait_s += time.perf_counter() - wait_started
-                        depth_infer_s += discarded_compute
-                        depth_prefetch_discarded += 1
-                        depth_future = None
-                        depth_future_index = -1
-                    if depth_future is not None and depth_future_index == local_index:
-                        wait_started = time.perf_counter()
-                        depth, depth_compute = depth_future.result()
-                        depth_wait_s += time.perf_counter() - wait_started
-                        depth_infer_s += depth_compute
-                        depth_future = None
-                        depth_future_index = -1
-                    else:
-                        depth_started = time.perf_counter()
-                        depth = infer_depth(runtime, frame, geom.width, geom.height)
-                        depth_compute = time.perf_counter() - depth_started
-                        depth_wait_s += depth_compute
-                        depth_infer_s += depth_compute
+                    depth, depth_compute, depth_wait, prefetched, discarded = depth_prefetcher.take(
+                        state.global_frame, frame
+                    )
+                    depth_infer_s += depth_compute
+                    depth_wait_s += depth_wait
+                    depth_prefetch_hits += int(prefetched)
+                    depth_prefetch_discarded += discarded
                     depth_frames += 1
                     if adaptive_due and not periodic_due and not scene_cut:
                         adaptive_frames += 1
@@ -743,17 +872,21 @@ def generate_chunk(
                     depth = warped_depth
                     state.frames_since_depth += 1
                 else:
-                    depth_started = time.perf_counter()
-                    depth = infer_depth(runtime, frame, geom.width, geom.height)
-                    depth_infer_s += time.perf_counter() - depth_started
+                    depth, depth_compute, depth_wait, prefetched, discarded = depth_prefetcher.take(
+                        state.global_frame, frame
+                    )
+                    depth_infer_s += depth_compute
+                    depth_wait_s += depth_wait
+                    depth_prefetch_hits += int(prefetched)
+                    depth_prefetch_discarded += discarded
                     depth_frames += 1
                     state.frames_since_depth = 0
 
                 depth = guided_depth(gray, depth)
 
                 write_started = time.perf_counter()
-                records.tofile(motion_stream)
-                np.clip(depth, 0.02, 0.98).astype("<f2").tofile(depth_stream)
+                write_contiguous(motion_stream, records)
+                write_contiguous(depth_stream, np.clip(depth, 0.02, 0.98).astype("<f2"))
                 write_s += time.perf_counter() - write_started
                 state.previous_gray = gray
                 state.previous_color = guide_color
@@ -768,15 +901,23 @@ def generate_chunk(
                     )
 
         commit_started = time.perf_counter()
-        os.replace(motion_partial, motion_final)
-        os.replace(depth_partial, depth_final)
+        if motion_partial is not None and motion_final is not None:
+            os.replace(motion_partial, motion_final)
+        if depth_partial is not None and depth_final is not None:
+            os.replace(depth_partial, depth_final)
         commit_s += time.perf_counter() - commit_started
     except BaseException:
-        motion_partial.unlink(missing_ok=True)
-        depth_partial.unlink(missing_ok=True)
+        for reference, partial in ((motion_output, motion_partial), (depth_output, depth_partial)):
+            if is_shared_reference(reference) and shared_inputs is not None:
+                mapping = shared_inputs.pop(str(reference), None)
+                if mapping is not None:
+                    mapping.close()
+            elif partial is not None:
+                partial.unlink(missing_ok=True)
         raise
     finally:
-        depth_executor.shutdown(wait=True, cancel_futures=True)
+        if owns_depth_prefetcher:
+            depth_prefetcher.close()
         del frames
 
     elapsed = time.perf_counter() - started
@@ -786,8 +927,8 @@ def generate_chunk(
         "geometry": [args.width, args.height],
         "guide_geometry": [geom.width, geom.height],
         "tile": geom.tile,
-        "motion": str(motion_final),
-        "depth": str(depth_final),
+        "motion": str(motion_output if motion_final is None else motion_final),
+        "depth": str(depth_output if depth_final is None else depth_final),
         "depth_provider": runtime.provider,
         "motion_provider": motion_estimator.provider,
         "depth_frames": depth_frames,
@@ -802,6 +943,7 @@ def generate_chunk(
         "depth_wait_s": depth_wait_s,
         "depth_overlap_s": max(0.0, depth_infer_s - depth_wait_s),
         "depth_prefetch_discarded": depth_prefetch_discarded,
+        "depth_prefetch_hits": depth_prefetch_hits,
         "write_s": write_s,
         "commit_s": commit_s,
         "cpu_post_s": max(0.0, elapsed - flow_prepare_s - depth_wait_s - write_s - commit_s),
@@ -828,6 +970,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--depth-code-root", type=Path)
     parser.add_argument("--depth-backend", choices=["auto", "tensorrt-rtx", "tensorrt", "cuda", "dml", "cpu"], default="auto")
+    parser.add_argument("--depth-prefetch-mode", choices=["threaded", "synchronous"], default="threaded")
     parser.add_argument("--cache-dir", type=Path, default=Path("depth-cache"))
     parser.add_argument("--guide-width", type=int, default=480)
     parser.add_argument("--depth-interval", type=int, default=2)
@@ -932,12 +1075,49 @@ def create_dis(preset: str) -> cv2.DISOpticalFlow:
 def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
     motion_estimator = create_motion_estimator(args)
     state = GuideState()
+    server_geom = guide_geometry(args.width, args.height, args.guide_width)
+    depth_prefetcher = DepthPrefetcher(
+        runtime,
+        server_geom.width,
+        server_geom.height,
+        threaded=args.depth_prefetch_mode == "threaded",
+    )
     decoder: subprocess.Popen[bytes] | None = None
     decoder_next_frame = 0
     prefetch_thread: threading.Thread | None = None
     prefetch_spec: tuple[str, int, int] | None = None
     prefetch_result: dict[str, object] = {}
     shared_inputs: dict[str, mmap.mmap] = {}
+
+    def schedule_decoded_depth(reference: str, frames_count: int, first_frame: int) -> None:
+        """Schedule the next exact periodic depth frame from decoder look-ahead."""
+        if state.previous_depth is None:
+            predicted_global = state.global_frame
+        else:
+            predicted_global = state.global_frame + max(
+                0, max(0, args.depth_interval - 1) - state.frames_since_depth
+            )
+        local_index = predicted_global - first_frame
+        if local_index < 0 or local_index >= frames_count:
+            return
+        if is_shared_rgb(reference):
+            mapping = shared_inputs.get(reference)
+            if mapping is None:
+                return
+            decoded_frames = np.ndarray(
+                (frames_count, args.input_height, args.input_width, 3),
+                dtype=np.uint8,
+                buffer=mapping,
+            )
+        else:
+            decoded_frames = np.memmap(
+                Path(reference),
+                dtype=np.uint8,
+                mode="r",
+                shape=(frames_count, args.input_height, args.input_width, 3),
+            )
+        depth_prefetcher.schedule(predicted_global, np.asarray(decoded_frames[local_index]))
+        del decoded_frames
 
     # Keep one decoder alive for the entire job.  The previous implementation
     # launched FFmpeg and performed a fresh seek for every chunk; besides the
@@ -1044,6 +1224,7 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
                         remaining -= received
                 os.replace(partial, final)
             decoder_next_frame += frames_count
+            schedule_decoded_depth(reference, frames_count, first_frame)
         except BaseException:
             if output_view is not None:
                 output_view.release()
@@ -1182,9 +1363,10 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
                 state,
                 chunk_input,
                 int(command["frames"]),
-                Path(command["motion_output"]),
-                Path(command["depth_output"]),
+                str(command["motion_output"]),
+                str(command["depth_output"]),
                 shared_inputs,
+                depth_prefetcher,
             )
             result["id"] = chunk_id
             result["decode_s"] = decode_elapsed
@@ -1194,6 +1376,7 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
     finally:
         if prefetch_thread is not None:
             prefetch_thread.join(timeout=5)
+        depth_prefetcher.close()
         for mapping in shared_inputs.values():
             try:
                 mapping.close()

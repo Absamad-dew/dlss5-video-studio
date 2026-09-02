@@ -29,12 +29,15 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -59,6 +62,7 @@ namespace fs = std::filesystem;
 
 static const std::array<char, 8> kMotionMagicV1 = {'D', '5', 'M', 'V', '0', '0', '0', '1'};
 static const std::array<char, 8> kMotionMagicV2 = {'D', '5', 'M', 'V', '0', '0', '0', '2'};
+static const std::array<char, 8> kMotionMagicV3 = {'D', '5', 'M', 'V', '0', '0', '0', '3'};
 static const std::array<char, 8> kDepthMagic = {'D', '5', 'D', 'P', '0', '0', '0', '2'};
 
 #pragma pack(push, 1)
@@ -103,7 +107,7 @@ struct BatchOptions
     uint32_t nvidia_generated_frames = 1;
     uint32_t nvidia_dynamic_target_fps = 0;
     fs::path input, output, encode_mp4, encode_chunks_dir, motion, depth;
-    fs::path control_file, telemetry_file;
+    fs::path control_file, telemetry_file, chunk_ack_map;
     std::string codec = "h264";
     uint32_t width = 0, height = 0, frames = 0;
     uint32_t output_width = 0, output_height = 0;
@@ -2137,7 +2141,7 @@ static UINT64 GenerateMotionFrame(
 class RgbInput
 {
 public:
-    RgbInput(const fs::path &path, size_t expected_bytes)
+    RgbInput(const fs::path &path, size_t expected_bytes = 0)
     {
         const std::string text = path.generic_string();
         static constexpr const char *prefix = "shm://";
@@ -2162,7 +2166,23 @@ public:
                 mapping_ = nullptr;
                 throw std::runtime_error("cannot map shared RGB frames");
             }
-            size_ = expected_bytes;
+            if (expected_bytes != 0)
+            {
+                size_ = expected_bytes;
+            }
+            else
+            {
+                MEMORY_BASIC_INFORMATION region = {};
+                if (VirtualQuery(mapped_, &region, sizeof(region)) == 0)
+                {
+                    UnmapViewOfFile(mapped_);
+                    mapped_ = nullptr;
+                    CloseHandle(mapping_);
+                    mapping_ = nullptr;
+                    throw std::runtime_error("cannot query shared mapping size");
+                }
+                size_ = region.RegionSize;
+            }
         }
         else
         {
@@ -2203,13 +2223,13 @@ private:
 class MotionSidecar
 {
 public:
-    MotionSidecar(const fs::path &path, const BatchOptions &o) : in_(path, std::ios::binary)
+    MotionSidecar(const fs::path &path, const BatchOptions &o) : in_(path)
     {
-        if (!in_) throw std::runtime_error("cannot open motion sidecar");
-        in_.read(reinterpret_cast<char *>(&header_), sizeof(header_));
+        if (!in_.ReadExact(&header_, sizeof(header_))) throw std::runtime_error("truncated motion sidecar header");
         const bool v1 = memcmp(header_.magic, kMotionMagicV1.data(), 8) == 0;
         v2_ = memcmp(header_.magic, kMotionMagicV2.data(), 8) == 0;
-        if ((!v1 && !v2_) || header_.width != o.width || header_.height != o.height ||
+        v3_ = memcmp(header_.magic, kMotionMagicV3.data(), 8) == 0;
+        if ((!v1 && !v2_ && !v3_) || header_.width != o.width || header_.height != o.height ||
             header_.frames != o.frames || header_.record_bytes != sizeof(MotionRecord) ||
             header_.flags != 1 || header_.tile == 0 ||
             header_.tiles_x != (o.width + header_.tile - 1) / header_.tile ||
@@ -2220,18 +2240,26 @@ public:
 
     bool ReadCompact(std::vector<uint16_t> &premultiplied_flow, std::vector<uint8_t> &confidence)
     {
-        const std::streamsize bytes = static_cast<std::streamsize>(records_.size() * sizeof(MotionRecord));
-        in_.read(reinterpret_cast<char *>(records_.data()), bytes);
-        if (in_.gcount() != bytes) throw std::runtime_error("truncated motion sidecar");
+        const size_t bytes = records_.size() * sizeof(MotionRecord);
+        if (!in_.ReadExact(records_.data(), bytes)) throw std::runtime_error("truncated motion sidecar");
         bool reset = true;
         for (const MotionRecord &record : records_)
             if (record.valid) { reset = false; break; }
         const size_t grid_pixels = records_.size();
         premultiplied_flow.resize(grid_pixels * 2);
         confidence.resize(grid_pixels);
-        for (size_t i = 0; i < grid_pixels; ++i)
+        #pragma omp parallel for if(grid_pixels >= 262144) schedule(static)
+        for (int64_t signed_i = 0; signed_i < static_cast<int64_t>(grid_pixels); ++signed_i)
         {
+            const size_t i = static_cast<size_t>(signed_i);
             const MotionRecord &r = records_[i];
+            if (v3_)
+            {
+                premultiplied_flow[i * 2 + 0] = r.valid ? r.x : 0;
+                premultiplied_flow[i * 2 + 1] = r.valid ? r.y : 0;
+                confidence[i] = r.valid ? r.confidence : 0;
+                continue;
+            }
             float flow_x = 0.0f, flow_y = 0.0f;
             if (r.valid && v2_)
             {
@@ -2259,19 +2287,19 @@ public:
     uint32_t TilesY() const { return header_.tiles_y; }
 
 private:
-    std::ifstream in_;
+    RgbInput in_;
     MotionHeader header_ = {};
     std::vector<MotionRecord> records_;
     bool v2_ = false;
+    bool v3_ = false;
 };
 
 class DepthSidecar
 {
 public:
-    DepthSidecar(const fs::path &path, const BatchOptions &o) : in_(path, std::ios::binary)
+    DepthSidecar(const fs::path &path, const BatchOptions &o) : in_(path)
     {
-        if (!in_) throw std::runtime_error("cannot open depth sidecar");
-        in_.read(reinterpret_cast<char *>(&header_), sizeof(header_));
+        if (!in_.ReadExact(&header_, sizeof(header_))) throw std::runtime_error("truncated depth sidecar header");
         tile_ = header_.flags >> 8;
         if (tile_ == 0) tile_ = 1;
         tiles_x_ = (o.width + tile_ - 1) / tile_;
@@ -2285,9 +2313,8 @@ public:
 
     void ReadCompact(std::vector<uint16_t> &encoded)
     {
-        const std::streamsize bytes = static_cast<std::streamsize>(encoded_.size() * sizeof(uint16_t));
-        in_.read(reinterpret_cast<char *>(encoded_.data()), bytes);
-        if (in_.gcount() != bytes) throw std::runtime_error("truncated depth sidecar");
+        const size_t bytes = encoded_.size() * sizeof(uint16_t);
+        if (!in_.ReadExact(encoded_.data(), bytes)) throw std::runtime_error("truncated depth sidecar");
         encoded = encoded_;
     }
 
@@ -2296,7 +2323,7 @@ public:
     uint32_t TilesY() const { return tiles_y_; }
 
 private:
-    std::ifstream in_;
+    RgbInput in_;
     DepthHeader header_ = {};
     std::vector<uint16_t> encoded_;
     uint32_t tile_ = 1, tiles_x_ = 0, tiles_y_ = 0;
@@ -2395,7 +2422,9 @@ struct RawUpload
 static RawUpload MakeRawUpload(UINT64 requested_size)
 {
     RawUpload upload;
-    upload.size = (requested_size + 3u) & ~3ull;
+    // One padded DWORD lets the shader issue a single Load2 for an unaligned
+    // RGB24 triplet at the final pixel without a bounds-dependent slow path.
+    upload.size = (requested_size + 7u) & ~3ull;
     D3D12_HEAP_PROPERTIES hp = {};
     hp.Type = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RESOURCE_DESC desc = {};
@@ -2469,17 +2498,16 @@ RWTexture2D<float> BiasOut : register(u2);
 RWTexture2D<float> DepthOut : register(u3);
 SamplerState LinearClamp : register(s0);
 
-uint LoadByte(uint address)
-{
-    uint packed = PackedRgb.Load(address & ~3u);
-    return (packed >> ((address & 3u) * 8u)) & 255u;
-}
-
 float3 LoadRgb(int2 pixel)
 {
     pixel = clamp(pixel, int2(0, 0), int2(RgbWidth - 1u, RgbHeight - 1u));
     uint address = (uint(pixel.y) * RgbWidth + uint(pixel.x)) * 3u;
-    return float3(LoadByte(address), LoadByte(address + 1u), LoadByte(address + 2u)) / 255.0;
+    uint shift = (address & 3u) * 8u;
+    uint2 words = PackedRgb.Load2(address & ~3u);
+    // Reassemble the three unaligned bytes once. The previous form performed
+    // three independent raw-buffer loads for each of 16 cubic taps.
+    uint packed = shift == 0u ? words.x : ((words.x >> shift) | (words.y << (32u - shift)));
+    return float3(packed & 255u, (packed >> 8u) & 255u, (packed >> 16u) & 255u) / 255.0;
 }
 
 float CubicWeight(float value)
@@ -2896,10 +2924,17 @@ static int RunBatch(const BatchOptions &o)
 {
     try
     {
-        // Keep the offline inference feed responsive under ordinary desktop load.
-        // HIGH is intentionally used instead of REALTIME so the system remains usable.
-        SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+        // Realtime is a cooperative three-process pipeline: FFmpeg decode,
+        // guide generation and this renderer must all advance while the
+        // prepared-frame buffer is being consumed. HIGH priority here used to
+        // starve the other two for an entire paced chunk at 1440p/4K, turning a
+        // 30 ms decode into a 500-700 ms stall even though DLSS itself was fast.
+        // Keep HIGH for offline throughput; live playback uses ABOVE_NORMAL so
+        // all producer stages receive CPU time without lowering render quality.
+        SetPriorityClass(GetCurrentProcess(), o.preview_only ? ABOVE_NORMAL_PRIORITY_CLASS
+                                                             : HIGH_PRIORITY_CLASS);
+        SetThreadPriority(GetCurrentThread(), o.preview_only ? THREAD_PRIORITY_NORMAL
+                                                             : THREAD_PRIORITY_ABOVE_NORMAL);
         if ((!o.preview_only && o.output.empty() && o.encode_mp4.empty() && o.encode_chunks_dir.empty()) ||
             o.width == 0 || o.height == 0 || o.frames == 0 ||
             (!o.stream && (o.input.empty() || o.motion.empty() || o.depth.empty())))
@@ -2981,6 +3016,23 @@ static int RunBatch(const BatchOptions &o)
         if (!o.preview_only && !chunk_encode_mode && encode_pipe == nullptr && !output_file)
             throw std::runtime_error("cannot open batch output");
 
+        HANDLE chunk_ack_mapping = nullptr;
+        volatile LONG64 *chunk_ack_counter = nullptr;
+        if (o.stream && !o.chunk_ack_map.empty())
+        {
+            chunk_ack_mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE,
+                                                  o.chunk_ack_map.c_str());
+            if (chunk_ack_mapping == nullptr)
+                throw std::runtime_error("cannot open the stream chunk acknowledgement mapping");
+            chunk_ack_counter = static_cast<volatile LONG64 *>(
+                MapViewOfFile(chunk_ack_mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(LONG64)));
+            if (chunk_ack_counter == nullptr)
+            {
+                CloseHandle(chunk_ack_mapping);
+                throw std::runtime_error("cannot map the stream chunk acknowledgement counter");
+            }
+        }
+
         std::unique_ptr<RgbInput> input;
         std::unique_ptr<MotionSidecar> motion_reader;
         std::unique_ptr<DepthSidecar> depth_reader;
@@ -3039,39 +3091,71 @@ static int RunBatch(const BatchOptions &o)
                 if (!output_file) throw std::runtime_error("cannot open stream chunk output");
             }
         };
+        std::deque<std::string> stream_command_queue;
+        HANDLE stream_command_pipe = o.stream ? GetStdHandle(STD_INPUT_HANDLE) : INVALID_HANDLE_VALUE;
+        std::array<char, 4096> stream_command_bytes = {};
+        std::string stream_command_buffer;
+        uint64_t stream_received_frames = 0;
+        uint32_t stream_commands_received = 0;
+        size_t stream_queue_peak = 0;
+        if (o.stream && (stream_command_pipe == nullptr || stream_command_pipe == INVALID_HANDLE_VALUE))
+            throw std::runtime_error("stream command pipe is unavailable");
+        auto receive_stream_commands = [&]()
+        {
+            DWORD available = 0;
+            if (!PeekNamedPipe(stream_command_pipe, nullptr, 0, nullptr, &available, nullptr))
+                throw std::runtime_error("stream command pipe peek failed");
+            if (available == 0) return;
+            const DWORD requested = std::min<DWORD>(
+                available, static_cast<DWORD>(stream_command_bytes.size()));
+            DWORD byte_count = 0;
+            if (!ReadFile(stream_command_pipe, stream_command_bytes.data(), requested, &byte_count, nullptr) ||
+                byte_count == 0)
+                throw std::runtime_error("stream command pipe closed early");
+            stream_command_buffer.append(stream_command_bytes.data(), byte_count);
+            for (;;)
+            {
+                const size_t newline = stream_command_buffer.find('\n');
+                if (newline == std::string::npos) break;
+                std::string incoming = stream_command_buffer.substr(0, newline);
+                stream_command_buffer.erase(0, newline + 1);
+                if (!incoming.empty() && incoming.back() == '\r') incoming.pop_back();
+                std::string parse_line = incoming;
+                const size_t command_start = parse_line.find("CHUNK");
+                if (command_start != std::string::npos && command_start > 0)
+                    parse_line.erase(0, command_start);
+                std::istringstream command(parse_line);
+                std::string tag, id_text, frames_text;
+                std::getline(command, tag, '\t');
+                std::getline(command, id_text, '\t');
+                std::getline(command, frames_text, '\t');
+                if (tag != "CHUNK" || frames_text.empty())
+                    throw std::runtime_error("invalid stream chunk command");
+                const uint32_t frames = static_cast<uint32_t>(strtoul(frames_text.c_str(), nullptr, 10));
+                if (frames == 0 || stream_received_frames + frames > o.frames)
+                    throw std::runtime_error("stream chunk frame total mismatch");
+                stream_command_queue.push_back(std::move(incoming));
+                stream_received_frames += frames;
+                ++stream_commands_received;
+                stream_queue_peak = std::max(stream_queue_peak, stream_command_queue.size());
+            }
+        };
         auto read_stream_chunk = [&]()
         {
             const auto stream_wait_begin = BatchClock::now();
             std::string line;
             last_stream_buffering_announced = false;
-            HANDLE stream_input = GetStdHandle(STD_INPUT_HANDLE);
             for (;;)
             {
-                // std::getline may read several CHUNK lines from the Windows
-                // pipe into iostream's own filebuf. Check that user-space
-                // buffer first; looking only at PeekNamedPipe would report a
-                // false underrun and then wait forever while complete commands
-                // were already resident in std::cin.
-                if (std::cin.rdbuf()->in_avail() > 0)
+                receive_stream_commands();
+                if (!stream_command_queue.empty())
                 {
-                    if (!std::getline(std::cin, line))
-                        throw std::runtime_error("stream command pipe closed early");
+                    line = std::move(stream_command_queue.front());
+                    stream_command_queue.pop_front();
                     break;
                 }
-                DWORD available = 0;
-                if (stream_input == INVALID_HANDLE_VALUE ||
-                    !PeekNamedPipe(stream_input, nullptr, 0, nullptr, &available, nullptr))
-                {
-                    if (!std::getline(std::cin, line))
-                        throw std::runtime_error("stream command pipe closed early");
-                    break;
-                }
-                if (available > 0)
-                {
-                    if (!std::getline(std::cin, line))
-                        throw std::runtime_error("stream command pipe closed early");
-                    break;
-                }
+                if (stream_received_frames >= o.frames)
+                    throw std::runtime_error("stream command queue ended early");
                 if (o.preview_only && stream_chunks_opened > 0 && !last_stream_buffering_announced &&
                     ElapsedMs(stream_wait_begin) > 20.0)
                 {
@@ -3383,6 +3467,7 @@ static int RunBatch(const BatchOptions &o)
                 const auto pause_begin = BatchClock::now();
                 while (g_preview_paused)
                 {
+                    if (o.stream) receive_stream_commands();
                     PumpPresent();
                     std::this_thread::sleep_for(std::chrono::milliseconds(8));
                 }
@@ -3390,6 +3475,11 @@ static int RunBatch(const BatchOptions &o)
                 if (preview_start.time_since_epoch().count() != 0) preview_start += pause_duration;
                 preview_pacing_ms += std::chrono::duration<double, std::milli>(pause_duration).count();
             }
+            // Drain newly published chunk commands while the current chunk is
+            // rendering.  Waiting until the boundary makes PeekNamedPipe race
+            // the controller and turns ordinary Windows scheduling latency
+            // into a visible stall even though several seconds are buffered.
+            if (o.stream) receive_stream_commands();
             if (chunk_frames_left == 0)
             {
                 if (!o.stream) throw std::runtime_error("batch input ended before the declared frame count");
@@ -3462,10 +3552,8 @@ static int RunBatch(const BatchOptions &o)
                 }
                 warmup_ms = ElapsedMs(warmup_begin);
                 Log("[host] Feature 18 warm-up completed in %.3f ms", warmup_ms);
-                if (o.preview_only) preview_start = BatchClock::now();
             }
 
-            if (o.preview_only && frame == 0 && o.fast_start) preview_start = BatchClock::now();
             phase_begin = BatchClock::now();
             if (!Evaluate(color, output_tex, depth, mv, o.width, o.height, reset, 1.0f, 1.0f, bias))
                 throw std::runtime_error("DLAA/NR evaluate failed");
@@ -3496,11 +3584,25 @@ static int RunBatch(const BatchOptions &o)
                     preview_pacing_ms += ElapsedMs(pace_begin);
                 }
                 readback_fence = SubmitBatchPreview(output_tex, depth, mv, o.width, o.height, reset != 0);
+                // Present() only queues the swap-chain work.  The first real
+                // Feature 18 evaluation can still be compiling asynchronously
+                // for several seconds, so do not start video/audio clocks until
+                // that first GPU result is actually complete.  This is a single
+                // startup wait; later frames remain pipelined through kPipeline.
+                if (frame == 0 && readback_fence != 0 &&
+                    !WaitFenceValue(h.fence, readback_fence, 30000))
+                    throw std::runtime_error("first GPU preview frame did not complete");
                 const auto presented_at = BatchClock::now();
                 UpdatePreviewTimeline(frame);
                 UpdatePreviewPerformance(g_streamline_fg_requested ? g_streamline_last_present_count : 1u);
                 if (preview_presented == 0)
                 {
+                    // The first Evaluate/copy/Present may initialize shaders and
+                    // swap-chain resources.  Starting the media clock before
+                    // that work makes every later target timestamp artificially
+                    // late, so playback races through the prebuffer to catch up.
+                    // Anchor frame zero to its actual first presentation instead.
+                    preview_start = presented_at;
                     preview_first_present = presented_at;
                     char command[96] = {};
                     sprintf_s(command, "PLAYING %.6f", CurrentPreviewSeconds());
@@ -3533,14 +3635,15 @@ static int RunBatch(const BatchOptions &o)
                 {
                     std::error_code ignored;
                     if (current_input.generic_string().rfind("shm://", 0) != 0) fs::remove(current_input, ignored);
-                    fs::remove(current_motion, ignored);
-                    fs::remove(current_depth, ignored);
+                    if (current_motion.generic_string().rfind("shm://", 0) != 0) fs::remove(current_motion, ignored);
+                    if (current_depth.generic_string().rfind("shm://", 0) != 0) fs::remove(current_depth, ignored);
                 }
-                // The guide runtime and Feature 18 use the same GPU.  Retire the
-                // current chunk before acknowledging it so the scheduler can run
-                // depth for the next chunk without destructive GPU contention.
-                if (!WaitFenceValue(h.fence, readback_fence, 30000))
-                    throw std::runtime_error("GPU did not finish the stream chunk");
+                // Every byte from the chunk has already been copied into the
+                // per-slot upload ring. Acknowledging now lets the controller
+                // replenish the realtime queue while D3D12 finishes in flight.
+                // collect_output/BeginCommands still fence each slot before it
+                // is reused, so this removes a chunk-wide drain without changing
+                // resource lifetime or rendered pixels.
                 if (chunk_encode_mode)
                 {
                     const uint32_t pending_begin = frame + 1 > kPipeline ? frame + 1 - kPipeline : 0;
@@ -3568,8 +3671,15 @@ static int RunBatch(const BatchOptions &o)
                         fs::remove(current_raw_output, ignored);
                     }
                 }
-                printf("HOST_CHUNK_SUBMITTED %u %u\n", current_chunk_id, frame + 1);
-                fflush(stdout);
+                if (chunk_ack_counter != nullptr)
+                {
+                    InterlockedIncrement64(chunk_ack_counter);
+                }
+                else
+                {
+                    printf("HOST_CHUNK_SUBMITTED %u %u\n", current_chunk_id, frame + 1);
+                    fflush(stdout);
+                }
             }
         }
 
@@ -3603,8 +3713,8 @@ static int RunBatch(const BatchOptions &o)
         if (o.timings)
         {
             const double frames = static_cast<double>(o.frames);
-            Log("[host] DLSS5_BATCH_TIMING frames=%u pipeline=%d prefetch=%d async_write=%d total_ms=%.3f wall_total_ms=%.3f warmup_ms=%.3f startup_warmup_ms=%.3f stream_wait_ms=%.3f stream_wait_max_ms=%.3f stream_wait_events=%u buffer_underruns=%u buffer_underrun_max_ms=%.3f chunk_encode_ms=%.3f preview_pacing_ms=%.3f preview_present_fps=%.3f per_frame_ms=%.3f input_ms=%.3f guides_ms=%.3f prefetch_wait_ms=%.3f writer_wait_ms=%.3f upload_ms=%.3f submit_ms=%.3f readback_ms=%.3f readback_wait_ms=%.3f readback_pack_ms=%.3f write_ms=%.3f",
-                o.frames, kPipeline, o.prefetch ? 1 : 0, o.async_write ? 1 : 0, total_ms, wall_total_ms, warmup_ms, startup_warmup_ms, stream_wait_ms, stream_wait_max_ms, stream_wait_events, stream_underruns, stream_underrun_max_ms, chunk_encode_ms, preview_pacing_ms, preview_present_fps, total_ms / frames,
+            Log("[host] DLSS5_BATCH_TIMING frames=%u pipeline=%d prefetch=%d async_write=%d total_ms=%.3f wall_total_ms=%.3f warmup_ms=%.3f startup_warmup_ms=%.3f stream_wait_ms=%.3f stream_wait_max_ms=%.3f stream_wait_events=%u stream_commands_received=%u stream_queue_peak=%zu buffer_underruns=%u buffer_underrun_max_ms=%.3f chunk_encode_ms=%.3f preview_pacing_ms=%.3f preview_present_fps=%.3f per_frame_ms=%.3f input_ms=%.3f guides_ms=%.3f prefetch_wait_ms=%.3f writer_wait_ms=%.3f upload_ms=%.3f submit_ms=%.3f readback_ms=%.3f readback_wait_ms=%.3f readback_pack_ms=%.3f write_ms=%.3f",
+                o.frames, kPipeline, o.prefetch ? 1 : 0, o.async_write ? 1 : 0, total_ms, wall_total_ms, warmup_ms, startup_warmup_ms, stream_wait_ms, stream_wait_max_ms, stream_wait_events, stream_commands_received, stream_queue_peak, stream_underruns, stream_underrun_max_ms, chunk_encode_ms, preview_pacing_ms, preview_present_fps, total_ms / frames,
                 input_ms / frames, guides_ms / frames, prefetch_wait_ms / frames,
                 writer_wait_ms / frames, upload_ms / frames,
                 evaluate_submit_ms / frames, readback_ms / frames,
@@ -3660,7 +3770,17 @@ static int RunBatch(const BatchOptions &o)
             o.frames, o.width, o.height, target_width, target_height, delivered_output.c_str());
         if (o.stream)
         {
-            printf("HOST_STREAM_DONE %u\n", o.frames);
+        if (chunk_ack_counter != nullptr)
+        {
+            UnmapViewOfFile(const_cast<LONG64 *>(chunk_ack_counter));
+            chunk_ack_counter = nullptr;
+        }
+        if (chunk_ack_mapping != nullptr)
+        {
+            CloseHandle(chunk_ack_mapping);
+            chunk_ack_mapping = nullptr;
+        }
+        printf("HOST_STREAM_DONE %u\n", o.frames);
             fflush(stdout);
         }
         return 0;
@@ -3938,13 +4058,14 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--dlssg-dynamic-target") == 0 && i + 1 < argc) batch.nvidia_dynamic_target_fps = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
         else if (strcmp(argv[i], "--control-file") == 0 && i + 1 < argc) batch.control_file = argv[++i];
         else if (strcmp(argv[i], "--telemetry-file") == 0 && i + 1 < argc) batch.telemetry_file = argv[++i];
+        else if (strcmp(argv[i], "--chunk-ack-map") == 0 && i + 1 < argc) batch.chunk_ack_map = argv[++i];
         else if (strcmp(argv[i], "--media-start-seconds") == 0 && i + 1 < argc) batch.media_start_seconds = strtod(argv[++i], nullptr);
         else if (strcmp(argv[i], "--media-duration-seconds") == 0 && i + 1 < argc) batch.media_duration_seconds = strtod(argv[++i], nullptr);
         else pid = static_cast<DWORD>(strtoul(argv[i], nullptr, 10));
     }
     if (!test && !batch.enabled && pid == 0)
     {
-        Log("usage: dlss5-video-host --test | --batch [--input in.rgb24 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--telemetry-file path] [--media-start-seconds N]");
+        Log("usage: dlss5-video-host --test | --batch [--input in.rgb24 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--telemetry-file path] [--chunk-ack-map name] [--media-start-seconds N]");
         return 1;
     }
     g_show_window = (!test && !batch.enabled && !hide) || batch.preview;

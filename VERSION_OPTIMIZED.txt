@@ -1,2 +1,2 @@
-13.7.0-sample-clock-audio
-Realtime audio now follows the measured ffplay sample clock and displayed-frame media clock, uses a true SDL device pause, drains/coalesces native events, defers early pause requests until the endpoint exists, and selects pitch-preserving tempo from measured render throughput.
+13.8.0-high-resolution-realtime
+Realtime now uses shared RGB/motion/depth transport, a monotonic shared-memory acknowledgement counter, asynchronous buffer release, bounded passive OpenMP workers, dedicated controller scheduling, resolution-aware depth placement, and one stable normal-speed audio endpoint.
