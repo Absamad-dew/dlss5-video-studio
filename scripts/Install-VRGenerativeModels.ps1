@@ -93,7 +93,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $Root 'licenses\vr\OpenCLIP-MIT.txt'
 
 if (-not $SkipDependencies) {
     Write-Output 'Installing the small M2SVid Python dependency layer into the shared CUDA runtime...'
-    & $Python -m pip install --break-system-packages --disable-pip-version-check --no-warn-script-location `
+    # Ignore the account-wide Python user-site while resolving requirements.
+    # Otherwise pip can report a dependency as satisfied under AppData even
+    # though the portable worker deliberately runs with `-s` and cannot see it.
+    & $Python -s -m pip install --break-system-packages --disable-pip-version-check --no-warn-script-location `
         'pytorch-lightning==2.5.5' 'open-clip-torch==3.2.0' 'ffmpeg-python==0.2.0' `
         'pytorch-msssim==1.0.0' 'kornia==0.8.1'
     if ($LASTEXITCODE -ne 0) { throw 'M2SVid Python dependency installation failed.' }
@@ -106,6 +109,11 @@ Receive-LargeFile `
     -Uri 'https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/main/open_clip_pytorch_model.bin?download=true' `
     -Destination $OpenClip -ExpectedBytes 3944692325 -Label 'OpenCLIP ViT-H-14 checkpoint'
 
+$ModelCache = Join-Path $Root 'temp\model-cache'
+New-Item -ItemType Directory -Force -Path $ModelCache | Out-Null
+$env:HF_HOME = Join-Path $ModelCache 'huggingface'
+$env:XDG_CACHE_HOME = $ModelCache
+$env:TORCH_HOME = Join-Path $ModelCache 'torch'
 & $Python -s -B $Worker --check --ffmpeg $Ffmpeg --repository $Repository --checkpoint $Checkpoint --open-clip $OpenClip
 if ($LASTEXITCODE -ne 0) { throw 'M2SVid installation verification failed.' }
 

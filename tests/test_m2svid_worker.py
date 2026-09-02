@@ -13,6 +13,11 @@ import m2svid_worker as m2s  # noqa: E402
 
 
 class M2SVidWorkerTests(unittest.TestCase):
+    def test_portable_cache_root_is_derived_from_repository(self):
+        source = Path(m2s.__file__).read_text(encoding="utf-8")
+        self.assertIn('portable_root = repository.parent.parent', source)
+        self.assertIn('os.environ.setdefault("HF_HOME"', source)
+
     def test_model_canvas_is_divisible_by_64_and_preserves_content_aspect(self) -> None:
         inner_w, inner_h, canvas_w, canvas_h, pad_x, pad_y = m2s.model_geometry(
             1920, 1080, 512

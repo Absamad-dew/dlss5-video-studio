@@ -84,6 +84,14 @@ def validate_install(args: argparse.Namespace) -> None:
 
 def configure_imports(args: argparse.Namespace):
     repository = args.repository.resolve()
+    portable_root = repository.parent.parent
+    model_cache = portable_root / "temp" / "model-cache"
+    model_cache.mkdir(parents=True, exist_ok=True)
+    # Keep every runtime cache inside the shareable portable tree.  This also
+    # avoids depending on a writable or pre-populated Windows user profile.
+    os.environ.setdefault("HF_HOME", str(model_cache / "huggingface"))
+    os.environ.setdefault("XDG_CACHE_HOME", str(model_cache))
+    os.environ.setdefault("TORCH_HOME", str(model_cache / "torch"))
     sys.path.insert(0, str(repository))
     sys.path.insert(0, str(repository / "third_party" / "Hi3D-Official"))
     bundled_msssim = repository / "third_party" / "pytorch-msssim"
