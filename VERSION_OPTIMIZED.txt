@@ -1,2 +1,2 @@
-13.8.0-high-resolution-realtime
-Realtime now uses shared RGB/motion/depth transport, a monotonic shared-memory acknowledgement counter, asynchronous buffer release, bounded passive OpenMP workers, dedicated controller scheduling, resolution-aware depth placement, and one stable normal-speed audio endpoint.
+14.0.0-vr-layered-stereo
+VR export now uses headset-compatible HEVC/H.264, exact frame-preserving muxing, motion-compensated depth, CUDA layered z-splat stereo, tunable foreground/background/occlusion controls, and optional DA3 Large depth.

@@ -299,7 +299,7 @@ def create_depth_runtime(args: argparse.Namespace):
         if args.depth_code_root is None:
             raise ValueError("video-depth-small requires --depth-code-root")
         return VideoDepthRuntime(args.depth_model, args.depth_code_root)
-    if args.depth_engine in ("da3-small", "da3-base"):
+    if args.depth_engine in ("da3-small", "da3-base", "da3-large"):
         if args.depth_code_root is None:
             raise ValueError("Depth Anything 3 requires --depth-code-root")
         return DepthAnything3Runtime(args.depth_model, args.depth_code_root)
@@ -965,7 +965,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-model", required=True, type=Path)
     parser.add_argument(
         "--depth-engine",
-        choices=["da2-small", "video-depth-small", "da3-small", "da3-base"],
+        choices=["da2-small", "video-depth-small", "da3-small", "da3-base", "da3-large"],
         default="da2-small",
     )
     parser.add_argument("--depth-code-root", type=Path)

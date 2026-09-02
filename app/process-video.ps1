@@ -9,7 +9,7 @@ param(
     [ValidateSet('UltraFast','Fast','Medium','Heavy','Maximum')] [string] $PerformanceProfile = 'Medium',
     [ValidateSet('Auto','Standard','HighVram')] [string] $HardwareProfile = 'Auto',
     [ValidateSet('Auto','Native','Quality','Balanced','Performance')] [string] $RealtimeRenderPreset = 'Auto',
-    [ValidateSet('DA2Small','VideoDepthSmall','DA3Small','DA3Base')] [string] $DepthModelProfile = 'DA2Small',
+    [ValidateSet('DA2Small','VideoDepthSmall','DA3Small','DA3Base','DA3Large')] [string] $DepthModelProfile = 'DA2Small',
     [ValidateSet('Auto','Dml','Cpu','Cuda','TensorRT','TensorRTRTX')] [string] $DepthComputeBackend = 'Auto',
     [ValidateSet('None','NanoVSR','AnimeSR','FlashVSR','DLoRAL')] [string] $Upscaler = 'None',
     [ValidateSet('Auto','Realtime','Balanced','Quality','Max')] [string] $UpscalerVariant = 'Auto',
@@ -24,6 +24,14 @@ param(
     [ValidateRange(0.0,24.0)] [double] $VREdgeFeather = 2.0,
     [ValidateRange(0.0,0.95)] [double] $VRTemporalSmoothing = 0.55,
     [ValidateRange(0.5,5.0)] [double] $VRMaxDisparityPercent = 2.4,
+    [ValidateSet('Inverse','Layered')] [string] $VRStereoMethod = 'Layered',
+    [ValidateSet('Symmetric','Left','Right')] [string] $VREyeAnchor = 'Symmetric',
+    [ValidateSet('Off','EMA','Motion')] [string] $VRTemporalMode = 'Motion',
+    [ValidateSet('Compatible8Bit','HEVC10Bit')] [string] $VRPixelFormat = 'Compatible8Bit',
+    [ValidateRange(0.0,2.0)] [double] $VRForegroundStrength = 1.0,
+    [ValidateRange(0.0,2.0)] [double] $VRBackgroundStrength = 0.75,
+    [ValidateRange(0.0,10.0)] [double] $VRZBufferStrength = 5.0,
+    [ValidateRange(1,24)] [int] $VRHoleFillRadius = 8,
     [ValidateSet(0,72,90,120)] [int] $VRTargetFps = 0,
     [switch] $VREyeSwap,
     [double] $StartSeconds = 0,
@@ -98,6 +106,11 @@ switch ($DepthModelProfile) {
         $DepthCodeRoot = Join-Path $Root 'third_party\depth-anything-3'
         $DepthEngine = 'da3-base'
     }
+    'DA3Large' {
+        $DepthModel = Join-Path $Root 'models\depth\da3-large'
+        $DepthCodeRoot = Join-Path $Root 'third_party\depth-anything-3'
+        $DepthEngine = 'da3-large'
+    }
     default {
         $DepthModel = Join-Path $Root 'models\depth_anything_v2_small.onnx'
         $DepthEngine = 'da2-small'
@@ -147,6 +160,37 @@ function Join-EncodedChunks([string] $Directory, [string] $Destination, [int] $E
 function Run-Tool([string] $File, [object[]] $Arguments, [string] $Failure) {
     & $File @Arguments 2>&1 | ForEach-Object { Write-Output ([string]$_) }
     if ($LASTEXITCODE -ne 0) { throw "$Failure (exit code $LASTEXITCODE)" }
+}
+
+function Get-VrCodecArguments([string] $SelectedCodec, [string] $SelectedPixelFormat) {
+    if ($SelectedCodec -eq 'H264') {
+        return @('-pix_fmt','yuv420p','-profile:v','high','-color_range','tv','-colorspace','bt709','-color_primaries','bt709','-color_trc','bt709')
+    }
+    if ($SelectedPixelFormat -eq 'HEVC10Bit') {
+        return @('-pix_fmt','p010le','-profile:v','main10','-tag:v','hvc1','-color_range','tv','-colorspace','bt709','-color_primaries','bt709','-color_trc','bt709')
+    }
+    return @('-pix_fmt','yuv420p','-profile:v','main','-tag:v','hvc1','-color_range','tv','-colorspace','bt709','-color_primaries','bt709','-color_trc','bt709')
+}
+
+function Test-VrOutput([string] $Path) {
+    $ProbeText = & $Ffprobe '-v' 'error' '-select_streams' 'v:0' '-show_entries' 'stream=codec_name,profile,pix_fmt,width,height,nb_frames' '-of' 'json' $Path
+    if ($LASTEXITCODE -ne 0) { throw 'VR output validation could not read the video stream.' }
+    $VrStream = ($ProbeText | ConvertFrom-Json).streams[0]
+    if ($null -eq $VrStream -or [int]$VrStream.width -lt 64 -or [int]$VrStream.height -lt 64) {
+        throw 'VR output validation found no usable video stream.'
+    }
+    if ([string]$VrStream.pix_fmt -notin @('yuv420p','p010le','yuv420p10le')) {
+        throw "VR output uses incompatible pixel format '$($VrStream.pix_fmt)'."
+    }
+    if ([string]$VrStream.profile -eq 'Rext') {
+        throw 'VR output uses HEVC Rext, which produces a black screen in many headset decoders.'
+    }
+    & $Ffmpeg '-nostdin' '-v' 'error' '-i' $Path '-map' '0:v:0' '-frames:v' '1' '-f' 'null' 'NUL' 2>&1 | ForEach-Object { Write-Output ([string]$_) }
+    if ($LASTEXITCODE -ne 0) { throw 'VR output validation could not decode its first frame.' }
+    Write-Output ('VR_OUTPUT_VALIDATED_JSON '+([ordered]@{
+        codec=[string]$VrStream.codec_name;profile=[string]$VrStream.profile;pixel_format=[string]$VrStream.pix_fmt
+        width=[int]$VrStream.width;height=[int]$VrStream.height;frames=[string]$VrStream.nb_frames
+    }|ConvertTo-Json -Compress))
 }
 
 function Parse-Rate([string] $Value) {
@@ -305,7 +349,7 @@ if ($IsNetworkSource -and [string]::IsNullOrWhiteSpace($InputHeadersPath)) {
 }
 $RequiredFiles = @($ConfigPath,$Ffmpeg,$Ffprobe,$GuideGeneratorScript,$UpscalerPython,$VideoHost)
 $RequiredDirectories = @()
-if ($DepthModelProfile -in @('DA3Small','DA3Base')) { $RequiredDirectories += $DepthModel } else { $RequiredFiles += $DepthModel }
+if ($DepthModelProfile -in @('DA3Small','DA3Base','DA3Large')) { $RequiredDirectories += $DepthModel } else { $RequiredFiles += $DepthModel }
 if (-not $IsNetworkSource) { $RequiredFiles += $InputVideo }
 if (-not [string]::IsNullOrWhiteSpace($InputHeadersPath)) { $RequiredFiles += $InputHeadersPath }
 if ($Upscaler -ne 'None') { $RequiredFiles += @($UpscalerPython,$UpscalerWorker) }
@@ -775,6 +819,9 @@ $PreviousControllerPriority = (Get-Process -Id $PID).PriorityClass
 $PipelineLabel = switch ($PipelineOrder) { 'DLSSThenVSR' { "DLSS5 -> $Upscaler" } 'VSRThenDLSS' { "$Upscaler -> DLSS5" } default { 'DLSS5' } }
 $ContainerWidth = if ($VRMode -in @('CinemaSBS','DepthSBS') -and $VRSbsLayout -eq 'FullSBS') { $OutputWidth*2 } else { $OutputWidth }
 $ContainerHeight = if ($VRMode -in @('CinemaSBS','DepthSBS') -and $VRSbsLayout -eq 'FullOU') { $OutputHeight*2 } else { $OutputHeight }
+if ($VRMode -ne 'Off' -and $Codec -eq 'H264' -and ($ContainerWidth -gt 4096 -or $ContainerHeight -gt 4096)) {
+    throw "H.264 NVENC cannot reliably encode the requested $($ContainerWidth)x$($ContainerHeight) VR container. Select H.265 or a Half-SBS/Half-OU layout."
+}
 $Plan = [ordered]@{
     source_geometry=@($SourceWidth,$SourceHeight); output_geometry=@($OutputWidth,$OutputHeight)
     render_geometry=@($DlssInputWidth,$DlssInputHeight); hardware_profile=$ResolvedHardwareProfile
@@ -792,6 +839,14 @@ $Plan = [ordered]@{
     vr_edge_feather=if($VRMode-eq'DepthSBS'){$VREdgeFeather}else{$null}
     vr_temporal_smoothing=if($VRMode-eq'DepthSBS'){$VRTemporalSmoothing}else{$null}
     vr_max_disparity_percent=if($VRMode-eq'DepthSBS'){$VRMaxDisparityPercent}else{$null}
+    vr_stereo_method=if($VRMode-eq'DepthSBS'){$VRStereoMethod}else{$null}
+    vr_eye_anchor=if($VRMode-eq'DepthSBS'){$VREyeAnchor}else{$null}
+    vr_temporal_mode=if($VRMode-eq'DepthSBS'){$VRTemporalMode}else{$null}
+    vr_pixel_format=if($VRMode-ne'Off'){if($Codec-eq'H264'){'Compatible8Bit'}else{$VRPixelFormat}}else{$null}
+    vr_foreground_strength=if($VRMode-eq'DepthSBS'){$VRForegroundStrength}else{$null}
+    vr_background_strength=if($VRMode-eq'DepthSBS'){$VRBackgroundStrength}else{$null}
+    vr_z_buffer_strength=if($VRMode-eq'DepthSBS'){$VRZBufferStrength}else{$null}
+    vr_hole_fill_radius=if($VRMode-eq'DepthSBS'){$VRHoleFillRadius}else{$null}
     vr_target_fps=if($VRMode-ne'Off' -and $VRTargetFps-gt 0){$VRTargetFps}else{$null}
     vr_eye_swap=if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
     realtime_buffer_seconds=if($IsPreviewOnly){$RealtimeBufferSeconds}else{$null}
@@ -1420,7 +1475,7 @@ try {
             Stage 7 8 'Creating VR cinema SBS container and stereo metadata'
             Emit-Progress 'VR' 'Creating the headset SBS container' 95 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
             $Encoder = if ($Codec -eq 'H265') { 'hevc_nvenc' } else { 'h264_nvenc' }
-            $CodecTag = if ($Codec -eq 'H265') { @('-tag:v','hvc1') } else { @() }
+            $VrCodecArguments = Get-VrCodecArguments $Codec $VRPixelFormat
             $VrFilter = switch ($VRSbsLayout) {
                 'FullSBS' { '[0:v]split=2[left][right];[left][right]hstack=inputs=2[v]' }
                 'HalfOU' { '[0:v]split=2[left][right];[left]scale=iw:ih/2:flags=lanczos[l];[right]scale=iw:ih/2:flags=lanczos[r];[l][r]vstack=inputs=2[v]' }
@@ -1429,13 +1484,13 @@ try {
             }
             $StereoMetadata = if ($VRSbsLayout -in @('HalfOU','FullOU')) { 'top_bottom' } else { 'left_right' }
             $SpatialStereo = if ($VRSbsLayout -in @('HalfOU','FullOU')) { 'top-bottom' } else { 'left-right' }
-            $VrArgs=@('-y','-v','error','-i',$FlatOutput,'-filter_complex',$VrFilter,'-map','[v]','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$CodecTag+@('-c:a','copy','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrEncoded)
+            $VrArgs=@('-y','-v','error','-i',$FlatOutput,'-filter_complex',$VrFilter,'-map','[v]','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$VrCodecArguments+@('-c:a','copy','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrEncoded)
             Run-Tool $Ffmpeg $VrArgs 'VR SBS encoding failed'
             $VrMetadataInput = $VrEncoded
             if ($VRTargetFps -gt 0) {
                 $VrRateEncoded = Join-Path $Work 'vr-target-fps.mp4'
                 $VrRateFilter = "minterpolate=fps=$($VRTargetFps):mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
-                Run-Tool $Ffmpeg (@('-y','-v','error','-i',$VrEncoded,'-vf',$VrRateFilter,'-map','0:v:0','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$CodecTag+@('-c:a','copy','-shortest','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrRateEncoded)) 'VR target frame-rate synthesis failed'
+                Run-Tool $Ffmpeg (@('-y','-v','error','-i',$VrEncoded,'-vf',$VrRateFilter,'-map','0:v:0','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$VrCodecArguments+@('-c:a','copy','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrRateEncoded)) 'VR target frame-rate synthesis failed'
                 $VrMetadataInput = $VrRateEncoded
             }
             Run-Tool $UpscalerPython @('-s','-B',$SpatialMediaTool,'-i','--v2','--projection','none','--stereo',$SpatialStereo,$VrMetadataInput,$OutputVideo) 'VR stereo metadata injection failed'
@@ -1445,9 +1500,10 @@ try {
             $VrDepthVideoOnly = Join-Path $Work 'vr-depth-video-only.mp4'
             $LayoutName = switch ($VRSbsLayout) { 'FullSBS' {'full-sbs'} 'HalfOU' {'half-ou'} 'FullOU' {'full-ou'} default {'half-sbs'} }
             $CodecNameVr = if ($Codec -eq 'H265') { 'h265' } else { 'h264' }
+            $VrDepthPixelFormat = if($Codec-eq'H265' -and $VRPixelFormat-eq'HEVC10Bit'){'p010le'}else{'yuv420p'}
             $VrDepthArgs = @(
                 '-s','-B',$VRDepthWorker,'--ffmpeg',$Ffmpeg,'--input-video',$FlatOutput,
-                '--depth-directory',$ChunkDirectory,'--output-video',$VrDepthVideoOnly,
+                '--depth-directory',$ChunkDirectory,'--motion-directory',$ChunkDirectory,'--output-video',$VrDepthVideoOnly,
                 '--width',$OutputWidth,'--height',$OutputHeight,'--frames',$TotalFrames,'--fps',$Fps,
                 '--layout',$LayoutName,
                 '--eye-separation',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VREyeSeparation)),
@@ -1457,23 +1513,32 @@ try {
                 '--edge-feather',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VREdgeFeather)),
                 '--temporal-smoothing',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRTemporalSmoothing)),
                 '--max-disparity-percent',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRMaxDisparityPercent)),
+                '--stereo-method',$VRStereoMethod.ToLowerInvariant(),
+                '--eye-anchor',$VREyeAnchor.ToLowerInvariant(),
+                '--temporal-mode',$VRTemporalMode.ToLowerInvariant(),
+                '--foreground-strength',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRForegroundStrength)),
+                '--background-strength',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRBackgroundStrength)),
+                '--z-buffer-strength',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRZBufferStrength)),
+                '--hole-fill-radius',$VRHoleFillRadius,
+                '--pixel-format',$VrDepthPixelFormat,
                 '--codec',$CodecNameVr,'--quality',$Quality
             )
             if ($VREyeSwap) { $VrDepthArgs += '--eye-swap' }
             Run-Tool $UpscalerPython $VrDepthArgs 'Depth-warped VR synthesis failed'
             $StereoMetadata = if ($VRSbsLayout -in @('HalfOU','FullOU')) { 'top_bottom' } else { 'left_right' }
             $SpatialStereo = if ($VRSbsLayout -in @('HalfOU','FullOU')) { 'top-bottom' } else { 'left-right' }
-            Run-Tool $Ffmpeg @('-y','-v','error','-i',$VrDepthVideoOnly,'-i',$FlatOutput,'-map','0:v:0','-map','1:a?','-c','copy','-shortest','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrEncoded) 'Depth VR audio mux failed'
+            Run-Tool $Ffmpeg @('-y','-v','error','-i',$VrDepthVideoOnly,'-i',$FlatOutput,'-map','0:v:0','-map','1:a?','-c','copy','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrEncoded) 'Depth VR audio mux failed'
             $VrMetadataInput = $VrEncoded
             if ($VRTargetFps -gt 0) {
                 $VrRateEncoded = Join-Path $Work 'vr-target-fps.mp4'
                 $Encoder = if ($Codec -eq 'H265') { 'hevc_nvenc' } else { 'h264_nvenc' }
-                $CodecTag = if ($Codec -eq 'H265') { @('-tag:v','hvc1') } else { @() }
+                $VrCodecArguments = Get-VrCodecArguments $Codec $VRPixelFormat
                 $VrRateFilter = "minterpolate=fps=$($VRTargetFps):mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
-                Run-Tool $Ffmpeg (@('-y','-v','error','-i',$VrEncoded,'-vf',$VrRateFilter,'-map','0:v:0','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$CodecTag+@('-c:a','copy','-shortest','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrRateEncoded)) 'Depth VR target frame-rate synthesis failed'
+                Run-Tool $Ffmpeg (@('-y','-v','error','-i',$VrEncoded,'-vf',$VrRateFilter,'-map','0:v:0','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$VrCodecArguments+@('-c:a','copy','-metadata:s:v:0',"stereo_mode=$StereoMetadata",'-movflags','+faststart',$VrRateEncoded)) 'Depth VR target frame-rate synthesis failed'
                 $VrMetadataInput = $VrRateEncoded
             }
             Run-Tool $UpscalerPython @('-s','-B',$SpatialMediaTool,'-i','--v2','--projection','none','--stereo',$SpatialStereo,$VrMetadataInput,$OutputVideo) 'Depth VR metadata injection failed'
+            Test-VrOutput $OutputVideo
         } elseif ($VRMode -eq 'Equirect360') {
             Stage 7 8 'Injecting spherical-video v2 metadata'
             Emit-Progress 'VR 360' 'Injecting equirectangular sv3d metadata' 97 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
@@ -1481,13 +1546,14 @@ try {
             if ($VRTargetFps -gt 0) {
                 $VrRateEncoded = Join-Path $Work 'vr-target-fps.mp4'
                 $Encoder = if ($Codec -eq 'H265') { 'hevc_nvenc' } else { 'h264_nvenc' }
-                $CodecTag = if ($Codec -eq 'H265') { @('-tag:v','hvc1') } else { @() }
+                $VrCodecArguments = Get-VrCodecArguments $Codec $VRPixelFormat
                 $VrRateFilter = "minterpolate=fps=$($VRTargetFps):mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
-                Run-Tool $Ffmpeg (@('-y','-v','error','-i',$FlatOutput,'-vf',$VrRateFilter,'-map','0:v:0','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$CodecTag+@('-c:a','copy','-shortest','-movflags','+faststart',$VrRateEncoded)) 'VR 360 target frame-rate synthesis failed'
+                Run-Tool $Ffmpeg (@('-y','-v','error','-i',$FlatOutput,'-vf',$VrRateFilter,'-map','0:v:0','-map','0:a?','-c:v',$Encoder,'-preset','p2','-rc','constqp','-qp',$Quality)+$VrCodecArguments+@('-c:a','copy','-movflags','+faststart',$VrRateEncoded)) 'VR 360 target frame-rate synthesis failed'
                 $VrMetadataInput = $VrRateEncoded
             }
             Run-Tool $UpscalerPython @('-s','-B',$SpatialMediaTool,'-i','--v2','--projection','equirectangular','--stereo','none',$VrMetadataInput,$OutputVideo) 'VR 360 metadata injection failed'
         }
+        if ($VRMode -ne 'Off' -and $VRMode -ne 'DepthSBS') { Test-VrOutput $OutputVideo }
     }
     $ProcessingElapsedSeconds = $PipelineWatch.Elapsed.TotalSeconds
 
@@ -1561,6 +1627,14 @@ try {
         vr_edge_feather = if($VRMode-eq'DepthSBS'){$VREdgeFeather}else{$null}
         vr_temporal_smoothing = if($VRMode-eq'DepthSBS'){$VRTemporalSmoothing}else{$null}
         vr_max_disparity_percent = if($VRMode-eq'DepthSBS'){$VRMaxDisparityPercent}else{$null}
+        vr_stereo_method = if($VRMode-eq'DepthSBS'){$VRStereoMethod}else{$null}
+        vr_eye_anchor = if($VRMode-eq'DepthSBS'){$VREyeAnchor}else{$null}
+        vr_temporal_mode = if($VRMode-eq'DepthSBS'){$VRTemporalMode}else{$null}
+        vr_pixel_format = if($VRMode-ne'Off'){if($Codec-eq'H264'){'Compatible8Bit'}else{$VRPixelFormat}}else{$null}
+        vr_foreground_strength = if($VRMode-eq'DepthSBS'){$VRForegroundStrength}else{$null}
+        vr_background_strength = if($VRMode-eq'DepthSBS'){$VRBackgroundStrength}else{$null}
+        vr_z_buffer_strength = if($VRMode-eq'DepthSBS'){$VRZBufferStrength}else{$null}
+        vr_hole_fill_radius = if($VRMode-eq'DepthSBS'){$VRHoleFillRadius}else{$null}
         vr_target_fps = if($VRMode-ne'Off' -and $VRTargetFps-gt 0){$VRTargetFps}else{$null}
         vr_eye_swap = if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
         output_mode = $Mode

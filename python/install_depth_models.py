@@ -14,7 +14,7 @@ def main() -> int:
     parser.add_argument(
         "--models",
         nargs="+",
-        choices=["video-small", "da3-small", "da3-base"],
+        choices=["video-small", "da3-small", "da3-base", "da3-large"],
         default=["video-small", "da3-small", "da3-base"],
     )
     args = parser.parse_args()
@@ -32,6 +32,7 @@ def main() -> int:
     for name, repo in (
         ("da3-small", "depth-anything/DA3-SMALL"),
         ("da3-base", "depth-anything/DA3-BASE"),
+        ("da3-large", "depth-anything/DA3-LARGE"),
     ):
         if name not in args.models:
             continue

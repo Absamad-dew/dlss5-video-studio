@@ -24,9 +24,9 @@ if (Test-Path -LiteralPath $Target) {
 
 $Directories = @(
     'app','engine','licenses','licenses\upscalers','models','models\upscalers',
-    'models\upscalers\nanovsr','models\upscalers\animesr','output','settings','temp',
+    'models\upscalers\nanovsr','models\upscalers\animesr','models\depth','output','settings','temp',
     'runtime','runtime\python','third_party','third_party\FlashVSR_Ultra_Fast','third_party\DLoRAL','third_party\spatial-media',
-    'tools','tools\guidegen','tools\upscaler','tools\upscaler\backends','tools\spatialmedia'
+    'tools','tools\guidegen','tools\upscaler','tools\upscaler\backends','tools\spatialmedia','tools\vr_depth','scripts'
 )
 foreach ($Relative in $Directories) {
     New-Item -ItemType Directory -Force -Path (Join-Path $Target $Relative) | Out-Null
@@ -35,6 +35,7 @@ foreach ($Relative in $Directories) {
 foreach ($Name in @('START.cmd','NVIDIA_RUNTIME_NOTICE.txt','THIRD_PARTY_NOTICES.md')) {
     Copy-Item -LiteralPath (Join-Path $Base $Name) -Destination (Join-Path $Target $Name) -Force
 }
+Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_DA3_LARGE.cmd') -Destination $Target -Force
 Copy-Item -Path (Join-Path $Base 'licenses\*') -Destination (Join-Path $Target 'licenses') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $Base 'models\depth_anything_v2_small.onnx') -Destination (Join-Path $Target 'models') -Force
 Copy-Item -LiteralPath (Join-Path $Base 'tools\ffmpeg.exe'),(Join-Path $Base 'tools\ffprobe.exe'),(Join-Path $Base 'tools\ffplay.exe') -Destination (Join-Path $Target 'tools') -Force
@@ -123,6 +124,10 @@ foreach ($Name in @('dxgi.dll','renodx-dlss5.addon64','nvngx_dlss.dll','nvngx_dl
 }
 Copy-Item -LiteralPath (Join-Path $Build 'dist\engine\dlss5-video-host.exe') -Destination (Join-Path $Target 'engine') -Force
 Copy-Item -Path (Join-Path $Build 'dist\guidegen\*') -Destination (Join-Path $Target 'tools\guidegen') -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $Build 'python\guidegen.py') -Destination (Join-Path $Target 'tools\guidegen') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'python\vr_depth_worker.py') -Destination (Join-Path $Target 'tools\vr_depth') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'python\install_depth_models.py') -Destination (Join-Path $Target 'tools') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'scripts\Install-DepthModels.ps1') -Destination (Join-Path $Target 'scripts') -Force
 Copy-Item -LiteralPath `
     (Join-Path $Build 'app\process-video.ps1'), `
     (Join-Path $Build 'app\realtime-player.ps1'), `
@@ -131,6 +136,7 @@ Copy-Item -LiteralPath `
     -Destination (Join-Path $Target 'app') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'dist\DLSS5 Video Studio.exe') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'README_OPTIMIZED_RU.md') -Destination (Join-Path $Target 'README_RU.md') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'VR_RESEARCH_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'VERSION_OPTIMIZED.txt') -Destination (Join-Path $Target 'VERSION.txt') -Force
 
 $PackageVersion = (Get-Content -LiteralPath (Join-Path $Build 'VERSION_OPTIMIZED.txt') -First 1).Trim()
