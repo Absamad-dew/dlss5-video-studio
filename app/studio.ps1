@@ -26,7 +26,7 @@ $Invariant = [Globalization.CultureInfo]::InvariantCulture
 $Xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DLSS5 Video Studio 21 · NV12 high-throughput pipeline" Width="1500" Height="960"
+        Title="DLSS5 Video Studio 21.1 · four-frame D3D12 pipeline" Width="1500" Height="960"
         MinWidth="1120" MinHeight="720" WindowStartupLocation="CenterScreen"
         Background="#090D14" Foreground="#DCE7F5" FontFamily="Segoe UI">
   <Window.Resources>

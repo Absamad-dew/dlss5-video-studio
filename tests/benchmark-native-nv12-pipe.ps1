@@ -37,8 +37,12 @@ try {
 } finally { $env:Path = $PreviousPath }
 
 $HostLog = Get-Content -LiteralPath (Join-Path $EngineDirectory 'dlss5-video-host.log') -Raw
-$Timing = [regex]::Match($HostLog,'DLSS5_BATCH_TIMING[^\r\n]+')
-if (-not $Timing.Success) { throw 'native timing line was not produced' }
+$TimingMatches = [regex]::Matches($HostLog,'DLSS5_BATCH_TIMING[^\r\n]+')
+if ($TimingMatches.Count -eq 0) { throw 'native timing line was not produced' }
+# A diagnostic directory can retain an earlier host log after an interrupted
+# launch. Always consume the final completed batch instead of silently
+# reporting stale performance from the first line in the file.
+$Timing = $TimingMatches[$TimingMatches.Count - 1]
 function Metric([string] $Name) {
     $Match = [regex]::Match($Timing.Value,"(?:^|\s)$([regex]::Escape($Name))=(?<v>[0-9.]+)")
     if (-not $Match.Success) { return $null }
@@ -49,6 +53,7 @@ $TotalMs = Metric 'total_ms'
     status = 'ok'
     geometry = @($Width,$Height)
     frames = $Frames
+    pipeline = [int](Metric 'pipeline')
     host_fps = if($TotalMs -gt 0){[math]::Round(1000.0*$Frames/$TotalMs,3)}else{0}
     per_frame_ms = Metric 'per_frame_ms'
     writer_wait_ms = Metric 'writer_wait_ms'

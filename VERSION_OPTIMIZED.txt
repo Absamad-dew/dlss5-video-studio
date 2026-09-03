@@ -1,2 +1,2 @@
-21.0.0-nv12-throughput-audio-stable
-Compact NV12 decode/transport, overlapped recording, GPU NV12 output, cross-chunk depth prefetch, and one measured sample-clock audio endpoint for stable realtime playback.
+21.1.0-d3d12-pipeline4
+Four complete D3D12 frames in flight for realtime and recording, compact NV12 transport/output, overlapped recording, cross-chunk depth prefetch, and stable sample-clock audio.

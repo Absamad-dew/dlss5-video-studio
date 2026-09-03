@@ -3730,7 +3730,7 @@ static int RunBatch(const BatchOptions &o)
         if (o.preview_only && o.motion_frame_generation &&
             !InitMotionFrameGeneration(frame_generation, output_tex, mv, bias, target_width, target_height))
             throw std::runtime_error("motion-compensated GPU frame generation initialization failed");
-        constexpr int kPipeline = 3;
+        constexpr int kPipeline = 4;
         LinearTransfer color_up[kPipeline], depth_up[kPipeline], mv_up[kPipeline], bias_up[kPipeline], readback[kPipeline];
         LinearTransfer nv12_luma_readback[kPipeline], nv12_chroma_readback[kPipeline];
         LinearTransfer nv12_luma_up[kPipeline], nv12_chroma_up[kPipeline];
@@ -4048,8 +4048,9 @@ static int RunBatch(const BatchOptions &o)
             input_ms += current.input_ms;
             guides_ms += current.guides_ms;
 
-            // Waiting only when a ring slot is about to be reused keeps up to
-            // three complete DLSS frames in flight while CPU preparation runs.
+            // Waiting only when a ring slot is about to be reused keeps four
+            // complete DLSS/output frames in flight while CPU preparation and
+            // the asynchronous encoder write run.
             collect_output(slot_index);
 
             PumpPresent();

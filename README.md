@@ -1,12 +1,13 @@
-# DLSS5 Video Studio 21
+# DLSS5 Video Studio 21.1
 
 Windows video player/processor that reconstructs motion and depth from ordinary video, evaluates NVIDIA NGX through a D3D12 host, and can present the result with official NVIDIA DLSS Frame Generation through Streamline + Reflex.
 
 The repository contains source code and dependency installers. It intentionally excludes proprietary NVIDIA DLLs, the user's custom `nvngx_dlssnr.dll`, FFmpeg binaries, ReShade binaries, portable Python, and very large optional model weights. A small open-licensed core model pack for an existing V11 portable folder is available from [GitHub Releases](https://github.com/Absamad-dew/dlss5-video-studio/releases).
 
-## Version 21 highlights
+## Version 21.1 highlights
 
 - the fast DIS path keeps ordinary 4:2:0 input as compact NV12 through persistent decode and pagefile-backed shared memory; D3D12 reconstructs RGB while expanding motion/depth guides;
+- realtime and recording keep four complete frames in the D3D12 ring, exactly matching the host's twelve command allocators at three submissions per frame; three 120-frame A/B pairs improved median native throughput by 1.23% and all six encoded files were byte-identical;
 - DLSS output is converted to NV12 on the GPU, so CPU readback and the continuous NVENC feed move 1.5 rather than 4 bytes per output pixel;
 - the encoder pipe holds four complete NV12 frames, bounded to 16-64 MiB, and recording permits two prepared DIS chunks in flight without unbounded RAM growth;
 - periodic depth prefetch survives ordinary chunk boundaries and is discarded only when a scene cut or adaptive refresh actually changes the schedule;
