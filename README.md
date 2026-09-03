@@ -1,10 +1,20 @@
-# DLSS5 Video Studio 20
+# DLSS5 Video Studio 21
 
 Windows video player/processor that reconstructs motion and depth from ordinary video, evaluates NVIDIA NGX through a D3D12 host, and can present the result with official NVIDIA DLSS Frame Generation through Streamline + Reflex.
 
 The repository contains source code and dependency installers. It intentionally excludes proprietary NVIDIA DLLs, the user's custom `nvngx_dlssnr.dll`, FFmpeg binaries, ReShade binaries, portable Python, and very large optional model weights. A small open-licensed core model pack for an existing V11 portable folder is available from [GitHub Releases](https://github.com/Absamad-dew/dlss5-video-studio/releases).
 
-## Version 20 highlights
+## Version 21 highlights
+
+- the fast DIS path keeps ordinary 4:2:0 input as compact NV12 through persistent decode and pagefile-backed shared memory; D3D12 reconstructs RGB while expanding motion/depth guides;
+- DLSS output is converted to NV12 on the GPU, so CPU readback and the continuous NVENC feed move 1.5 rather than 4 bytes per output pixel;
+- the encoder pipe holds four complete NV12 frames, bounded to 16-64 MiB, and recording permits two prepared DIS chunks in flight without unbounded RAM growth;
+- periodic depth prefetch survives ordinary chunk boundaries and is discarded only when a scene cut or adaptive refresh actually changes the schedule;
+- realtime audio uses one measured sample-clock endpoint across normal pause and rebuffering, with startup/device latency compensated only when an endpoint truly has to reopen.
+
+An exact 120-frame 1440p native+NVENC A/B improved from 13.047 FPS with the old fixed 4 MiB pipe to 22.128 FPS (1.70x) with the complete-frame queue. Decoded frame SSIM is 1.000000. A warmed 300-frame UHD-to-1440p laptop recording completed at 17.76 FPS end to end: 22.26 FPS DLSS+NVENC delivery, 32.61 FPS guide generation, and 81.22 FPS persistent decode. The HEVC+AAC result contains all 300 frames/12.00 seconds and fully decodes with the same depth cadence and image settings.
+
+Version 21 retains all Version 20 improvements:
 
 - recording now uses the same source-resolution pagefile-backed RGB transport and native D3D12 cubic expansion as realtime, avoiding a full CPU resize/copy at every frame;
 - recording chunk completion uses a monotonic shared-memory counter and ordered asynchronous mapping release instead of blocking on redirected text protocol responses;

@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -107,6 +108,37 @@ def write_contiguous(stream: object, array: np.ndarray) -> None:
 def resize_rgb(frame: np.ndarray, width: int, height: int) -> np.ndarray:
     interpolation = cv2.INTER_AREA if frame.shape[1] > width else cv2.INTER_CUBIC
     return cv2.resize(frame, (width, height), interpolation=interpolation)
+
+
+def packed_frame_bytes(input_format: str, width: int, height: int) -> int:
+    return width * height * 3 // 2 if input_format == "nv12" else width * height * 3
+
+
+def packed_frame_shape(input_format: str, width: int, height: int) -> tuple[int, ...]:
+    if input_format == "nv12":
+        return (height * 3 // 2, width)
+    return (height, width, 3)
+
+
+def frame_to_rgb(frame: np.ndarray, input_format: str) -> np.ndarray:
+    if input_format == "nv12":
+        return cv2.cvtColor(frame, cv2.COLOR_YUV2RGB_NV12)
+    return np.asarray(frame)
+
+
+def frame_to_guide_gray(
+    frame: np.ndarray, input_format: str, width: int, height: int
+) -> np.ndarray:
+    if input_format != "nv12":
+        return cv2.cvtColor(resize_rgb(frame, width, height), cv2.COLOR_RGB2GRAY)
+    source_height = frame.shape[0] * 2 // 3
+    luma = frame[:source_height]
+    interpolation = cv2.INTER_AREA if luma.shape[1] > width else cv2.INTER_CUBIC
+    resized = cv2.resize(luma, (width, height), interpolation=interpolation)
+    # FFmpeg explicitly normalizes the transport to limited-range BT.709.
+    # DIS/confidence historically saw full-range grayscale produced from RGB,
+    # so expand luma back to that range to preserve the guide thresholds.
+    return cv2.convertScaleAbs(resized, alpha=255.0 / 219.0, beta=-16.0 * 255.0 / 219.0)
 
 
 def normalized_gray(frame: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -201,6 +233,16 @@ class DepthRuntime:
 
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
+        self.input_dtype = (
+            np.float16
+            if "float16" in self.session.get_inputs()[0].type.lower()
+            else np.float32
+        )
+        self.output_dtype = (
+            np.float16
+            if "float16" in self.session.get_outputs()[0].type.lower()
+            else np.float32
+        )
         self.provider = self.session.get_providers()[0]
         self.binding = None
         self.input_value = None
@@ -209,10 +251,10 @@ class DepthRuntime:
         if "cuda" in provider_lower or "tensorrt" in provider_lower:
             try:
                 self.input_value = ort.OrtValue.ortvalue_from_shape_and_type(
-                    [1, 3, 518, 518], np.float32, "cuda", 0
+                    [1, 3, 518, 518], self.input_dtype, "cuda", 0
                 )
                 self.output_value = ort.OrtValue.ortvalue_from_shape_and_type(
-                    [1, 518, 518], np.float32, "cuda", 0
+                    [1, 518, 518], self.output_dtype, "cuda", 0
                 )
                 self.binding = self.session.io_binding()
                 self.binding.bind_ortvalue_input(self.input_name, self.input_value)
@@ -236,7 +278,7 @@ class DepthRuntime:
         image = (image - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array(
             [0.229, 0.224, 0.225], dtype=np.float32
         )
-        tensor = np.transpose(image, (2, 0, 1))[None].astype(np.float32, copy=False)
+        tensor = np.transpose(image, (2, 0, 1))[None].astype(self.input_dtype, copy=False)
         return normalize_depth_map(self.infer(tensor), output_width, output_height)
 
 
@@ -360,18 +402,28 @@ class DepthPrefetcher:
             return True
 
     def take(
-        self, global_index: int, frame: np.ndarray
+        self, global_index: int, frame: np.ndarray | Callable[[], np.ndarray]
     ) -> tuple[np.ndarray, float, float, bool, int]:
         with self.lock:
             future = self.futures.pop(global_index, None)
-            stale_future_indices = [index for index in self.futures if index > global_index]
+            # A hit means the periodic schedule is still valid. Decoder
+            # look-ahead may already be calculating the first depth frame of
+            # the next chunk; cancelling it here threw away useful DirectML
+            # work at every ordinary refresh. Only an unplanned request (scene
+            # cut/adaptive refresh) shifts the cadence and invalidates futures.
+            stale_future_indices = (
+                [index for index in self.futures if index > global_index]
+                if future is None
+                else []
+            )
             stale_futures = [self.futures.pop(index) for index in stale_future_indices]
         for stale_future in stale_futures:
             if isinstance(stale_future, concurrent.futures.Future):
                 stale_future.cancel()
         prefetched = future is not None
         if future is None:
-            self.schedule(global_index, frame)
+            resolved_frame = frame() if callable(frame) else frame
+            self.schedule(global_index, resolved_frame)
             with self.lock:
                 future = self.futures.pop(global_index)
         wait_started = time.perf_counter()
@@ -645,13 +697,14 @@ def generate_chunk(
     shared_inputs: dict[str, mmap.mmap] | None = None,
     depth_prefetcher: DepthPrefetcher | None = None,
 ) -> dict[str, object]:
-    expected = args.input_width * args.input_height * frames_count * 3
+    expected = packed_frame_bytes(args.input_format, args.input_width, args.input_height) * frames_count
+    frame_shape = packed_frame_shape(args.input_format, args.input_width, args.input_height)
     if is_shared_rgb(input_path):
         if shared_inputs is None or str(input_path) not in shared_inputs:
             raise ValueError(f"shared RGB input is not available: {input_path}")
         shared_mapping = shared_inputs[str(input_path)]
         frames = np.ndarray(
-            (frames_count, args.input_height, args.input_width, 3),
+            (frames_count, *frame_shape),
             dtype=np.uint8,
             buffer=shared_mapping,
         )
@@ -665,7 +718,7 @@ def generate_chunk(
             resolved_input,
             dtype=np.uint8,
             mode="r",
-            shape=(frames_count, args.input_height, args.input_width, 3),
+            shape=(frames_count, *frame_shape),
         )
     geom = guide_geometry(args.width, args.height, args.guide_width)
     motion_bytes = MOTION_HEADER.size + frames_count * geom.width * geom.height * MOTION_DTYPE.itemsize
@@ -703,13 +756,25 @@ def generate_chunk(
     write_s = 0.0
     commit_s = 0.0
 
-    guide_colors = [
-        resize_rgb(np.asarray(frames[index]), geom.width, geom.height)
+    guide_grays = [
+        frame_to_guide_gray(
+            np.asarray(frames[index]), args.input_format, geom.width, geom.height
+        )
         for index in range(frames_count)
     ]
-    # DIS and the temporal/depth stages consume the same grayscale guide.
-    # Computing it once saves two conversions per frame in the old DIS path.
-    guide_grays = [cv2.cvtColor(color, cv2.COLOR_RGB2GRAY) for color in guide_colors]
+    if isinstance(motion_estimator, RaftMotion):
+        guide_colors = [
+            resize_rgb(
+                frame_to_rgb(np.asarray(frames[index]), args.input_format),
+                geom.width,
+                geom.height,
+            )
+            for index in range(frames_count)
+        ]
+    else:
+        # DIS consumes the precomputed grayscale list. Avoid constructing an
+        # RGB guide image for every frame when the transport is already NV12.
+        guide_colors = guide_grays
     flow_started = time.perf_counter()
     prepared_flows = motion_estimator.prepare(
         guide_colors, state.previous_color, guide_grays, state.previous_gray
@@ -728,7 +793,8 @@ def generate_chunk(
     def schedule_depth(local_index: int) -> None:
         if 0 <= local_index < frames_count:
             depth_prefetcher.schedule(
-                chunk_global_start + local_index, np.asarray(frames[local_index])
+                chunk_global_start + local_index,
+                frame_to_rgb(np.asarray(frames[local_index]), args.input_format),
             )
 
     first_periodic_index = 0
@@ -851,7 +917,7 @@ def generate_chunk(
                 needs_depth = state.previous_depth is None or scene_cut or periodic_due or adaptive_due
                 if needs_depth:
                     depth, depth_compute, depth_wait, prefetched, discarded = depth_prefetcher.take(
-                        state.global_frame, frame
+                        state.global_frame, lambda: frame_to_rgb(frame, args.input_format)
                     )
                     depth_infer_s += depth_compute
                     depth_wait_s += depth_wait
@@ -873,7 +939,7 @@ def generate_chunk(
                     state.frames_since_depth += 1
                 else:
                     depth, depth_compute, depth_wait, prefetched, discarded = depth_prefetcher.take(
-                        state.global_frame, frame
+                        state.global_frame, lambda: frame_to_rgb(frame, args.input_format)
                     )
                     depth_infer_s += depth_compute
                     depth_wait_s += depth_wait
@@ -959,6 +1025,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", required=True, type=int)
     parser.add_argument("--input-width", type=int, default=0)
     parser.add_argument("--input-height", type=int, default=0)
+    parser.add_argument("--input-format", choices=["rgb24", "nv12"], default="rgb24")
     parser.add_argument("--frames", type=int)
     parser.add_argument("--motion-output", type=Path)
     parser.add_argument("--depth-output", type=Path)
@@ -1004,6 +1071,8 @@ def validate_args(args: argparse.Namespace) -> None:
         args.input_height = args.height
     if args.width < 64 or args.height < 64:
         raise ValueError("invalid input geometry")
+    if args.input_format == "nv12" and (args.input_width % 2 or args.input_height % 2):
+        raise ValueError("NV12 input requires even dimensions")
     if (
         args.input_width < 64
         or args.input_height < 64
@@ -1100,12 +1169,13 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
         local_index = predicted_global - first_frame
         if local_index < 0 or local_index >= frames_count:
             return
+        frame_shape = packed_frame_shape(args.input_format, args.input_width, args.input_height)
         if is_shared_rgb(reference):
             mapping = shared_inputs.get(reference)
             if mapping is None:
                 return
             decoded_frames = np.ndarray(
-                (frames_count, args.input_height, args.input_width, 3),
+                (frames_count, *frame_shape),
                 dtype=np.uint8,
                 buffer=mapping,
             )
@@ -1114,9 +1184,12 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
                 Path(reference),
                 dtype=np.uint8,
                 mode="r",
-                shape=(frames_count, args.input_height, args.input_width, 3),
+                shape=(frames_count, *frame_shape),
             )
-        depth_prefetcher.schedule(predicted_global, np.asarray(decoded_frames[local_index]))
+        depth_prefetcher.schedule(
+            predicted_global,
+            frame_to_rgb(np.asarray(decoded_frames[local_index]), args.input_format),
+        )
         del decoded_frames
 
     # Keep one decoder alive for the entire job.  The previous implementation
@@ -1139,18 +1212,20 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
             if header_block != "\r\n":
                 input_options += ["-headers", header_block]
         video_filter = f"scale={args.input_width}:{args.input_height}:flags=lanczos"
+        if args.input_format == "nv12":
+            video_filter += ":out_color_matrix=bt709:out_range=tv"
         if args.frame_interpolation == "blend":
             video_filter += f",minterpolate=fps={args.fps}:mi_mode=blend"
         else:
             video_filter += f",fps={args.fps}"
-        video_filter += ",format=rgb24"
+        video_filter += f",format={args.input_format}"
         decoder = subprocess.Popen(
             [
                 str(args.ffmpeg), "-nostdin", "-v", "error",
                 *input_options,
                 "-ss", f"{args.start_seconds:.9g}", "-i", str(args.decode_video),
                 "-vf", video_filter,
-                "-frames:v", str(args.total_frames), "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+                "-frames:v", str(args.total_frames), "-an", "-f", "rawvideo", "-pix_fmt", args.input_format, "pipe:1",
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1169,7 +1244,7 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
             raise RuntimeError(
                 f"decoder request is not sequential: expected frame {decoder_next_frame}, got {first_frame}"
             )
-        expected = args.input_width * args.input_height * frames_count * 3
+        expected = packed_frame_bytes(args.input_format, args.input_width, args.input_height) * frames_count
         remaining = expected
         buffer = bytearray(min(8 * 1024 * 1024, expected))
         shared_mapping: mmap.mmap | None = None

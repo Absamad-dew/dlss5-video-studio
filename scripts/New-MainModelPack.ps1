@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory)] [string] $PortableRoot,
     [Parameter(Mandatory)] [string] $OutputArchive,
-    [string] $Version = '19.0.0',
+    [string] $Version = '21.0.0',
     [switch] $Force
 )
 
@@ -56,7 +56,7 @@ pause
 '@
     [IO.File]::WriteAllText((Join-Path $Stage 'VERIFY_MAIN_MODELS.cmd'), ($Cmd.Trim() -replace "`n","`r`n") + "`r`n", [Text.Encoding]::ASCII)
     $Readme = @'
-DLSS5 VIDEO STUDIO — MAIN MODELS V19
+DLSS5 VIDEO STUDIO — MAIN MODELS V{VERSION}
 
 Распакуйте содержимое прямо в корень portable-папки рядом с
 DLSS5 Video Studio.exe. Дополнительную вложенную папку создавать не нужно.
@@ -68,6 +68,7 @@ DLSS5 Video Studio.exe. Дополнительную вложенную папк
 
 Программа, NVIDIA DLL и тяжёлые экспериментальные модели сюда не входят.
 '@
+    $Readme = $Readme.Replace('{VERSION}',$Version)
     [IO.File]::WriteAllText((Join-Path $Stage 'README_MAIN_MODELS_RU.txt'), $Readme.Trim() + "`r`n", (New-Object Text.UTF8Encoding($true)))
 
     $Files = @()

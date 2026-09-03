@@ -109,6 +109,7 @@ struct BatchOptions
     fs::path input, output, encode_mp4, encode_chunks_dir, motion, depth;
     fs::path control_file, telemetry_file, chunk_ack_map;
     std::string codec = "h264";
+    std::string input_format = "rgb24";
     uint32_t width = 0, height = 0, frames = 0;
     uint32_t output_width = 0, output_height = 0;
     uint32_t fps = 25;
@@ -123,6 +124,13 @@ using BatchClock = std::chrono::steady_clock;
 static double ElapsedMs(BatchClock::time_point begin)
 {
     return std::chrono::duration<double, std::milli>(BatchClock::now() - begin).count();
+}
+
+static size_t PackedFrameBytes(const std::string &format, UINT width, UINT height)
+{
+    if (format == "nv12")
+        return static_cast<size_t>(width) * height * 3 / 2;
+    return static_cast<size_t>(width) * height * 3;
 }
 
 // ---------------------------------------------------------------------------
@@ -2211,6 +2219,15 @@ public:
         return file_.gcount() == static_cast<std::streamsize>(bytes);
     }
 
+    const uint8_t *ReadView(size_t bytes)
+    {
+        if (mapped_ == nullptr) return nullptr;
+        if (position_ > size_ || bytes > size_ - position_) return nullptr;
+        const uint8_t *view = mapped_ + position_;
+        position_ += bytes;
+        return view;
+    }
+
     bool Shared() const { return mapped_ != nullptr; }
 
 private:
@@ -2450,6 +2467,8 @@ static RawUpload MakeRawUpload(UINT64 requested_size)
 
 struct GpuInputExpander
 {
+    ID3D12Resource *nv12_luma = nullptr;
+    ID3D12Resource *nv12_chroma = nullptr;
     ID3D12Resource *flow_grid = nullptr;
     ID3D12Resource *confidence_grid = nullptr;
     ID3D12Resource *depth_grid = nullptr;
@@ -2459,6 +2478,8 @@ struct GpuInputExpander
     UINT descriptor_size = 0;
     UINT width = 0, height = 0, tiles_x = 0, tiles_y = 0, tile = 1;
     bool grid_common = true;
+    bool input_common = true;
+    bool input_nv12 = false;
 };
 
 static void ReleaseGpuInputExpander(GpuInputExpander &expander)
@@ -2466,6 +2487,8 @@ static void ReleaseGpuInputExpander(GpuInputExpander &expander)
     if (expander.heap) expander.heap->Release();
     if (expander.pso) expander.pso->Release();
     if (expander.root) expander.root->Release();
+    if (expander.nv12_chroma) expander.nv12_chroma->Release();
+    if (expander.nv12_luma) expander.nv12_luma->Release();
     if (expander.depth_grid) expander.depth_grid->Release();
     if (expander.confidence_grid) expander.confidence_grid->Release();
     if (expander.flow_grid) expander.flow_grid->Release();
@@ -2475,7 +2498,7 @@ static void ReleaseGpuInputExpander(GpuInputExpander &expander)
 static bool InitGpuInputExpander(
     GpuInputExpander &expander, RawUpload *rgb_uploads, int pipeline_slots,
     ID3D12Resource *color, ID3D12Resource *motion, ID3D12Resource *bias, ID3D12Resource *depth,
-    UINT width, UINT height, UINT tiles_x, UINT tiles_y, UINT tile)
+    UINT width, UINT height, UINT tiles_x, UINT tiles_y, UINT tile, bool input_nv12)
 {
     static const char *shader = R"HLSL(
 cbuffer Params : register(b0)
@@ -2487,28 +2510,63 @@ cbuffer Params : register(b0)
     uint Tile;
     uint RgbWidth;
     uint RgbHeight;
-    uint Padding0;
+    uint InputFormat;
 };
-ByteAddressBuffer PackedRgb : register(t0);
+ByteAddressBuffer PackedInput : register(t0);
 Texture2D<float2> PremultipliedMotion : register(t1);
 Texture2D<float> Confidence : register(t2);
 Texture2D<float> CompactDepth : register(t3);
+Texture2D<float> Nv12Luma : register(t4);
+Texture2D<float2> Nv12Chroma : register(t5);
 RWTexture2D<float4> ColorOut : register(u0);
 RWTexture2D<float2> MotionOut : register(u1);
 RWTexture2D<float> BiasOut : register(u2);
 RWTexture2D<float> DepthOut : register(u3);
 SamplerState LinearClamp : register(s0);
 
-float3 LoadRgb(int2 pixel)
+uint LoadPackedByte(uint address)
+{
+    const uint word = PackedInput.Load(address & ~3u);
+    return (word >> ((address & 3u) * 8u)) & 255u;
+}
+
+float3 LoadRgb24(int2 pixel)
 {
     pixel = clamp(pixel, int2(0, 0), int2(RgbWidth - 1u, RgbHeight - 1u));
     uint address = (uint(pixel.y) * RgbWidth + uint(pixel.x)) * 3u;
     uint shift = (address & 3u) * 8u;
-    uint2 words = PackedRgb.Load2(address & ~3u);
+    uint2 words = PackedInput.Load2(address & ~3u);
     // Reassemble the three unaligned bytes once. The previous form performed
     // three independent raw-buffer loads for each of 16 cubic taps.
     uint packed = shift == 0u ? words.x : ((words.x >> shift) | (words.y << (32u - shift)));
     return float3(packed & 255u, (packed >> 8u) & 255u, (packed >> 16u) & 255u) / 255.0;
+}
+
+float LoadNv12Y(int2 pixel)
+{
+    pixel = clamp(pixel, int2(0, 0), int2(RgbWidth - 1u, RgbHeight - 1u));
+    return float(LoadPackedByte(uint(pixel.y) * RgbWidth + uint(pixel.x)));
+}
+
+float2 LoadNv12Uv(int2 pixel)
+{
+    const int2 extent = int2(RgbWidth / 2u, RgbHeight / 2u);
+    pixel = clamp(pixel, int2(0, 0), extent - 1);
+    const uint address = RgbWidth * RgbHeight + uint(pixel.y) * RgbWidth + uint(pixel.x) * 2u;
+    const uint shift = (address & 3u) * 8u;
+    const uint packed = PackedInput.Load(address & ~3u) >> shift;
+    return float2(packed & 255u, (packed >> 8u) & 255u);
+}
+
+float3 Nv12ToRgb(float y, float2 uv)
+{
+    const float c = max(0.0, y - 16.0);
+    const float u = uv.x - 128.0;
+    const float v = uv.y - 128.0;
+    return saturate(float3(
+        1.16438356 * c + 1.79274107 * v,
+        1.16438356 * c - 0.21324861 * u - 0.53290933 * v,
+        1.16438356 * c + 2.11240179 * u) / 255.0);
 }
 
 float CubicWeight(float value)
@@ -2532,11 +2590,38 @@ float3 SampleRgbCubic(float2 position)
         [unroll] for (int x = -1; x <= 2; ++x)
         {
             float weight = wy * CubicWeight(position.x - float(origin.x + x));
-            total += LoadRgb(origin + int2(x, y)) * weight;
+            total += LoadRgb24(origin + int2(x, y)) * weight;
             totalWeight += weight;
         }
     }
     return saturate(total / max(totalWeight, 1e-5));
+}
+
+float SampleNv12YCubic(float2 position)
+{
+    int2 origin = int2(floor(position));
+    float total = 0.0;
+    float totalWeight = 0.0;
+    [unroll] for (int y = -1; y <= 2; ++y)
+    {
+        const float wy = CubicWeight(position.y - float(origin.y + y));
+        [unroll] for (int x = -1; x <= 2; ++x)
+        {
+            const float weight = wy * CubicWeight(position.x - float(origin.x + x));
+            total += LoadNv12Y(origin + int2(x, y)) * weight;
+            totalWeight += weight;
+        }
+    }
+    return clamp(total / max(totalWeight, 1e-5), 0.0, 255.0);
+}
+
+float2 SampleNv12UvLinear(float2 position)
+{
+    const int2 origin = int2(floor(position));
+    const float2 fraction = frac(position);
+    const float2 top = lerp(LoadNv12Uv(origin), LoadNv12Uv(origin + int2(1, 0)), fraction.x);
+    const float2 bottom = lerp(LoadNv12Uv(origin + int2(0, 1)), LoadNv12Uv(origin + int2(1, 1)), fraction.x);
+    return lerp(top, bottom, fraction.y);
 }
 
 [numthreads(8, 8, 1)]
@@ -2544,9 +2629,18 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 {
     if (dispatchId.x >= OutputWidth || dispatchId.y >= OutputHeight) return;
     float3 rgbColor;
-    if (RgbWidth == OutputWidth && RgbHeight == OutputHeight)
+    if (InputFormat == 1u)
     {
-        rgbColor = LoadRgb(int2(dispatchId.xy));
+        const float2 sourceUv = (float2(dispatchId.xy) + 0.5) /
+                                float2(OutputWidth, OutputHeight);
+        const float y = (RgbWidth == OutputWidth && RgbHeight == OutputHeight)
+            ? Nv12Luma.Load(int3(dispatchId.xy, 0)) * 255.0
+            : Nv12Luma.SampleLevel(LinearClamp, sourceUv, 0) * 255.0;
+        rgbColor = Nv12ToRgb(y, Nv12Chroma.SampleLevel(LinearClamp, sourceUv, 0) * 255.0);
+    }
+    else if (RgbWidth == OutputWidth && RgbHeight == OutputHeight)
+    {
+        rgbColor = LoadRgb24(int2(dispatchId.xy));
     }
     else
     {
@@ -2572,6 +2666,13 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
     expander.tiles_x = tiles_x;
     expander.tiles_y = tiles_y;
     expander.tile = tile;
+    expander.input_nv12 = input_nv12;
+    if (input_nv12)
+    {
+        expander.nv12_luma = MakeTex(width, height, DXGI_FORMAT_R8_UNORM, false);
+        expander.nv12_chroma = MakeTex(width / 2, height / 2, DXGI_FORMAT_R8G8_UNORM, false);
+        if (!expander.nv12_luma || !expander.nv12_chroma) return false;
+    }
     expander.flow_grid = MakeTex(tiles_x, tiles_y, DXGI_FORMAT_R16G16_FLOAT, false);
     expander.confidence_grid = MakeTex(tiles_x, tiles_y, DXGI_FORMAT_R8_UNORM, false);
     expander.depth_grid = MakeTex(tiles_x, tiles_y, DXGI_FORMAT_R16_FLOAT, false);
@@ -2591,7 +2692,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 
     D3D12_DESCRIPTOR_RANGE ranges[2] = {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 4;
+    ranges[0].NumDescriptors = 6;
     ranges[0].BaseShaderRegister = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
     ranges[1].NumDescriptors = 4;
@@ -2640,7 +2741,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap_desc.NumDescriptors = static_cast<UINT>(pipeline_slots * 8);
+    heap_desc.NumDescriptors = static_cast<UINT>(pipeline_slots * 10);
     heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(h.dev->CreateDescriptorHeap(&heap_desc, __uuidof(ID3D12DescriptorHeap),
                                            reinterpret_cast<void **>(&expander.heap))))
@@ -2669,6 +2770,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
         make_srv(expander.flow_grid, DXGI_FORMAT_R16G16_FLOAT);
         make_srv(expander.confidence_grid, DXGI_FORMAT_R8_UNORM);
         make_srv(expander.depth_grid, DXGI_FORMAT_R16_FLOAT);
+        make_srv(expander.nv12_luma, DXGI_FORMAT_R8_UNORM);
+        make_srv(expander.nv12_chroma, DXGI_FORMAT_R8G8_UNORM);
         auto make_uav = [&](ID3D12Resource *resource, DXGI_FORMAT format)
         {
             D3D12_UNORDERED_ACCESS_VIEW_DESC desc = {};
@@ -2687,19 +2790,43 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 static bool ExpandGpuInputs(
     GpuInputExpander &expander, int slot_index, ID3D12Resource *color, ID3D12Resource *motion,
     ID3D12Resource *bias, ID3D12Resource *depth, LinearTransfer &flow_upload,
-    LinearTransfer &confidence_upload, LinearTransfer &depth_upload, RawUpload &rgb_upload,
-    const std::vector<uint8_t> &rgb, const std::vector<uint16_t> &premultiplied_flow,
+    LinearTransfer &confidence_upload, LinearTransfer &depth_upload,
+    LinearTransfer &nv12_luma_upload, LinearTransfer &nv12_chroma_upload, RawUpload &rgb_upload,
+    const uint8_t *rgb, size_t rgb_size, const std::vector<uint16_t> &premultiplied_flow,
     const std::vector<uint8_t> &confidence, const std::vector<uint16_t> &compact_depth,
-    UINT rgb_width, UINT rgb_height, bool outputs_common)
+    UINT rgb_width, UINT rgb_height, bool input_nv12, bool outputs_common)
 {
-    const size_t rgb_bytes = static_cast<size_t>(rgb_width) * rgb_height * 3;
-    if (rgb.size() != rgb_bytes || rgb_bytes > rgb_upload.size) return false;
-    memcpy(rgb_upload.persistent_map, rgb.data(), rgb_bytes);
-    if ((rgb_bytes & 3u) != 0) memset(rgb_upload.persistent_map + rgb_bytes, 0, 4 - (rgb_bytes & 3u));
+    const size_t rgb_bytes = PackedFrameBytes(input_nv12 ? "nv12" : "rgb24", rgb_width, rgb_height);
+    if (rgb == nullptr || rgb_size != rgb_bytes || (!input_nv12 && rgb_bytes > rgb_upload.size)) return false;
+    if (input_nv12)
+    {
+        const size_t luma_bytes = static_cast<size_t>(rgb_width) * rgb_height;
+        FillUpload(nv12_luma_upload, rgb, rgb_width, rgb_height);
+        FillUpload(nv12_chroma_upload, rgb + luma_bytes, rgb_width, rgb_height / 2);
+    }
+    else
+    {
+        memcpy(rgb_upload.persistent_map, rgb, rgb_bytes);
+        if ((rgb_bytes & 3u) != 0) memset(rgb_upload.persistent_map + rgb_bytes, 0, 4 - (rgb_bytes & 3u));
+    }
     FillUpload(flow_upload, premultiplied_flow.data(), static_cast<size_t>(expander.tiles_x) * 4, expander.tiles_y);
     FillUpload(confidence_upload, confidence.data(), expander.tiles_x, expander.tiles_y);
     FillUpload(depth_upload, compact_depth.data(), static_cast<size_t>(expander.tiles_x) * 2, expander.tiles_y);
     if (!BeginCommands()) return false;
+    if (input_nv12)
+    {
+        const D3D12_RESOURCE_STATES input_before = expander.input_common
+            ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        Transition(expander.nv12_luma, input_before, D3D12_RESOURCE_STATE_COPY_DEST);
+        Transition(expander.nv12_chroma, input_before, D3D12_RESOURCE_STATE_COPY_DEST);
+        CopyUploadToTexture(nv12_luma_upload, expander.nv12_luma);
+        CopyUploadToTexture(nv12_chroma_upload, expander.nv12_chroma);
+        Transition(expander.nv12_luma, D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Transition(expander.nv12_chroma, D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        expander.input_common = false;
+    }
     const D3D12_RESOURCE_STATES grid_before = expander.grid_common ? D3D12_RESOURCE_STATE_COMMON
                                                                   : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     Transition(expander.flow_grid, grid_before, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -2724,12 +2851,12 @@ static bool ExpandGpuInputs(
     h.list->SetComputeRootSignature(expander.root);
     h.list->SetPipelineState(expander.pso);
     D3D12_GPU_DESCRIPTOR_HANDLE gpu = expander.heap->GetGPUDescriptorHandleForHeapStart();
-    gpu.ptr += static_cast<UINT64>(slot_index * 8) * expander.descriptor_size;
+    gpu.ptr += static_cast<UINT64>(slot_index * 10) * expander.descriptor_size;
     h.list->SetComputeRootDescriptorTable(0, gpu);
-    gpu.ptr += static_cast<UINT64>(4) * expander.descriptor_size;
+    gpu.ptr += static_cast<UINT64>(6) * expander.descriptor_size;
     h.list->SetComputeRootDescriptorTable(1, gpu);
     const UINT constants[8] = {expander.width, expander.height, expander.tiles_x, expander.tiles_y,
-                               expander.tile, rgb_width, rgb_height, 0};
+                               expander.tile, rgb_width, rgb_height, input_nv12 ? 1u : 0u};
     h.list->SetComputeRoot32BitConstants(2, 8, constants, 0);
     h.list->Dispatch((expander.width + 7) / 8, (expander.height + 7) / 8, 1);
     Transition(color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -2789,6 +2916,201 @@ static UINT64 SubmitBatchReadback(ID3D12Resource *output, LinearTransfer &readba
     dst.PlacedFootprint = readback.footprint;
     h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     Transition(output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    return EndCommands();
+}
+
+struct GpuNv12Converter
+{
+    ID3D12Resource *luma = nullptr;
+    ID3D12Resource *chroma = nullptr;
+    ID3D12RootSignature *root = nullptr;
+    ID3D12PipelineState *pso = nullptr;
+    ID3D12DescriptorHeap *heap = nullptr;
+    UINT descriptor_size = 0;
+    UINT width = 0, height = 0;
+    bool planes_common = true;
+};
+
+static void ReleaseGpuNv12Converter(GpuNv12Converter &converter)
+{
+    if (converter.heap) converter.heap->Release();
+    if (converter.pso) converter.pso->Release();
+    if (converter.root) converter.root->Release();
+    if (converter.chroma) converter.chroma->Release();
+    if (converter.luma) converter.luma->Release();
+    converter = {};
+}
+
+static bool InitGpuNv12Converter(GpuNv12Converter &converter, ID3D12Resource *output,
+                                 UINT width, UINT height)
+{
+    if (output == nullptr || width == 0 || height == 0 || (width & 1u) != 0 || (height & 1u) != 0)
+        return false;
+    static const char *shader = R"HLSL(
+cbuffer Params : register(b0)
+{
+    uint OutputWidth;
+    uint OutputHeight;
+};
+Texture2D<float4> ColorIn : register(t0);
+RWTexture2D<float> LumaOut : register(u0);
+RWTexture2D<float2> ChromaOut : register(u1);
+
+uint3 LoadRgb8(uint2 pixel)
+{
+    return uint3(round(saturate(ColorIn.Load(int3(pixel, 0)).rgb) * 255.0));
+}
+
+uint VideoLuma(uint3 rgb)
+{
+    return clamp(((47u * rgb.r + 157u * rgb.g + 16u * rgb.b + 128u) >> 8u) + 16u, 16u, 235u);
+}
+
+[numthreads(8, 8, 1)]
+void main(uint3 dispatchId : SV_DispatchThreadID)
+{
+    const uint2 block = dispatchId.xy;
+    if (block.x >= OutputWidth / 2u || block.y >= OutputHeight / 2u) return;
+    const uint2 p = block * 2u;
+    const uint3 c00 = LoadRgb8(p);
+    const uint3 c10 = LoadRgb8(p + uint2(1u, 0u));
+    const uint3 c01 = LoadRgb8(p + uint2(0u, 1u));
+    const uint3 c11 = LoadRgb8(p + uint2(1u, 1u));
+    LumaOut[p] = float(VideoLuma(c00)) / 255.0;
+    LumaOut[p + uint2(1u, 0u)] = float(VideoLuma(c10)) / 255.0;
+    LumaOut[p + uint2(0u, 1u)] = float(VideoLuma(c01)) / 255.0;
+    LumaOut[p + uint2(1u, 1u)] = float(VideoLuma(c11)) / 255.0;
+
+    const uint3 rgb = (c00 + c10 + c01 + c11 + 2u) >> 2u;
+    const int u = clamp(((-26 * int(rgb.r) - 87 * int(rgb.g) + 112 * int(rgb.b) + 128) >> 8) + 128, 16, 240);
+    const int v = clamp(((112 * int(rgb.r) - 102 * int(rgb.g) - 10 * int(rgb.b) + 128) >> 8) + 128, 16, 240);
+    ChromaOut[block] = float2(float(u), float(v)) / 255.0;
+}
+)HLSL";
+
+    converter.width = width;
+    converter.height = height;
+    converter.luma = MakeTex(width, height, DXGI_FORMAT_R8_UNORM, true);
+    converter.chroma = MakeTex(width / 2, height / 2, DXGI_FORMAT_R8G8_UNORM, true);
+    if (!converter.luma || !converter.chroma) return false;
+
+    ID3DBlob *bytecode = nullptr, *errors = nullptr;
+    HRESULT hr = D3DCompile(shader, strlen(shader), "gpu-nv12", nullptr, nullptr, "main", "cs_5_1",
+                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &bytecode, &errors);
+    if (FAILED(hr))
+    {
+        if (errors) Log("[host] NV12 shader: %s", static_cast<const char *>(errors->GetBufferPointer()));
+        if (errors) errors->Release();
+        if (bytecode) bytecode->Release();
+        return false;
+    }
+    if (errors) errors->Release();
+
+    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 1;
+    ranges[0].BaseShaderRegister = 0;
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    ranges[1].NumDescriptors = 2;
+    ranges[1].BaseShaderRegister = 0;
+    D3D12_ROOT_PARAMETER parameters[3] = {};
+    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[0].DescriptorTable.NumDescriptorRanges = 1;
+    parameters[0].DescriptorTable.pDescriptorRanges = &ranges[0];
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+    parameters[1].DescriptorTable.pDescriptorRanges = &ranges[1];
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[2].Constants.ShaderRegister = 0;
+    parameters[2].Constants.Num32BitValues = 2;
+    D3D12_ROOT_SIGNATURE_DESC signature = {};
+    signature.NumParameters = _countof(parameters);
+    signature.pParameters = parameters;
+    ID3DBlob *serialized = nullptr;
+    hr = g_d3d12_serialize_root_signature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors);
+    if (FAILED(hr) || serialized == nullptr ||
+        FAILED(h.dev->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+                                          __uuidof(ID3D12RootSignature),
+                                          reinterpret_cast<void **>(&converter.root))))
+    {
+        if (serialized) serialized->Release();
+        if (errors) errors->Release();
+        bytecode->Release();
+        return false;
+    }
+    serialized->Release();
+    if (errors) errors->Release();
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline = {};
+    pipeline.pRootSignature = converter.root;
+    pipeline.CS = {bytecode->GetBufferPointer(), bytecode->GetBufferSize()};
+    hr = h.dev->CreateComputePipelineState(&pipeline, __uuidof(ID3D12PipelineState),
+                                           reinterpret_cast<void **>(&converter.pso));
+    bytecode->Release();
+    if (FAILED(hr)) return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap_desc.NumDescriptors = 3;
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(h.dev->CreateDescriptorHeap(&heap_desc, __uuidof(ID3D12DescriptorHeap),
+                                           reinterpret_cast<void **>(&converter.heap))))
+        return false;
+    converter.descriptor_size = h.dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = converter.heap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    h.dev->CreateShaderResourceView(output, &srv, cpu);
+    cpu.ptr += converter.descriptor_size;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    uav.Format = DXGI_FORMAT_R8_UNORM;
+    h.dev->CreateUnorderedAccessView(converter.luma, nullptr, &uav, cpu);
+    cpu.ptr += converter.descriptor_size;
+    uav.Format = DXGI_FORMAT_R8G8_UNORM;
+    h.dev->CreateUnorderedAccessView(converter.chroma, nullptr, &uav, cpu);
+    return true;
+}
+
+static void CopyTextureToReadback(ID3D12Resource *texture, LinearTransfer &readback)
+{
+    D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+    src.pResource = texture;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.pResource = readback.buffer;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = readback.footprint;
+    h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+}
+
+static UINT64 SubmitBatchNv12(ID3D12Resource *output, GpuNv12Converter &converter,
+                              LinearTransfer &luma_readback, LinearTransfer &chroma_readback)
+{
+    if (!BeginCommands()) return 0;
+    Transition(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    const D3D12_RESOURCE_STATES plane_before = converter.planes_common ? D3D12_RESOURCE_STATE_COMMON
+                                                                      : D3D12_RESOURCE_STATE_COPY_SOURCE;
+    Transition(converter.luma, plane_before, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(converter.chroma, plane_before, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ID3D12DescriptorHeap *heaps[] = {converter.heap};
+    h.list->SetDescriptorHeaps(1, heaps);
+    h.list->SetComputeRootSignature(converter.root);
+    h.list->SetPipelineState(converter.pso);
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = converter.heap->GetGPUDescriptorHandleForHeapStart();
+    h.list->SetComputeRootDescriptorTable(0, gpu);
+    gpu.ptr += converter.descriptor_size;
+    h.list->SetComputeRootDescriptorTable(1, gpu);
+    const UINT constants[2] = {converter.width, converter.height};
+    h.list->SetComputeRoot32BitConstants(2, 2, constants, 0);
+    h.list->Dispatch((converter.width / 2 + 7) / 8, (converter.height / 2 + 7) / 8, 1);
+    Transition(converter.luma, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Transition(converter.chroma, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    CopyTextureToReadback(converter.luma, luma_readback);
+    CopyTextureToReadback(converter.chroma, chroma_readback);
+    Transition(output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    converter.planes_common = false;
     return EndCommands();
 }
 
@@ -2882,6 +3204,64 @@ static bool CollectBatchOutput(
     return true;
 }
 
+static bool CollectBatchNv12Output(
+    LinearTransfer &luma_readback, LinearTransfer &chroma_readback, std::vector<uint8_t> &nv12,
+    UINT width, UINT height, UINT64 fence, double *wait_ms = nullptr, double *pack_ms = nullptr)
+{
+    const auto wait_begin = BatchClock::now();
+    if (!WaitFenceValue(h.fence, fence, 30000)) return false;
+    if (wait_ms != nullptr) *wait_ms += ElapsedMs(wait_begin);
+
+    const auto pack_begin = BatchClock::now();
+    uint8_t *luma_mapped = nullptr, *chroma_mapped = nullptr;
+    const D3D12_RANGE luma_read = {0, static_cast<SIZE_T>(luma_readback.total)};
+    if (FAILED(luma_readback.buffer->Map(0, &luma_read, reinterpret_cast<void **>(&luma_mapped))) ||
+        luma_mapped == nullptr)
+        return false;
+    const D3D12_RANGE chroma_read = {0, static_cast<SIZE_T>(chroma_readback.total)};
+    if (FAILED(chroma_readback.buffer->Map(0, &chroma_read,
+                                           reinterpret_cast<void **>(&chroma_mapped))) ||
+        chroma_mapped == nullptr)
+    {
+        const D3D12_RANGE none = {0, 0};
+        luma_readback.buffer->Unmap(0, &none);
+        return false;
+    }
+    const size_t y_bytes = static_cast<size_t>(width) * height;
+    nv12.resize(y_bytes + y_bytes / 2);
+    const uint8_t *luma_base = luma_mapped + luma_readback.footprint.Offset;
+    const uint8_t *chroma_base = chroma_mapped + chroma_readback.footprint.Offset;
+    const UINT luma_pitch = luma_readback.footprint.Footprint.RowPitch;
+    const UINT chroma_pitch = chroma_readback.footprint.Footprint.RowPitch;
+    if (luma_pitch == width && chroma_pitch == width)
+    {
+        memcpy(nv12.data(), luma_base, y_bytes);
+        memcpy(nv12.data() + y_bytes, chroma_base, y_bytes / 2);
+    }
+    else
+    {
+        #pragma omp parallel for schedule(static)
+        for (int64_t yi = 0; yi < static_cast<int64_t>(height + height / 2); ++yi)
+        {
+            const UINT y = static_cast<UINT>(yi);
+            if (y < height)
+                memcpy(nv12.data() + static_cast<size_t>(y) * width,
+                       luma_base + static_cast<size_t>(y) * luma_pitch, width);
+            else
+            {
+                const UINT uv_y = y - height;
+                memcpy(nv12.data() + y_bytes + static_cast<size_t>(uv_y) * width,
+                       chroma_base + static_cast<size_t>(uv_y) * chroma_pitch, width);
+            }
+        }
+    }
+    const D3D12_RANGE none = {0, 0};
+    chroma_readback.buffer->Unmap(0, &none);
+    luma_readback.buffer->Unmap(0, &none);
+    if (pack_ms != nullptr) *pack_ms += ElapsedMs(pack_begin);
+    return true;
+}
+
 static void RgbToNv12(const std::vector<uint8_t> &rgb, std::vector<uint8_t> &nv12, UINT width, UINT height)
 {
     const size_t y_bytes = static_cast<size_t>(width) * height;
@@ -2942,6 +3322,10 @@ static int RunBatch(const BatchOptions &o)
             throw std::runtime_error("batch mode is missing an input/output/geometry argument");
         if (o.preview_only && (!o.stream || !o.preview))
             throw std::runtime_error("preview-only mode requires batch-stream preview");
+        if (o.input_format != "rgb24" && o.input_format != "nv12")
+            throw std::runtime_error("input format must be rgb24 or nv12");
+        if (o.input_format == "nv12" && ((o.width & 1u) != 0 || (o.height & 1u) != 0))
+            throw std::runtime_error("NV12 input requires even dimensions");
         if (o.nvidia_frame_generation && (!o.preview_only || o.motion_frame_generation))
             throw std::runtime_error("NVIDIA DLSS-G requires preview-only mode and cannot be combined with MotionGPU");
         const UINT target_width = o.output_width == 0 ? o.width : o.output_width;
@@ -2974,13 +3358,29 @@ static int RunBatch(const BatchOptions &o)
                 L" -movflags +faststart \"" + o.encode_mp4.wstring() + L"\"";
             SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
             HANDLE pipe_read = nullptr, pipe_write = nullptr;
-            // _wpopen/CreatePipe defaults to a tiny anonymous-pipe buffer, which
-            // throttles 4K RGB24 to a few FPS.  A multi-megabyte producer buffer
-            // lets FFmpeg's converter/NVENC pipeline consume full frames in
-            // parallel with DLSS instead of synchronizing on every 4 KiB write.
-            if (!CreatePipe(&pipe_read, &pipe_write, &sa, 4u * 1024u * 1024u) ||
-                !SetHandleInformation(pipe_write, HANDLE_FLAG_INHERIT, 0))
+            // Size the queue in complete NV12 frames. The old fixed 4 MiB
+            // channel is smaller than one 1440p frame and synchronizes every
+            // write with FFmpeg. Four frames preserve useful DLSS/NVENC overlap;
+            // the 64 MiB ceiling keeps 4K nonpaged memory bounded.
+            const uint64_t nv12_frame_bytes = static_cast<uint64_t>(target_width) * target_height * 3u / 2u;
+            const DWORD pipe_buffer_bytes = static_cast<DWORD>(std::min<uint64_t>(
+                64ull * 1024ull * 1024ull, std::max<uint64_t>(16ull * 1024ull * 1024ull,
+                                                              nv12_frame_bytes * 4ull)));
+            BOOL pipe_created = CreatePipe(&pipe_read, &pipe_write, &sa, pipe_buffer_bytes);
+            if (!pipe_created && pipe_buffer_bytes > 4u * 1024u * 1024u)
+            {
+                // Preserve compatibility on a constrained Windows nonpaged
+                // pool instead of failing the entire recording for this tune.
+                pipe_created = CreatePipe(&pipe_read, &pipe_write, &sa, 4u * 1024u * 1024u);
+            }
+            if (!pipe_created)
                 throw std::runtime_error("cannot create the buffered NVENC pipe");
+            if (!SetHandleInformation(pipe_write, HANDLE_FLAG_INHERIT, 0))
+            {
+                CloseHandle(pipe_write);
+                CloseHandle(pipe_read);
+                throw std::runtime_error("cannot configure the buffered NVENC pipe");
+            }
             HANDLE nul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                      &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             STARTUPINFOW si = {};
@@ -3011,7 +3411,9 @@ static int RunBatch(const BatchOptions &o)
                 TerminateProcess(encode_process.hProcess, 1);
                 throw std::runtime_error("cannot open the buffered NVENC pipe stream");
             }
-            setvbuf(encode_pipe, nullptr, _IOFBF, 4u * 1024u * 1024u);
+            const size_t stdio_buffer_bytes = static_cast<size_t>(std::min<DWORD>(
+                pipe_buffer_bytes, 16u * 1024u * 1024u));
+            setvbuf(encode_pipe, nullptr, _IOFBF, stdio_buffer_bytes);
             ResumeThread(encode_process.hThread);
         }
         else if (!o.preview_only)
@@ -3020,6 +3422,12 @@ static int RunBatch(const BatchOptions &o)
         }
         if (!o.preview_only && !chunk_encode_mode && encode_pipe == nullptr && !output_file)
             throw std::runtime_error("cannot open batch output");
+        // Normal recording never needs an RGB copy on the CPU. Convert the
+        // D3D12 output to planar video surfaces before readback so PCIe/system
+        // memory traffic drops from 4 bytes/pixel plus a second RGB pass to
+        // the final 1.5 bytes/pixel NV12 payload. Keep the RGB path only for
+        // the optional recording preview and raw/chunk compatibility modes.
+        const bool gpu_nv12_delivery = encode_pipe != nullptr && !o.preview;
 
         HANDLE chunk_ack_mapping = nullptr;
         volatile LONG64 *chunk_ack_counter = nullptr;
@@ -3145,7 +3553,8 @@ static int RunBatch(const BatchOptions &o)
             if (frames == 0) throw std::runtime_error("stream chunk has no frames");
             if (rgb_width == 0 || rgb_height == 0 || rgb_width > o.width || rgb_height > o.height)
                 throw std::runtime_error("invalid compact RGB geometry");
-            const uintmax_t expected_rgb = static_cast<uintmax_t>(rgb_width) * rgb_height * frames * 3;
+            const uintmax_t expected_rgb = static_cast<uintmax_t>(
+                PackedFrameBytes(o.input_format, rgb_width, rgb_height)) * frames;
             const bool shared_rgb = rgb_path.generic_string().rfind("shm://", 0) == 0;
             if (!shared_rgb && (!fs::is_regular_file(rgb_path) || fs::file_size(rgb_path) != expected_rgb))
                 throw std::runtime_error("RGB24 input size mismatch");
@@ -3323,16 +3732,30 @@ static int RunBatch(const BatchOptions &o)
             throw std::runtime_error("motion-compensated GPU frame generation initialization failed");
         constexpr int kPipeline = 3;
         LinearTransfer color_up[kPipeline], depth_up[kPipeline], mv_up[kPipeline], bias_up[kPipeline], readback[kPipeline];
+        LinearTransfer nv12_luma_readback[kPipeline], nv12_chroma_readback[kPipeline];
+        LinearTransfer nv12_luma_up[kPipeline], nv12_chroma_up[kPipeline];
         LinearTransfer compact_flow_up[kPipeline], compact_confidence_up[kPipeline], compact_depth_up[kPipeline];
         RawUpload raw_rgb_up[kPipeline];
+        GpuNv12Converter nv12_converter = {};
+        if (gpu_nv12_delivery && !InitGpuNv12Converter(nv12_converter, output_tex, target_width, target_height))
+            throw std::runtime_error("GPU NV12 conversion initialization failed");
         for (int i = 0; i < kPipeline; ++i)
         {
             color_up[i] = MakeTransfer(color, D3D12_HEAP_TYPE_UPLOAD);
             depth_up[i] = MakeTransfer(depth, D3D12_HEAP_TYPE_UPLOAD);
             mv_up[i] = MakeTransfer(mv, D3D12_HEAP_TYPE_UPLOAD);
             bias_up[i] = MakeTransfer(bias, D3D12_HEAP_TYPE_UPLOAD);
-            raw_rgb_up[i] = MakeRawUpload(static_cast<UINT64>(o.width) * o.height * 3);
-            if (!o.preview_only) readback[i] = MakeTransfer(output_tex, D3D12_HEAP_TYPE_READBACK);
+            raw_rgb_up[i] = MakeRawUpload(o.input_format == "nv12" ? 8u
+                                                                      : PackedFrameBytes(o.input_format, o.width, o.height));
+            if (!o.preview_only && gpu_nv12_delivery)
+            {
+                nv12_luma_readback[i] = MakeTransfer(nv12_converter.luma, D3D12_HEAP_TYPE_READBACK);
+                nv12_chroma_readback[i] = MakeTransfer(nv12_converter.chroma, D3D12_HEAP_TYPE_READBACK);
+            }
+            else if (!o.preview_only)
+            {
+                readback[i] = MakeTransfer(output_tex, D3D12_HEAP_TYPE_READBACK);
+            }
         }
         GpuInputExpander input_expander = {};
         bool input_expander_initialized = false;
@@ -3346,17 +3769,22 @@ static int RunBatch(const BatchOptions &o)
                 throw std::runtime_error("motion/depth compact-grid mismatch");
             if (!InitGpuInputExpander(input_expander, raw_rgb_up, kPipeline, color, mv, bias, depth,
                                       o.width, o.height, motion_reader->TilesX(), motion_reader->TilesY(),
-                                      motion_reader->Tile()))
+                                      motion_reader->Tile(), o.input_format == "nv12"))
                 throw std::runtime_error("GPU input expansion initialization failed");
             for (int i = 0; i < kPipeline; ++i)
             {
                 compact_flow_up[i] = MakeTransfer(input_expander.flow_grid, D3D12_HEAP_TYPE_UPLOAD);
                 compact_confidence_up[i] = MakeTransfer(input_expander.confidence_grid, D3D12_HEAP_TYPE_UPLOAD);
                 compact_depth_up[i] = MakeTransfer(input_expander.depth_grid, D3D12_HEAP_TYPE_UPLOAD);
+                if (o.input_format == "nv12")
+                {
+                    nv12_luma_up[i] = MakeTransfer(input_expander.nv12_luma, D3D12_HEAP_TYPE_UPLOAD);
+                    nv12_chroma_up[i] = MakeTransfer(input_expander.nv12_chroma, D3D12_HEAP_TYPE_UPLOAD);
+                }
             }
             input_expander_initialized = true;
-            Log("[host] GPU input expansion active: RGB24 + %ux%u compact motion/depth -> %ux%u",
-                input_expander.tiles_x, input_expander.tiles_y, o.width, o.height);
+            Log("[host] GPU input expansion active: %s + %ux%u compact motion/depth -> %ux%u",
+                o.input_format.c_str(), input_expander.tiles_x, input_expander.tiles_y, o.width, o.height);
         };
 
         const int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
@@ -3381,6 +3809,8 @@ static int RunBatch(const BatchOptions &o)
         struct PreparedBatchFrame
         {
             std::vector<uint8_t> rgb;
+            const uint8_t *rgb_data = nullptr;
+            size_t rgb_size = 0;
             std::vector<uint16_t> premultiplied_motion;
             std::vector<uint8_t> confidence;
             std::vector<uint16_t> compact_depth;
@@ -3389,11 +3819,8 @@ static int RunBatch(const BatchOptions &o)
             bool reset = false;
             std::exception_ptr error;
         } prepared[kPipeline];
-        for (auto &slot : prepared)
-        {
-            slot.rgb.resize(pixels * 3);
-        }
         std::vector<uint8_t> out_rgb[kPipeline];
+        std::vector<uint8_t> out_nv12[kPipeline];
         struct PendingOutput
         {
             UINT64 fence = 0;
@@ -3446,9 +3873,14 @@ static int RunBatch(const BatchOptions &o)
         {
             if (encode_pipe != nullptr)
             {
-                RgbToNv12(buffer, encode_nv12, target_width, target_height);
-                const size_t written = fwrite(encode_nv12.data(), 1, encode_nv12.size(), encode_pipe);
-                if (written != encode_nv12.size()) throw std::runtime_error("NVENC pipe write failed");
+                const std::vector<uint8_t> *payload = &buffer;
+                if (!gpu_nv12_delivery)
+                {
+                    RgbToNv12(buffer, encode_nv12, target_width, target_height);
+                    payload = &encode_nv12;
+                }
+                const size_t written = fwrite(payload->data(), 1, payload->size(), encode_pipe);
+                if (written != payload->size()) throw std::runtime_error("NVENC pipe write failed");
             }
             else
             {
@@ -3474,9 +3906,19 @@ static int RunBatch(const BatchOptions &o)
                 auto phase_begin = BatchClock::now();
                 if (!input || !motion_reader || !depth_reader)
                     throw std::runtime_error("batch chunk is not open");
-                slot.rgb.resize(static_cast<size_t>(current_rgb_width) * current_rgb_height * 3);
-                if (!input->ReadExact(slot.rgb.data(), slot.rgb.size()))
-                    throw std::runtime_error("truncated RGB24 input");
+                slot.rgb_size = PackedFrameBytes(o.input_format, current_rgb_width, current_rgb_height);
+                if (input->Shared())
+                {
+                    slot.rgb_data = input->ReadView(slot.rgb_size);
+                    if (slot.rgb_data == nullptr) throw std::runtime_error("truncated shared RGB24 input");
+                }
+                else
+                {
+                    slot.rgb.resize(slot.rgb_size);
+                    if (!input->ReadExact(slot.rgb.data(), slot.rgb_size))
+                        throw std::runtime_error("truncated RGB24 input");
+                    slot.rgb_data = slot.rgb.data();
+                }
                 slot.input_ms = ElapsedMs(phase_begin);
                 phase_begin = BatchClock::now();
                 slot.reset = motion_reader->ReadCompact(slot.premultiplied_motion, slot.confidence);
@@ -3501,13 +3943,22 @@ static int RunBatch(const BatchOptions &o)
                     throw std::runtime_error("GPU preview submission failed");
                 readback_gpu_ms += ElapsedMs(wait_begin);
             }
-            else if (!CollectBatchOutput(readback[slot_index], out_rgb[slot_index], target_width, target_height,
+            else if (gpu_nv12_delivery &&
+                     !CollectBatchNv12Output(nv12_luma_readback[slot_index], nv12_chroma_readback[slot_index],
+                                             out_nv12[slot_index], target_width, target_height, item.fence,
+                                             &readback_gpu_ms, &readback_pack_ms))
+            {
+                throw std::runtime_error("GPU NV12 output readback failed");
+            }
+            else if (!gpu_nv12_delivery &&
+                     !CollectBatchOutput(readback[slot_index], out_rgb[slot_index], target_width, target_height,
                                          item.fence, &readback_gpu_ms, &readback_pack_ms))
             {
                 throw std::runtime_error("GPU output readback failed");
             }
             readback_ms += ElapsedMs(phase_begin);
-            if (!o.preview_only) PresentBatchRgb(out_rgb[slot_index], target_width, target_height);
+            if (!o.preview_only && o.preview)
+                PresentBatchRgb(out_rgb[slot_index], target_width, target_height);
 
             if (o.preview_only)
             {
@@ -3520,7 +3971,8 @@ static int RunBatch(const BatchOptions &o)
                 join_writer();
                 writer_error = nullptr;
                 pending_write_ms = 0.0;
-                std::vector<uint8_t> &write_buffer = out_rgb[slot_index];
+                std::vector<uint8_t> &write_buffer = gpu_nv12_delivery ? out_nv12[slot_index]
+                                                                       : out_rgb[slot_index];
                 writer_thread = std::jthread([&write_output, &write_buffer, &writer_error, &pending_write_ms]()
                 {
                     const auto write_begin = BatchClock::now();
@@ -3538,7 +3990,7 @@ static int RunBatch(const BatchOptions &o)
             else
             {
                 phase_begin = BatchClock::now();
-                write_output(out_rgb[slot_index]);
+                write_output(gpu_nv12_delivery ? out_nv12[slot_index] : out_rgb[slot_index]);
                 write_ms += ElapsedMs(phase_begin);
             }
             if (!o.quiet_frames) Log("[host] batch frame %u/%u delivered", item.frame + 1, o.frames);
@@ -3605,9 +4057,11 @@ static int RunBatch(const BatchOptions &o)
             auto phase_begin = BatchClock::now();
             if (!ExpandGpuInputs(input_expander, slot_index, color, mv, bias, depth,
                                  compact_flow_up[slot_index], compact_confidence_up[slot_index],
-                                 compact_depth_up[slot_index], raw_rgb_up[slot_index],
-                                 current.rgb, current.premultiplied_motion, current.confidence,
+                                 compact_depth_up[slot_index], nv12_luma_up[slot_index],
+                                 nv12_chroma_up[slot_index], raw_rgb_up[slot_index],
+                                 current.rgb_data, current.rgb_size, current.premultiplied_motion, current.confidence,
                                  current.compact_depth, current_rgb_width, current_rgb_height,
+                                 o.input_format == "nv12",
                                  frame == 0 && !o.fast_start))
                 throw std::runtime_error("GPU compact-input expansion failed");
             upload_ms += ElapsedMs(phase_begin);
@@ -3630,11 +4084,20 @@ static int RunBatch(const BatchOptions &o)
                 }
                 else
                 {
-                    const UINT64 warmup_fence = SubmitBatchReadback(output_tex, readback[slot_index]);
-                    std::vector<uint8_t> warmup_rgb;
-                    if (warmup_fence == 0 ||
-                        !CollectBatchOutput(readback[slot_index], warmup_rgb, target_width, target_height, warmup_fence))
-                        throw std::runtime_error("DLAA/NR warm-up readback failed");
+                    if (gpu_nv12_delivery)
+                    {
+                        if (!WaitFenceValue(h.fence, h.fence_value, 30000))
+                            throw std::runtime_error("DLAA/NR warm-up did not finish");
+                    }
+                    else
+                    {
+                        const UINT64 warmup_fence = SubmitBatchReadback(output_tex, readback[slot_index]);
+                        std::vector<uint8_t> warmup_rgb;
+                        if (warmup_fence == 0 ||
+                            !CollectBatchOutput(readback[slot_index], warmup_rgb, target_width, target_height,
+                                                warmup_fence))
+                            throw std::runtime_error("DLAA/NR warm-up readback failed");
+                    }
                 }
                 warmup_ms = ElapsedMs(warmup_begin);
                 Log("[host] Feature 18 warm-up completed in %.3f ms", warmup_ms);
@@ -3704,7 +4167,10 @@ static int RunBatch(const BatchOptions &o)
             }
             else
             {
-                readback_fence = SubmitBatchReadback(output_tex, readback[slot_index]);
+                readback_fence = gpu_nv12_delivery
+                    ? SubmitBatchNv12(output_tex, nv12_converter, nv12_luma_readback[slot_index],
+                                      nv12_chroma_readback[slot_index])
+                    : SubmitBatchReadback(output_tex, readback[slot_index]);
             }
             if (readback_fence == 0) throw std::runtime_error("GPU output readback submission failed");
             pending[slot_index].fence = readback_fence;
@@ -3786,8 +4252,8 @@ static int RunBatch(const BatchOptions &o)
         if (o.timings)
         {
             const double frames = static_cast<double>(o.frames);
-            Log("[host] DLSS5_BATCH_TIMING frames=%u pipeline=%d prefetch=%d async_write=%d total_ms=%.3f wall_total_ms=%.3f recording_pipeline_ms=%.3f warmup_ms=%.3f startup_warmup_ms=%.3f stream_wait_ms=%.3f stream_wait_max_ms=%.3f stream_wait_events=%u stream_commands_received=%u stream_queue_peak=%zu buffer_underruns=%u buffer_underrun_max_ms=%.3f chunk_encode_ms=%.3f chunk_encode_wait_ms=%.3f chunk_encode_overlap_ms=%.3f preview_pacing_ms=%.3f preview_present_fps=%.3f per_frame_ms=%.3f input_ms=%.3f guides_ms=%.3f prefetch_wait_ms=%.3f writer_wait_ms=%.3f upload_ms=%.3f submit_ms=%.3f readback_ms=%.3f readback_wait_ms=%.3f readback_pack_ms=%.3f write_ms=%.3f",
-                o.frames, kPipeline, o.prefetch ? 1 : 0, o.async_write ? 1 : 0, total_ms, wall_total_ms, recording_pipeline_ms, warmup_ms, startup_warmup_ms, stream_wait_ms, stream_wait_max_ms, stream_wait_events, stream_commands_received, stream_queue_peak, stream_underruns, stream_underrun_max_ms, chunk_encode_ms, chunk_encode_wait_ms, chunk_encode_overlap_ms, preview_pacing_ms, preview_present_fps, total_ms / frames,
+            Log("[host] DLSS5_BATCH_TIMING frames=%u pipeline=%d prefetch=%d async_write=%d gpu_nv12=%d total_ms=%.3f wall_total_ms=%.3f recording_pipeline_ms=%.3f warmup_ms=%.3f startup_warmup_ms=%.3f stream_wait_ms=%.3f stream_wait_max_ms=%.3f stream_wait_events=%u stream_commands_received=%u stream_queue_peak=%zu buffer_underruns=%u buffer_underrun_max_ms=%.3f chunk_encode_ms=%.3f chunk_encode_wait_ms=%.3f chunk_encode_overlap_ms=%.3f preview_pacing_ms=%.3f preview_present_fps=%.3f per_frame_ms=%.3f input_ms=%.3f guides_ms=%.3f prefetch_wait_ms=%.3f writer_wait_ms=%.3f upload_ms=%.3f submit_ms=%.3f readback_ms=%.3f readback_wait_ms=%.3f readback_pack_ms=%.3f write_ms=%.3f",
+                o.frames, kPipeline, o.prefetch ? 1 : 0, o.async_write ? 1 : 0, gpu_nv12_delivery ? 1 : 0, total_ms, wall_total_ms, recording_pipeline_ms, warmup_ms, startup_warmup_ms, stream_wait_ms, stream_wait_max_ms, stream_wait_events, stream_commands_received, stream_queue_peak, stream_underruns, stream_underrun_max_ms, chunk_encode_ms, chunk_encode_wait_ms, chunk_encode_overlap_ms, preview_pacing_ms, preview_present_fps, total_ms / frames,
                 input_ms / frames, guides_ms / frames, prefetch_wait_ms / frames,
                 writer_wait_ms / frames, upload_ms / frames,
                 evaluate_submit_ms / frames, readback_ms / frames,
@@ -3819,6 +4285,8 @@ static int RunBatch(const BatchOptions &o)
             if (compact_flow_up[i].persistent_map != nullptr) compact_flow_up[i].buffer->Unmap(0, nullptr);
             if (compact_confidence_up[i].persistent_map != nullptr) compact_confidence_up[i].buffer->Unmap(0, nullptr);
             if (compact_depth_up[i].persistent_map != nullptr) compact_depth_up[i].buffer->Unmap(0, nullptr);
+            if (nv12_luma_up[i].persistent_map != nullptr) nv12_luma_up[i].buffer->Unmap(0, nullptr);
+            if (nv12_chroma_up[i].persistent_map != nullptr) nv12_chroma_up[i].buffer->Unmap(0, nullptr);
             if (raw_rgb_up[i].persistent_map != nullptr) raw_rgb_up[i].buffer->Unmap(0, nullptr);
             color_up[i].buffer->Release();
             depth_up[i].buffer->Release();
@@ -3827,10 +4295,15 @@ static int RunBatch(const BatchOptions &o)
             if (compact_flow_up[i].buffer != nullptr) compact_flow_up[i].buffer->Release();
             if (compact_confidence_up[i].buffer != nullptr) compact_confidence_up[i].buffer->Release();
             if (compact_depth_up[i].buffer != nullptr) compact_depth_up[i].buffer->Release();
+            if (nv12_luma_up[i].buffer != nullptr) nv12_luma_up[i].buffer->Release();
+            if (nv12_chroma_up[i].buffer != nullptr) nv12_chroma_up[i].buffer->Release();
             raw_rgb_up[i].buffer->Release();
             if (readback[i].buffer != nullptr) readback[i].buffer->Release();
+            if (nv12_luma_readback[i].buffer != nullptr) nv12_luma_readback[i].buffer->Release();
+            if (nv12_chroma_readback[i].buffer != nullptr) nv12_chroma_readback[i].buffer->Release();
         }
         ReleaseGpuInputExpander(input_expander);
+        ReleaseGpuNv12Converter(nv12_converter);
         color->Release();
         output_tex->Release();
         depth->Release();
@@ -4113,6 +4586,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) batch.frames = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
         else if (strcmp(argv[i], "--fps") == 0 && i + 1 < argc) batch.fps = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
         else if (strcmp(argv[i], "--codec") == 0 && i + 1 < argc) batch.codec = argv[++i];
+        else if (strcmp(argv[i], "--input-format") == 0 && i + 1 < argc) batch.input_format = argv[++i];
         else if (strcmp(argv[i], "--quality") == 0 && i + 1 < argc) batch.quality = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
         else if (strcmp(argv[i], "--reset-every-frame") == 0) batch.reset_every_frame = true;
         else if (strcmp(argv[i], "--timings") == 0) batch.timings = true;
@@ -4139,7 +4613,7 @@ int main(int argc, char **argv)
     }
     if (!test && !batch.enabled && pid == 0)
     {
-        Log("usage: dlss5-video-host --test | --batch [--input in.rgb24 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--telemetry-file path] [--chunk-ack-map name] [--encoder-affinity-mask N] [--media-start-seconds N]");
+        Log("usage: dlss5-video-host --test | --batch [--input in.raw --input-format rgb24|nv12 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--telemetry-file path] [--chunk-ack-map name] [--encoder-affinity-mask N] [--media-start-seconds N]");
         return 1;
     }
     g_show_window = (!test && !batch.enabled && !hide) || batch.preview;

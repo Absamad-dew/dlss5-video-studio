@@ -1,2 +1,2 @@
-20.0.1-streaming-audio-hotfix
-Portable builds now always include yt-dlp. Online sources resolve hardware-friendly video and audio tracks separately, preserve per-track headers/cookies, and keep realtime plus recorded audio synchronized instead of selecting a silent VK video-only URL.
+21.0.0-nv12-throughput-audio-stable
+Compact NV12 decode/transport, overlapped recording, GPU NV12 output, cross-chunk depth prefetch, and one measured sample-clock audio endpoint for stable realtime playback.

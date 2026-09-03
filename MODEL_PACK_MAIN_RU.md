@@ -1,6 +1,6 @@
-# DLSS5 Video Studio — Main Models V19
+# DLSS5 Video Studio — Main Models V21
 
-`DLSS5_VIDEO_STUDIO_MAIN_MODELS_V19.zip` — автономный архив главных открытых моделей для уже подготовленной portable-папки.
+`DLSS5_VIDEO_STUDIO_MAIN_MODELS_V21.zip` — автономный архив главных открытых моделей для уже подготовленной portable-папки.
 
 Распакуйте содержимое прямо в корень программы рядом с `DLSS5 Video Studio.exe`, без дополнительной вложенной папки. Затем запустите `VERIFY_MAIN_MODELS.cmd`. Успешная проверка заканчивается строкой `MAIN_MODEL_PACK_VERIFY_OK`.
 

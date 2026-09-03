@@ -810,7 +810,9 @@ switch ($PerformanceProfile) {
         $GuideWidth = 256; $DepthInterval = 8; $DepthMinInterval = 8
         $AdaptiveConfidence = 0.0; $AdaptiveMotion = 0.0; $TemporalDepth = 0.70
         $MotionPreset = 'realtime'
-        $ChunkSize = if ($RenderWidth -ge 3000) { 48 } elseif ($RenderWidth -ge 1900) { 72 } else { 128 }
+        # Keep one short prepared block ahead. This starts NVENC sooner and
+        # bounds pagefile-backed transport without changing guide quality.
+        $ChunkSize = if ($RenderWidth -ge 1900) { 24 } else { 64 }
     }
     default { # Medium
         $GuideWidth = 480; $DepthInterval = 2; $DepthMinInterval = 2
@@ -851,6 +853,13 @@ $SelectedRaftUpdates = if ($IsPreviewOnly) {
 } else {
     4
 }
+
+# Most source video is already 4:2:0. For the DIS path, keep it in compact
+# NV12 from the persistent decoder through shared memory and convert it once
+# in the D3D12 input shader. This removes the CPU RGB24 expansion, halves the
+# transport footprint, and gives both realtime and recording the same fast
+# path. RAFT/external neural upscalers still request RGB tensors explicitly.
+$FrameTransportFormat = if (-not $UseExternalUpscaler -and $SelectedMotionBackend -eq 'dis') { 'nv12' } else { 'rgb24' }
 
 if ($IsPreviewOnly) {
     # Refill the realtime queue several times per second. Multi-second chunks
@@ -971,7 +980,11 @@ $SharedTransportWindowFrames = if ($IsPreviewOnly) {
     # bounded window instead of round-tripping every RGB frame through an SSD.
     [int][math]::Min($TotalFrames,3*$ChunkSize)
 }
-$SharedRgbPlannedBytes = [long]$SharedTransportWindowFrames*[long]$RgbTransportWidth*[long]$RgbTransportHeight*3L
+$SharedRgbPlannedBytes = if ($FrameTransportFormat -eq 'nv12') {
+    [long]$SharedTransportWindowFrames*[long]$RgbTransportWidth*[long]$RgbTransportHeight*3L/2L
+} else {
+    [long]$SharedTransportWindowFrames*[long]$RgbTransportWidth*[long]$RgbTransportHeight*3L
+}
 $SharedGuideTile = [int][math]::Max(1,[math]::Ceiling($DlssInputWidth/[double][math]::Max(64,$GuideWidth)))
 $SharedGuideWidth = [int][math]::Ceiling($DlssInputWidth/[double]$SharedGuideTile)
 $SharedGuideHeight = [int][math]::Ceiling($DlssInputHeight/[double]$SharedGuideTile)
@@ -1030,6 +1043,7 @@ $UpscalerReservedVramMb = 0
 $script:TemporalAtlasMetrics = $null
 $DepthProvider = 'unknown'
 $MotionProvider = $null
+$RecordingInflightChunks = if (-not $IsPreviewOnly -and $SelectedMotionBackend -eq 'dis') { 2 } else { 1 }
 $PipelineAffinityPartition = Get-PipelineAffinityPartition (-not $IsPreviewOnly)
 $PipelineHostOpenMpThreads = if ($PipelineAffinityPartition) {
     [int][math]::Min(8,$PipelineAffinityPartition.HostLogicalProcessors)
@@ -1055,6 +1069,7 @@ $Plan = [ordered]@{
     source_geometry=@($SourceWidth,$SourceHeight); output_geometry=@($OutputWidth,$OutputHeight)
     render_geometry=@($DlssInputWidth,$DlssInputHeight); hardware_profile=$ResolvedHardwareProfile
     rgb_transport_geometry=@($RgbTransportWidth,$RgbTransportHeight)
+    frame_transport_format=$FrameTransportFormat
     realtime_render_preset=if($IsPreviewOnly){$ResolvedRealtimeRenderPreset}else{$null}
     depth_model_profile=$DepthModelProfile
     depth_backend_policy=$DepthBackendPolicy
@@ -1112,6 +1127,7 @@ $Plan = [ordered]@{
     rgb_transport=if($UseSharedRgbTransport){'shared-memory'}else{'ssd-file'}
     guide_transport=if($UseSharedGuideTransport){'shared-memory'}else{'ssd-file'}
     chunk_ack_transport='shared-monotonic-counter'
+    recording_inflight_chunks=if(-not $IsPreviewOnly){$RecordingInflightChunks}else{$null}
     host_openmp_threads=$HostOpenMpThreads
     realtime_shared_rgb_planned_mb=if($IsPreviewOnly){[math]::Round($SharedRgbPlannedBytes/1MB,1)}else{$null}
     realtime_shared_guide_planned_mb=if($IsPreviewOnly){[math]::Round($SharedGuidePlannedBytes/1MB,1)}else{$null}
@@ -1196,10 +1212,13 @@ try {
 
     $GuideArgs = @(
         '--server','--width',$DlssInputWidth,'--height',$DlssInputHeight,
-        '--input-width',$RgbTransportWidth,'--input-height',$RgbTransportHeight,'--depth-model',$DepthModel,
+        '--input-width',$RgbTransportWidth,'--input-height',$RgbTransportHeight,'--input-format',$FrameTransportFormat,'--depth-model',$DepthModel,
         '--depth-engine',$DepthEngine,'--depth-backend',($DepthComputeBackend.ToLowerInvariant().Replace('tensorrtrtx','tensorrt-rtx')),'--cache-dir',$DepthCache,'--guide-width',$GuideWidth,
         '--depth-interval',$DepthInterval,'--depth-min-interval',$DepthMinInterval,
-        '--depth-prefetch-mode',$(if($IsPreviewOnly){'synchronous'}else{'threaded'}),
+        # CPU depth does not contend with the D3D12 DLSS queue. Start its next
+        # sparse inference as soon as decoder look-ahead publishes the frame;
+        # DirectML realtime stays synchronous to avoid GPU queue spikes.
+        '--depth-prefetch-mode',$(if($IsPreviewOnly -and $DepthComputeBackend -ne 'Cpu'){'synchronous'}else{'threaded'}),
         '--motion-preset',$MotionPreset,
         '--motion-backend',$SelectedMotionBackend,
         '--scene-cut-threshold',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$SceneCutThreshold)),'--adaptive-confidence',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$AdaptiveConfidence)),
@@ -1225,7 +1244,7 @@ try {
     $HostArgs = @(
         '--batch-stream',
         '--width',$DlssInputWidth,'--height',$DlssInputHeight,'--output-width',$DlssOutputWidth,'--output-height',$DlssOutputHeight,
-        '--frames',$TotalFrames,'--fps',$Fps,'--codec',$CodecName,'--quality',$Quality,
+        '--frames',$TotalFrames,'--fps',$Fps,'--codec',$CodecName,'--quality',$Quality,'--input-format',$FrameTransportFormat,
         '--timings','--quiet-frames'
     )
     $HostArgs += @('--chunk-ack-map',$ChunkAckMapName)
@@ -1510,7 +1529,11 @@ try {
             } catch {
                 $DecoderSeconds += $DecodeWatch.Elapsed.TotalSeconds
             }
-            if (-not $IsPreviewOnly) {
+            if (-not $IsPreviewOnly -and ($SentChunks-$AcknowledgedChunks) -ge $RecordingInflightChunks) {
+                # DIS can keep one chunk rendering and one fully prepared
+                # command in the native queue. RAFT is serialized because its
+                # larger CUDA working set would contend with DLSS/NVENC. The
+                # bounded shared-memory window prevents unbounded RAM growth.
                 Wait-HostChunkSubmitted $HostProcess $ChunkAckCounter ($AcknowledgedChunks+1)
                 if ($AcknowledgedChunks -eq 0) { $FirstHostChunkSeconds = $PipelineWatch.Elapsed.TotalSeconds }
                 $AcknowledgedFrames += [int]$ChunkFrameCounts[$AcknowledgedChunks]
@@ -2036,6 +2059,7 @@ try {
     $EncodeOverlapMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\schunk_encode_overlap_ms=(?<ms>[0-9.]+)')
     $WriterWaitMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\swriter_wait_ms=(?<ms>[0-9.]+)')
     $WriteMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\swrite_ms=(?<ms>[0-9.]+)')
+    $GpuNv12Match = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\sgpu_nv12=(?<enabled>[01])')
     $PreviewFpsMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\spreview_present_fps=(?<fps>[0-9.]+)')
     $MfgStatsMatch = [regex]::Match($HostText, '(?:HOST_DLSSG_STATS real_frames=|\[streamline\] aggregate real=)(?<real>[0-9]+) presented=(?<presented>[0-9]+) generated=(?<generated>[0-9]+) (?:actual_)?multiplier=(?<multiplier>[0-9.]+) max_per_render=(?<max>[0-9]+)')
     $UnderrunMatch = [regex]::Match($HostText, 'DLSS5_BATCH_TIMING[^\r\n]*\sbuffer_underruns=(?<count>[0-9]+)')
@@ -2145,6 +2169,7 @@ try {
         source_geometry = @($SourceWidth,$SourceHeight)
         render_geometry = @($DlssInputWidth,$DlssInputHeight)
         rgb_transport_geometry = @($RgbTransportWidth,$RgbTransportHeight)
+        frame_transport_format = $FrameTransportFormat
         dlss_output_geometry = @($DlssOutputWidth,$DlssOutputHeight)
         output_geometry = @($OutputWidth,$OutputHeight)
         container_geometry = @($ContainerWidth,$ContainerHeight)
@@ -2173,8 +2198,10 @@ try {
         gpu_compact_guide_expansion = $true
         fast_start = -not $UseExternalUpscaler
         continuous_nvenc = [bool]$DirectEncode
+        gpu_nv12_encode = [bool]($DirectEncode -and $GpuNv12Match.Success -and $GpuNv12Match.Groups['enabled'].Value -eq '1')
         asynchronous_chunk_nvenc = [bool](-not $IsPreviewOnly -and -not $DirectEncode)
         chunk_ack_transport = 'shared-monotonic-counter'
+        recording_inflight_chunks = if(-not $IsPreviewOnly){[int]$RecordingInflightChunks}else{$null}
         hardware_cpu_partition = if($PipelineAffinityPartition){[ordered]@{
             guide_logical_processors=$PipelineAffinityPartition.GuideLogicalProcessors
             host_logical_processors=$PipelineAffinityPartition.HostLogicalProcessors

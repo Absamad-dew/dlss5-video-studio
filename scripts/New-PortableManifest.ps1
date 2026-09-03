@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path -LiteralPath $PortableRoot).Path
 $manifestPath = Join-Path $root 'MANIFEST.json'
-$mutableDirectories = @('output', 'settings', 'temp')
+$mutableDirectories = @('output', 'qa-output', 'settings', 'temp')
 $runtimeFiles = @(
     'engine/ReShade.ini',
     'engine/ReShade.log',

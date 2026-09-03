@@ -173,6 +173,8 @@ $AudioClockObservedWall = 0.0
 $AudioPendingStart = $false
 $AudioPendingSince = 0.0
 $AudioPendingPosition = 0.0
+$AudioStartupLatencySeconds = 0.35
+$AudioStartupLatencyMeasured = $false
 $VideoPaused = $false
 $BufferingPaused = $false
 $LastAudioStartWall = 0.0
@@ -294,8 +296,22 @@ function Poll-AudioStatus {
             if ([double]::TryParse($LatestClockMatch.Groups['clock'].Value,[Globalization.NumberStyles]::Float,$Invariant,[ref]$RawClock)) {
                 # ffplay runs at source speed, so its master clock maps directly
                 # onto the source-media timeline after the seek offset.
-                $script:AudioClockMedia = $script:AudioSeekPosition + [math]::Max(0.0,$RawClock)*$script:AudioPlaybackRate
+                $RawMediaSeconds = [math]::Max(0.0,$RawClock)*$script:AudioPlaybackRate
+                $script:AudioClockMedia = $script:AudioSeekPosition + $RawMediaSeconds
                 $script:AudioClockObservedWall = Get-MonotonicSeconds
+                if (-not $script:AudioStartupLatencyMeasured -and $RawMediaSeconds -ge 0.02 -and
+                    $script:LastAudioStartWall -gt 0.0) {
+                    # ffplay's audio master clock counts samples actually
+                    # accepted by the device. The difference between wall time
+                    # since launch and that sample time is the real decoder /
+                    # WASAPI startup latency on this machine and input.
+                    $MeasuredLatency = ($script:AudioClockObservedWall-$script:LastAudioStartWall)-$RawMediaSeconds
+                    if ($MeasuredLatency -ge 0.0 -and $MeasuredLatency -le 1.5) {
+                        $script:AudioStartupLatencySeconds = $MeasuredLatency
+                        $script:AudioStartupLatencyMeasured = $true
+                        Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_STARTUP_LATENCY seconds={0:0.###}',$MeasuredLatency))
+                    }
+                }
             }
         }
         $CleanTail = ($script:AudioStderrBuffer -replace "`r","`n")
@@ -411,7 +427,7 @@ function Publish-LiveBufferStatus([switch] $Force) {
     $script:LastBufferPublishWall = $Now
 }
 
-function Start-Audio([double] $Position) {
+function Start-Audio([double] $Position,[switch] $Prewarm) {
     if (-not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused -or $script:BufferingPaused) { return }
     $script:AudioPendingStart = $false
     Stop-Audio
@@ -446,9 +462,29 @@ function Start-Audio([double] $Position) {
     $script:AudioSeekPosition=$SeekPosition
     $script:AudioClockMedia=[double]::NaN
     $script:AudioClockObservedWall=0.0
+    $script:AudioStartupLatencyMeasured=$false
     $script:LastAudioStartWall=Get-MonotonicSeconds
     $script:AudioDriftViolationSince=0.0
-    Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_STARTED position={0:0.######} rate={1:0.###} pid={2}',$SeekPosition,$script:AudioPlaybackRate,$script:AudioProcess.Id))
+    $StartedEvent = if($Prewarm){'STUDIO_PLAYER_AUDIO_PREWARM_STARTED'}else{'STUDIO_PLAYER_AUDIO_STARTED'}
+    Write-Output ([string]::Format($Invariant,"$StartedEvent position={0:0.######} rate={1:0.###} pid={2}",$SeekPosition,$script:AudioPlaybackRate,$script:AudioProcess.Id))
+}
+
+function Restart-AudioAligned([double] $Position,[string] $Reason = 'transition') {
+    if (-not $EnableAudio -or $script:AudioMuted -or $script:VideoPaused -or $script:BufferingPaused) { return }
+    # The video clock keeps advancing while an old ffplay endpoint is stopped
+    # and its replacement opens the decoder/WASAPI device. Seek past both
+    # intervals so the first audible sample belongs to the frame displayed at
+    # that instant. This same rule is required at startup, recovery and a
+    # pause/rebuffer realignment; treating those paths differently caused the
+    # recurring "audio rushes, then drops" regressions.
+    $TransitionStarted = Get-MonotonicSeconds
+    $LaunchCompensation = [math]::Max(0.0,[math]::Min(0.75,$script:AudioStartupLatencySeconds))
+    Stop-Audio
+    $TransitionSeconds = [math]::Max(0.0,(Get-MonotonicSeconds)-$TransitionStarted)
+    $AlignedPosition = $Position+$TransitionSeconds+$LaunchCompensation
+    Start-Audio $AlignedPosition
+    Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_ALIGNED_RESTART reason={0} video={1:0.###} transition={2:0.###} compensation={3:0.###} seek={4:0.###}',
+        $Reason,$Position,$TransitionSeconds,$LaunchCompensation,$AlignedPosition))
 }
 
 function Suspend-Audio([double] $Position,[string] $Reason = 'explicit') {
@@ -491,7 +527,7 @@ function Resume-Audio([double] $Position,[switch] $ForceAlign) {
         if ($ForceAlign -and -not [double]::IsNaN($AudioPosition) -and $ResumeDelta -gt 0.12) {
             Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_REALIGN transition position={0:0.######} audio={1:0.######} drift={2:0.###}',
                 $Position,$AudioPosition,$ResumeDelta))
-            Start-Audio $Position
+            Restart-AudioAligned $Position 'resume-realign'
             return
         }
         if (Set-AudioDevicePaused $false $Position '') {
@@ -500,7 +536,7 @@ function Resume-Audio([double] $Position,[switch] $ForceAlign) {
         }
         Write-Output 'STUDIO_PLAYER_AUDIO_RESUME_WARNING ffplay SDL audio window was unavailable'
     }
-    Start-Audio $Position
+    Restart-AudioAligned $Position 'resume-recovery'
 }
 
 function Update-AudioClockFromTelemetry {
@@ -536,13 +572,13 @@ function Update-AudioClockFromTelemetry {
         # rebuffering below pause this same SDL device against its sample clock.
         $script:AudioPlaybackRate = 1.0
         $script:AudioPendingStart = $false
-        Start-Audio $StartPosition
+        Restart-AudioAligned $StartPosition 'deferred-start'
         Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_ALIGNED_START position={0:0.###}',$StartPosition))
         return
     }
     if ((-not $script:AudioProcess -or $script:AudioProcess.HasExited) -and
         ($Now-$script:LastAudioStartWall) -ge 2.0) {
-        Start-Audio $Position
+        Restart-AudioAligned $Position 'unexpected-exit'
         Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_RECOVERED position={0:0.###}',$Position))
         return
     }
@@ -598,6 +634,7 @@ while ($true) {
     $script:AudioSuspended=$false;$script:AudioSuspendedPosition=0.0;$script:AudioSuspendReason=''
     $script:AudioPausePending=$false;$script:AudioPausePendingPosition=0.0;$script:AudioPausePendingReason=''
     $script:AudioPlaybackRate=1.0
+    $script:AudioStartupLatencySeconds=0.35;$script:AudioStartupLatencyMeasured=$false
     $script:AudioPendingStart=$false;$script:AudioPendingSince=0.0;$script:AudioPendingPosition=$CurrentStart
     $script:VideoPlaybackStarted=$false;$script:VideoPaused=$false;$script:BufferingPaused=$false;$script:LatestVideoPosition=$CurrentStart
     $script:LatestRealFrames=0L;$script:ProducerSentFrames=0L;$script:ProducerTargetFrames=0L;$script:ProducerFps=0.0
@@ -648,7 +685,7 @@ while ($true) {
     # leaving sound 0.6-1.8 seconds late. The prewarmed endpoint starts both
     # clocks together without muting or dropping any samples during playback.
     if ($EnableAudio -and -not $script:AudioMuted) {
-        Start-Audio $CurrentStart
+        Start-Audio $CurrentStart -Prewarm
         Suspend-Audio $CurrentStart 'startup'
         $script:BufferingPaused = $true
         Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_PREWARMED position={0:0.###}',$CurrentStart))
@@ -737,7 +774,29 @@ while ($true) {
                     # at the newest displayed-frame telemetry so decoder start
                     # latency cannot leave sound several seconds behind.
                     $AudioPosition=if($script:LatestVideoPosition -gt $Position){$script:LatestVideoPosition}else{$Position}
-                    if ($EnableAudio -and -not $script:AudioMuted -and (-not $script:AudioProcess -or $script:AudioProcess.HasExited)) {
+                    $StartupEndpoint = $EnableAudio -and -not $script:AudioMuted -and $script:AudioProcess -and
+                        -not $script:AudioProcess.HasExited -and
+                        ($script:AudioSuspendReason -eq 'startup' -or $script:AudioPausePendingReason -eq 'startup')
+                    if ($StartupEndpoint) {
+                        # The hidden prewarm endpoint tells us its actual launch
+                        # latency, but it may already have advanced before the
+                        # SDL window accepted Pause. Replace it once and seek
+                        # ahead by that measured latency so audible sample zero
+                        # and the displayed-frame clock begin together.
+                        $TransitionStarted = Get-MonotonicSeconds
+                        $null = Get-EstimatedAudioPosition
+                        $LaunchCompensation = [math]::Max(0.0,[math]::Min(0.75,$script:AudioStartupLatencySeconds))
+                        Stop-Audio
+                        # Stopping the prewarm process is synchronous. Native
+                        # video keeps presenting while that happens, so include
+                        # the measured transition wall time as well as the next
+                        # endpoint's decoder/device latency in the seek target.
+                        $TransitionSeconds = [math]::Max(0.0,(Get-MonotonicSeconds)-$TransitionStarted)
+                        $AlignedPosition = $AudioPosition+$TransitionSeconds+$LaunchCompensation
+                        Start-Audio $AlignedPosition
+                        Write-Output ([string]::Format($Invariant,'STUDIO_PLAYER_AUDIO_STARTUP_ALIGNED video={0:0.###} transition={1:0.###} compensation={2:0.###} seek={3:0.###}',
+                            $AudioPosition,$TransitionSeconds,$LaunchCompensation,$AlignedPosition))
+                    } elseif ($EnableAudio -and -not $script:AudioMuted -and (-not $script:AudioProcess -or $script:AudioProcess.HasExited)) {
                         # Let the first telemetry sample settle before opening
                         # audio. This removes decoder/window startup latency
                         # from A/V alignment without adding a blind fixed seek.

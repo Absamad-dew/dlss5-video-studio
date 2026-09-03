@@ -1,5 +1,5 @@
 param(
-    [string] $PortableRoot = 'D:\DLSS5_VIDEO_STUDIO_PORTABLE_REALTIME_V11',
+    [string] $PortableRoot = 'D:\DLSS5_VIDEO_STUDIO_PORTABLE_REALTIME_V20',
     [string] $InputVideo = '',
     [string] $ConfigPath = '',
     [ValidateSet('540p','1080p','1440p')] [string] $OutputMode = '540p',
@@ -19,6 +19,7 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = 'C:\Users\Lenovo\
 $inputVideo = $InputVideo
 $config = $ConfigPath
 $control = Join-Path $root 'temp\qa-audio-long-control.txt'
+$telemetry = $control + '.telemetry'
 $powerShell = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 
@@ -57,6 +58,8 @@ $playingAt = -1.0
 $closeSent = $false
 $lines = [Collections.Generic.List[string]]::new()
 $errors = [Collections.Generic.List[string]]::new()
+$performance = [Collections.Generic.List[object]]::new()
+$lastTelemetry = ''
 try {
     while ($watch.Elapsed.TotalSeconds -lt 75) {
         if ($stdout -and $stdout.IsCompleted) {
@@ -79,6 +82,18 @@ try {
             [IO.File]::WriteAllText($control,'CLOSE',$utf8NoBom)
             $closeSent = $true
         }
+        if ($playingAt -ge 0 -and -not $closeSent -and (Test-Path -LiteralPath $telemetry -PathType Leaf)) {
+            try { $sample = [IO.File]::ReadAllText($telemetry,$utf8NoBom).Trim() } catch { $sample = '' }
+            if ($sample -and $sample -ne $lastTelemetry -and
+                $sample -match 'real_fps=(?<real>[0-9.]+)\s+display_fps=(?<display>[0-9.]+)') {
+                $performance.Add([pscustomobject]@{
+                    Time=$watch.Elapsed.TotalSeconds-$playingAt
+                    Real=[double]$Matches.real
+                    Display=[double]$Matches.display
+                })
+                $lastTelemetry = $sample
+            }
+        }
         if ($process.HasExited -and -not $stdout -and -not $stderr) { break }
         Start-Sleep -Milliseconds 20
     }
@@ -90,8 +105,8 @@ try {
     $maxHoldDrift = if ($holds.Count) { ($holds | ForEach-Object { [double]$_.Groups['drift'].Value } | Measure-Object -Maximum).Maximum } else { 0.0 }
     $syncSamples = [regex]::Matches($text,'(?m)^STUDIO_PLAYER_AUDIO_SYNC video=(?<video>[0-9.]+) audio=[0-9.]+ drift=(?<drift>-?[0-9.]+)$')
     # The first published sample can precede the first full native telemetry
-    # interval. Measure steady playback after one media second.
-    $steadySyncSamples = @($syncSamples | Where-Object { [double]$_.Groups['video'].Value -ge 1.0 })
+    # interval. Measure steady playback after two media seconds.
+    $steadySyncSamples = @($syncSamples | Where-Object { [double]$_.Groups['video'].Value -ge 2.0 })
     $maxAbsoluteSyncDrift = if ($steadySyncSamples.Count) {
         ($steadySyncSamples | ForEach-Object { [math]::Abs([double]$_.Groups['drift'].Value) } | Measure-Object -Maximum).Maximum
     } else { [double]::PositiveInfinity }
@@ -103,6 +118,7 @@ try {
         $syncLines = @($lines | Where-Object { $_ -match '^STUDIO_PLAYER_AUDIO_SYNC ' })
         throw "audio timeline was unstable: holds=$($holds.Count) samples=$($syncSamples.Count) max_drift=$maxAbsoluteSyncDrift timeline=$($syncLines -join ' || ')"
     }
+    $steadyPerformance = @($performance | Where-Object { $_.Time -ge 2.0 })
     [ordered]@{
         status='ok';output_mode=$OutputMode;performance_profile=$PerformanceProfile;render_preset=$RenderPreset
         motion_backend=$MotionBackend;guide_width=$GuideWidth;depth_interval=$DepthInterval
@@ -113,6 +129,10 @@ try {
         sync_samples=$syncSamples.Count;steady_sync_samples=$steadySyncSamples.Count;max_absolute_sync_drift_seconds=[math]::Round([double]$maxAbsoluteSyncDrift,3)
         audio_exits=([regex]::Matches($text,'(?m)^STUDIO_PLAYER_AUDIO_EXITED ')).Count
         audio_errors=([regex]::Matches($text,'(?m)^STUDIO_PLAYER_AUDIO_ERROR ')).Count
+        realtime_samples=$steadyPerformance.Count
+        realtime_real_fps=if($steadyPerformance.Count){[math]::Round(($steadyPerformance.Real|Measure-Object -Average).Average,3)}else{0}
+        realtime_display_fps=if($steadyPerformance.Count){[math]::Round(($steadyPerformance.Display|Measure-Object -Average).Average,3)}else{0}
+        realtime_real_fps_min=if($steadyPerformance.Count){[math]::Round(($steadyPerformance.Real|Measure-Object -Minimum).Minimum,3)}else{0}
         elapsed_seconds=[math]::Round($watch.Elapsed.TotalSeconds,2)
     } | ConvertTo-Json -Compress
 } finally {
