@@ -57,6 +57,7 @@
 #include <sl_reflex.h>
 
 #include "feed_ipc.h"
+#include "nvenc_d3d12.h"
 
 namespace fs = std::filesystem;
 
@@ -100,6 +101,8 @@ struct BatchOptions
     bool preview = false;
     bool preview_only = false;
     bool fast_start = false;
+    bool nvenc_d3d12 = false;
+    bool nvenc_d3d12_fallback = false;
     bool fullscreen = false;
     bool motion_frame_generation = false;
     bool nvidia_frame_generation = false;
@@ -107,6 +110,7 @@ struct BatchOptions
     uint32_t nvidia_generated_frames = 1;
     uint32_t nvidia_dynamic_target_fps = 0;
     fs::path input, output, encode_mp4, encode_chunks_dir, motion, depth;
+    fs::path nvenc_reference;
     fs::path control_file, telemetry_file, chunk_ack_map;
     std::string codec = "h264";
     std::string input_format = "rgb24";
@@ -3086,7 +3090,8 @@ static void CopyTextureToReadback(ID3D12Resource *texture, LinearTransfer &readb
 }
 
 static UINT64 SubmitBatchNv12(ID3D12Resource *output, GpuNv12Converter &converter,
-                              LinearTransfer &luma_readback, LinearTransfer &chroma_readback)
+                              LinearTransfer &luma_readback, LinearTransfer &chroma_readback,
+                              ID3D12Resource *encode_texture = nullptr, bool capture_reference = false)
 {
     if (!BeginCommands()) return 0;
     Transition(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -3107,8 +3112,28 @@ static UINT64 SubmitBatchNv12(ID3D12Resource *output, GpuNv12Converter &converte
     h.list->Dispatch((converter.width / 2 + 7) / 8, (converter.height / 2 + 7) / 8, 1);
     Transition(converter.luma, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     Transition(converter.chroma, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    CopyTextureToReadback(converter.luma, luma_readback);
-    CopyTextureToReadback(converter.chroma, chroma_readback);
+    if (encode_texture)
+    {
+        // Copy the exact same R8/RG8 shader bytes into the two NV12 planes.
+        // No resampling, second RGB conversion, or CPU round-trip occurs here.
+        Transition(encode_texture, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        for (UINT plane = 0; plane < 2; ++plane)
+        {
+            D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+            src.pResource = plane == 0 ? converter.luma : converter.chroma;
+            src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.pResource = encode_texture;
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = plane;
+            h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+        Transition(encode_texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    }
+    if (!encode_texture || capture_reference)
+    {
+        CopyTextureToReadback(converter.luma, luma_readback);
+        CopyTextureToReadback(converter.chroma, chroma_readback);
+    }
     Transition(output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     converter.planes_common = false;
     return EndCommands();
@@ -3335,6 +3360,40 @@ static int RunBatch(const BatchOptions &o)
         std::ofstream output_file;
         FILE *encode_pipe = nullptr;
         PROCESS_INFORMATION encode_process = {};
+        constexpr int kPipeline = 4;
+        std::unique_ptr<D3D12NvEncoder> direct_nvenc;
+        std::ofstream nvenc_reference;
+        if (!o.nvenc_reference.empty())
+        {
+            if (!o.nvenc_d3d12 || o.nvenc_d3d12_fallback)
+                throw std::runtime_error("--nvenc-reference requires forced --nvenc-d3d12 (diagnostic only)");
+            nvenc_reference.open(o.nvenc_reference, std::ios::binary | std::ios::trunc);
+            if (!nvenc_reference) throw std::runtime_error("cannot create NVENC reference capture");
+        }
+        if (o.nvenc_d3d12)
+        {
+            if (o.encode_mp4.empty() || o.preview || o.preview_only || !o.encode_chunks_dir.empty())
+                throw std::runtime_error("--nvenc-d3d12 requires continuous --encode-mp4 without preview");
+            if ((o.codec != "h264" && o.codec != "h265") || o.quality > 51)
+                throw std::runtime_error("invalid direct NVENC codec or quality");
+            direct_nvenc = std::make_unique<D3D12NvEncoder>();
+            try
+            {
+                direct_nvenc->Open(h.dev, target_width, target_height, o.fps, o.quality, o.codec == "h265", kPipeline);
+                const auto &cfg = direct_nvenc->Config();
+                Log("[host] D3D12 NVENC active: P1/LL constQP I/P/B=%u/%u/%u GOP=%u intervalP=%d slots=%d",
+                    cfg.rcParams.constQP.qpIntra, cfg.rcParams.constQP.qpInterP, cfg.rcParams.constQP.qpInterB,
+                    cfg.gopLength, cfg.frameIntervalP, kPipeline);
+            }
+            catch (const std::exception &error)
+            {
+                if (!o.nvenc_d3d12_fallback) throw;
+                // No output process or frame has been created yet. Switching
+                // here is safe; never silently restart a partially encoded file.
+                Log("[host] D3D12 NVENC unavailable; using FFmpeg NVENC: %s", error.what());
+                direct_nvenc.reset();
+            }
+        }
         const bool chunk_encode_mode = o.stream && !o.encode_chunks_dir.empty();
         if (chunk_encode_mode)
         {
@@ -3347,10 +3406,18 @@ static int RunBatch(const BatchOptions &o)
             if (o.quality > 51) throw std::runtime_error("quality must be between 0 and 51");
             const std::wstring encoder = o.codec == "h265" ? L"hevc_nvenc" : L"h264_nvenc";
             const std::wstring codec_tail = o.codec == "h265" ? L" -tag:v hvc1" : L"";
-            const std::wstring command =
+            const std::wstring command = direct_nvenc ?
+                L"ffmpeg -y -v error -fflags +genpts -r " + std::to_wstring(o.fps) +
+                L" -f " + (o.codec == "h265" ? std::wstring(L"hevc") : std::wstring(L"h264")) +
+                L" -i pipe:0 -frames:v " + std::to_wstring(o.frames) +
+                L" -an -c:v copy" + codec_tail + L" -movflags +faststart \"" + o.encode_mp4.wstring() + L"\"" :
                 L"ffmpeg -y -v error -f rawvideo -pixel_format nv12 -video_size " +
                 std::to_wstring(target_width) + L"x" + std::to_wstring(target_height) +
                 L" -framerate " + std::to_wstring(o.fps) +
+                // The GPU shader already produced limited-range BT.709 NV12.
+                // Tag the INPUT too: FFmpeg 9 otherwise inserts an implicit
+                // YUV -> RGB -> YUV matrix conversion on the CPU.
+                L" -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv" +
                 L" -i pipe:0 -frames:v " + std::to_wstring(o.frames) +
                 L" -an -c:v " + encoder + L" -preset p1 -tune ll -rc constqp -qp " +
                 std::to_wstring(o.quality) + codec_tail +
@@ -3363,7 +3430,8 @@ static int RunBatch(const BatchOptions &o)
             // write with FFmpeg. Four frames preserve useful DLSS/NVENC overlap;
             // the 64 MiB ceiling keeps 4K nonpaged memory bounded.
             const uint64_t nv12_frame_bytes = static_cast<uint64_t>(target_width) * target_height * 3u / 2u;
-            const DWORD pipe_buffer_bytes = static_cast<DWORD>(std::min<uint64_t>(
+            // The direct path transports compressed packets, not raw frames.
+            const DWORD pipe_buffer_bytes = direct_nvenc ? 4u * 1024u * 1024u : static_cast<DWORD>(std::min<uint64_t>(
                 64ull * 1024ull * 1024ull, std::max<uint64_t>(16ull * 1024ull * 1024ull,
                                                               nv12_frame_bytes * 4ull)));
             BOOL pipe_created = CreatePipe(&pipe_read, &pipe_write, &sa, pipe_buffer_bytes);
@@ -3730,7 +3798,6 @@ static int RunBatch(const BatchOptions &o)
         if (o.preview_only && o.motion_frame_generation &&
             !InitMotionFrameGeneration(frame_generation, output_tex, mv, bias, target_width, target_height))
             throw std::runtime_error("motion-compensated GPU frame generation initialization failed");
-        constexpr int kPipeline = 4;
         LinearTransfer color_up[kPipeline], depth_up[kPipeline], mv_up[kPipeline], bias_up[kPipeline], readback[kPipeline];
         LinearTransfer nv12_luma_readback[kPipeline], nv12_chroma_readback[kPipeline];
         LinearTransfer nv12_luma_up[kPipeline], nv12_chroma_up[kPipeline];
@@ -3741,18 +3808,23 @@ static int RunBatch(const BatchOptions &o)
             throw std::runtime_error("GPU NV12 conversion initialization failed");
         for (int i = 0; i < kPipeline; ++i)
         {
-            color_up[i] = MakeTransfer(color, D3D12_HEAP_TYPE_UPLOAD);
-            depth_up[i] = MakeTransfer(depth, D3D12_HEAP_TYPE_UPLOAD);
-            mv_up[i] = MakeTransfer(mv, D3D12_HEAP_TYPE_UPLOAD);
-            bias_up[i] = MakeTransfer(bias, D3D12_HEAP_TYPE_UPLOAD);
+            // Only the synthetic startup warm-up uses full-resolution CPU
+            // uploads. Real frames use the compact expander in every mode.
+            if (i == 0 && o.fast_start)
+            {
+                color_up[i] = MakeTransfer(color, D3D12_HEAP_TYPE_UPLOAD);
+                depth_up[i] = MakeTransfer(depth, D3D12_HEAP_TYPE_UPLOAD);
+                mv_up[i] = MakeTransfer(mv, D3D12_HEAP_TYPE_UPLOAD);
+                bias_up[i] = MakeTransfer(bias, D3D12_HEAP_TYPE_UPLOAD);
+            }
             raw_rgb_up[i] = MakeRawUpload(o.input_format == "nv12" ? 8u
                                                                       : PackedFrameBytes(o.input_format, o.width, o.height));
-            if (!o.preview_only && gpu_nv12_delivery)
+            if (!o.preview_only && gpu_nv12_delivery && (!direct_nvenc || nvenc_reference.is_open()))
             {
                 nv12_luma_readback[i] = MakeTransfer(nv12_converter.luma, D3D12_HEAP_TYPE_READBACK);
                 nv12_chroma_readback[i] = MakeTransfer(nv12_converter.chroma, D3D12_HEAP_TYPE_READBACK);
             }
-            else if (!o.preview_only)
+            else if (!o.preview_only && !direct_nvenc)
             {
                 readback[i] = MakeTransfer(output_tex, D3D12_HEAP_TYPE_READBACK);
             }
@@ -3833,6 +3905,8 @@ static int RunBatch(const BatchOptions &o)
         double prefetch_wait_ms = 0.0;
         double writer_wait_ms = 0.0;
         double pending_write_ms = 0.0;
+        double nvenc_submit_ms = 0.0, nvenc_collect_ms = 0.0;
+        uint64_t nvenc_compressed_bytes = 0;
         double warmup_ms = 0.0;
         double startup_warmup_ms = 0.0;
         double preview_pacing_ms = 0.0;
@@ -3868,6 +3942,16 @@ static int RunBatch(const BatchOptions &o)
             startup_warmup_ms = ElapsedMs(startup_warmup_begin);
             Log("[host] Feature 18 startup warm-up completed in %.3f ms (overlapped with first guide chunk)",
                 startup_warmup_ms);
+            UINT64 reclaimed_bytes = 0;
+            for (LinearTransfer *upload : {&color_up[0], &depth_up[0], &mv_up[0], &bias_up[0]})
+            {
+                reclaimed_bytes += upload->total;
+                if (upload->persistent_map) upload->buffer->Unmap(0, nullptr);
+                if (upload->buffer) upload->buffer->Release();
+                *upload = {};
+            }
+            Log("[host] startup-only upload buffers released after fence: %llu bytes; %d unused full-frame rings omitted",
+                static_cast<unsigned long long>(reclaimed_bytes), kPipeline - 1);
         }
         auto write_output = [&](const std::vector<uint8_t> &buffer)
         {
@@ -3936,6 +4020,22 @@ static int RunBatch(const BatchOptions &o)
             PendingOutput &item = pending[slot_index];
             if (!item.active) return;
             auto phase_begin = BatchClock::now();
+            if (direct_nvenc)
+            {
+                nvenc_compressed_bytes += direct_nvenc->Collect(slot_index, encode_pipe);
+                nvenc_collect_ms += ElapsedMs(phase_begin);
+                if (nvenc_reference.is_open())
+                {
+                    if (!CollectBatchNv12Output(nv12_luma_readback[slot_index], nv12_chroma_readback[slot_index],
+                        out_nv12[slot_index], target_width, target_height, item.fence, nullptr, nullptr))
+                        throw std::runtime_error("NVENC reference readback failed");
+                    const auto &bytes = out_nv12[slot_index];
+                    nvenc_reference.write(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+                    if (!nvenc_reference) throw std::runtime_error("NVENC reference write failed");
+                }
+                item.active = false;
+                return;
+            }
             if (o.preview_only)
             {
                 const auto wait_begin = BatchClock::now();
@@ -4170,10 +4270,18 @@ static int RunBatch(const BatchOptions &o)
             {
                 readback_fence = gpu_nv12_delivery
                     ? SubmitBatchNv12(output_tex, nv12_converter, nv12_luma_readback[slot_index],
-                                      nv12_chroma_readback[slot_index])
+                                      nv12_chroma_readback[slot_index],
+                                      direct_nvenc ? direct_nvenc->Input(slot_index) : nullptr,
+                                      nvenc_reference.is_open())
                     : SubmitBatchReadback(output_tex, readback[slot_index]);
             }
             if (readback_fence == 0) throw std::runtime_error("GPU output readback submission failed");
+            if (direct_nvenc)
+            {
+                const auto encode_begin = BatchClock::now();
+                direct_nvenc->Submit(slot_index, h.fence, readback_fence, frame);
+                nvenc_submit_ms += ElapsedMs(encode_begin);
+            }
             pending[slot_index].fence = readback_fence;
             pending[slot_index].frame = frame;
             pending[slot_index].active = true;
@@ -4219,6 +4327,7 @@ static int RunBatch(const BatchOptions &o)
             }
         }
 
+        if (direct_nvenc) direct_nvenc->Flush();
         const uint32_t drain_begin = o.frames > kPipeline ? o.frames - kPipeline : 0;
         for (uint32_t frame = drain_begin; frame < o.frames; ++frame)
             collect_output(static_cast<int>(frame % kPipeline));
@@ -4253,6 +4362,9 @@ static int RunBatch(const BatchOptions &o)
         if (o.timings)
         {
             const double frames = static_cast<double>(o.frames);
+            Log("[host] DLSS5_NVENC_TIMING d3d12=%d submit_ms=%.3f collect_ms=%.3f compressed_bytes=%llu",
+                direct_nvenc ? 1 : 0, nvenc_submit_ms / frames, nvenc_collect_ms / frames,
+                static_cast<unsigned long long>(nvenc_compressed_bytes));
             Log("[host] DLSS5_BATCH_TIMING frames=%u pipeline=%d prefetch=%d async_write=%d gpu_nv12=%d total_ms=%.3f wall_total_ms=%.3f recording_pipeline_ms=%.3f warmup_ms=%.3f startup_warmup_ms=%.3f stream_wait_ms=%.3f stream_wait_max_ms=%.3f stream_wait_events=%u stream_commands_received=%u stream_queue_peak=%zu buffer_underruns=%u buffer_underrun_max_ms=%.3f chunk_encode_ms=%.3f chunk_encode_wait_ms=%.3f chunk_encode_overlap_ms=%.3f preview_pacing_ms=%.3f preview_present_fps=%.3f per_frame_ms=%.3f input_ms=%.3f guides_ms=%.3f prefetch_wait_ms=%.3f writer_wait_ms=%.3f upload_ms=%.3f submit_ms=%.3f readback_ms=%.3f readback_wait_ms=%.3f readback_pack_ms=%.3f write_ms=%.3f",
                 o.frames, kPipeline, o.prefetch ? 1 : 0, o.async_write ? 1 : 0, gpu_nv12_delivery ? 1 : 0, total_ms, wall_total_ms, recording_pipeline_ms, warmup_ms, startup_warmup_ms, stream_wait_ms, stream_wait_max_ms, stream_wait_events, stream_commands_received, stream_queue_peak, stream_underruns, stream_underrun_max_ms, chunk_encode_ms, chunk_encode_wait_ms, chunk_encode_overlap_ms, preview_pacing_ms, preview_present_fps, total_ms / frames,
                 input_ms / frames, guides_ms / frames, prefetch_wait_ms / frames,
@@ -4289,10 +4401,10 @@ static int RunBatch(const BatchOptions &o)
             if (nv12_luma_up[i].persistent_map != nullptr) nv12_luma_up[i].buffer->Unmap(0, nullptr);
             if (nv12_chroma_up[i].persistent_map != nullptr) nv12_chroma_up[i].buffer->Unmap(0, nullptr);
             if (raw_rgb_up[i].persistent_map != nullptr) raw_rgb_up[i].buffer->Unmap(0, nullptr);
-            color_up[i].buffer->Release();
-            depth_up[i].buffer->Release();
-            mv_up[i].buffer->Release();
-            bias_up[i].buffer->Release();
+            if (color_up[i].buffer != nullptr) color_up[i].buffer->Release();
+            if (depth_up[i].buffer != nullptr) depth_up[i].buffer->Release();
+            if (mv_up[i].buffer != nullptr) mv_up[i].buffer->Release();
+            if (bias_up[i].buffer != nullptr) bias_up[i].buffer->Release();
             if (compact_flow_up[i].buffer != nullptr) compact_flow_up[i].buffer->Release();
             if (compact_confidence_up[i].buffer != nullptr) compact_confidence_up[i].buffer->Release();
             if (compact_depth_up[i].buffer != nullptr) compact_depth_up[i].buffer->Release();
@@ -4577,6 +4689,9 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--input") == 0 && i + 1 < argc) batch.input = argv[++i];
         else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) batch.output = argv[++i];
         else if (strcmp(argv[i], "--encode-mp4") == 0 && i + 1 < argc) batch.encode_mp4 = argv[++i];
+        else if (strcmp(argv[i], "--nvenc-d3d12") == 0) batch.nvenc_d3d12 = true;
+        else if (strcmp(argv[i], "--nvenc-reference") == 0 && i + 1 < argc) batch.nvenc_reference = argv[++i];
+        else if (strcmp(argv[i], "--nvenc-d3d12-auto") == 0) { batch.nvenc_d3d12 = true; batch.nvenc_d3d12_fallback = true; }
         else if (strcmp(argv[i], "--encode-chunks-dir") == 0 && i + 1 < argc) batch.encode_chunks_dir = argv[++i];
         else if (strcmp(argv[i], "--motion") == 0 && i + 1 < argc) batch.motion = argv[++i];
         else if (strcmp(argv[i], "--depth") == 0 && i + 1 < argc) batch.depth = argv[++i];
@@ -4614,7 +4729,7 @@ int main(int argc, char **argv)
     }
     if (!test && !batch.enabled && pid == 0)
     {
-        Log("usage: dlss5-video-host --test | --batch [--input in.raw --input-format rgb24|nv12 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--telemetry-file path] [--chunk-ack-map name] [--encoder-affinity-mask N] [--media-start-seconds N]");
+        Log("usage: dlss5-video-host --test | --batch [--input in.raw --input-format rgb24|nv12 --motion motion.bin --depth depth.bin | --batch-stream] (--output out.rgb24 | --encode-mp4 out.mp4 | --encode-chunks-dir dir | --preview-only) --width W --height H --frames N [--output-width OW --output-height OH] [--fps N] [--codec h264|h265] [--quality 0..51] [--nvenc-d3d12|--nvenc-d3d12-auto] [--nvenc-reference diagnostic.nv12] [--reset-every-frame] [--timings] [--quiet-frames] [--delete-chunks] [--preview] [--fast-start] [--fullscreen] [--frame-generation-motion|--frame-generation-nvidia [--dlssg-generated-frames 1..5] [--dlssg-dynamic [--dlssg-dynamic-target FPS]]]] [--control-file path] [--telemetry-file path] [--chunk-ack-map name] [--encoder-affinity-mask N] [--media-start-seconds N]");
         return 1;
     }
     g_show_window = (!test && !batch.enabled && !hide) || batch.preview;

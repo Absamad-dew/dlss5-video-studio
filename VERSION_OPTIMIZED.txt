@@ -1,2 +1,2 @@
-21.1.0-d3d12-pipeline4
-Four complete D3D12 frames in flight for realtime and recording, compact NV12 transport/output, overlapped recording, cross-chunk depth prefetch, and stable sample-clock audio.
+22.0.0-direct-nvenc
+GPU-resident D3D12 NVENC for recording with automatic compatibility fallback; explicit BT.709 input metadata; startup-only upload memory released in realtime and recording.

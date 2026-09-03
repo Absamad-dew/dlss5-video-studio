@@ -1,8 +1,14 @@
-# DLSS5 Video Studio 21.1
+# DLSS5 Video Studio 22
 
 Windows video player/processor that reconstructs motion and depth from ordinary video, evaluates NVIDIA NGX through a D3D12 host, and can present the result with official NVIDIA DLSS Frame Generation through Streamline + Reflex.
 
 The repository contains source code and dependency installers. It intentionally excludes proprietary NVIDIA DLLs, the user's custom `nvngx_dlssnr.dll`, FFmpeg binaries, ReShade binaries, portable Python, and very large optional model weights. A small open-licensed core model pack for an existing V11 portable folder is available from [GitHub Releases](https://github.com/Absamad-dew/dlss5-video-studio/releases).
+
+## Version 22 highlights
+
+Recording now uses GPU-resident D3D12 NVENC with explicit resource fences and an initialization-time compatibility fallback. The old FFmpeg path now receives correct input BT.709 metadata, avoiding a hidden CPU YUV→RGB→YUV conversion. Startup-only full-size upload allocations are released in both recording and realtime (about 183 MiB at 1440p / 411 MiB at 4K).
+
+A controlled laptop native-stage benchmark measured 24.393→29.981 FPS (+22.9%). This excludes guide generation and source decoding. Pixel/timestamp parity is tested by encoding the exact same captured GPU frames with both backends. See [V22 validation and limitations](OPTIMIZATION_V22_RU.md). Older constant-color transport benchmarks below are not representative video-quality evidence.
 
 ## Version 21.1 highlights
 

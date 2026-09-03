@@ -9,7 +9,10 @@ param(
     [int] $Width = 2560,
     [int] $Height = 1440,
     [int] $Frames = 120,
-    [int] $Fps = 25
+    [int] $Fps = 25,
+    [ValidateSet('h264','h265')] [string] $Codec = 'h265',
+    [switch] $DirectD3D12,
+    [string] $CaptureReference
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,10 +32,17 @@ try {
     $env:Path = (Split-Path -Parent ([IO.Path]::GetFullPath($Ffmpeg))) + ';' + $env:Path
     Push-Location $EngineDirectory
     try {
+        $Extra = @()
+        if ($DirectD3D12) { $Extra += '--nvenc-d3d12' }
+        if ($CaptureReference) { $Extra += @('--nvenc-reference',[IO.Path]::GetFullPath($CaptureReference)) }
         $Console = (& $HostExe --batch --input $InputFile --input-format nv12 --motion $Motion --depth $Depth `
             --encode-mp4 $Output --width $Width --height $Height --output-width $Width --output-height $Height `
-            --frames $Frames --fps $Fps --codec h265 --quality 18 --fast-start --timings --quiet-frames 2>&1 | Out-String)
-        if ($LASTEXITCODE -ne 0) { throw "native benchmark failed: $Console" }
+            --frames $Frames --fps $Fps --codec $Codec --quality 18 --fast-start --timings --quiet-frames @Extra 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            $Exit = $LASTEXITCODE
+            $FailureLog = Get-Content -LiteralPath (Join-Path $EngineDirectory 'dlss5-video-host.log') -Tail 15 -ErrorAction SilentlyContinue
+            throw "native benchmark failed (exit $Exit): $Console`n$($FailureLog -join "`n")"
+        }
     } finally { Pop-Location }
 } finally { $env:Path = $PreviousPath }
 
@@ -54,6 +64,9 @@ $TotalMs = Metric 'total_ms'
     geometry = @($Width,$Height)
     frames = $Frames
     pipeline = [int](Metric 'pipeline')
+    direct_d3d12 = [bool]$DirectD3D12
+    diagnostic_capture = [bool]$CaptureReference
+    codec = $Codec
     host_fps = if($TotalMs -gt 0){[math]::Round(1000.0*$Frames/$TotalMs,3)}else{0}
     per_frame_ms = Metric 'per_frame_ms'
     writer_wait_ms = Metric 'writer_wait_ms'

@@ -40,6 +40,7 @@ foreach ($Name in @('START.cmd','NVIDIA_RUNTIME_NOTICE.txt','THIRD_PARTY_NOTICES
 Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_DA3_LARGE.cmd'),(Join-Path $Build 'INSTALL_M2SVID_EXPERIMENTAL.cmd'),(Join-Path $Build 'INSTALL_MOEBIUS_EXPERIMENTAL.cmd') -Destination $Target -Force
 Copy-Item -Path (Join-Path $Base 'licenses\*') -Destination (Join-Path $Target 'licenses') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $Build 'licenses\vr\MI-GAN-MIT.txt') -Destination (Join-Path $Target 'licenses\vr') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'licenses\NVENC-header-MIT.txt') -Destination (Join-Path $Target 'licenses') -Force
 Copy-Item -LiteralPath (Join-Path $Base 'models\depth_anything_v2_small.onnx') -Destination (Join-Path $Target 'models') -Force
 if (-not [string]::IsNullOrWhiteSpace($MainModelSource)) {
     $ResolvedModelSource = [IO.Path]::GetFullPath($MainModelSource)
@@ -186,6 +187,7 @@ Copy-Item -LiteralPath `
     -Destination (Join-Path $Target 'app') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'dist\DLSS5 Video Studio.exe') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'README_OPTIMIZED_RU.md') -Destination (Join-Path $Target 'README_RU.md') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'OPTIMIZATION_V22_RU.md'),(Join-Path $Build 'THIRD_PARTY_NOTICES.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'VR_RESEARCH_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'VERSION_OPTIMIZED.txt') -Destination (Join-Path $Target 'VERSION.txt') -Force
 

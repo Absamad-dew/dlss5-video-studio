@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)] [string] $ConfigPath,
     [ValidateSet('H264','H265')] [string] $Codec = 'H265',
     [ValidateRange(0,51)] [int] $Quality = 18,
+    [ValidateSet('Auto','Ffmpeg','D3D12')] [string] $RecordingEncoder = 'Auto',
     [ValidateSet('Source','Same','4K','2160p','1440p','1080p','720p','540p')] [string] $OutputMode = 'Source',
     [ValidateSet('UltraFast','Fast','Medium','Heavy','Maximum')] [string] $PerformanceProfile = 'Medium',
     [ValidateSet('Auto','Standard','HighVram')] [string] $HardwareProfile = 'Auto',
@@ -1273,7 +1274,15 @@ try {
             }
         }
     }
-    elseif ($DirectEncode) { $HostArgs += @('--encode-mp4',$VideoOnly) }
+    elseif ($DirectEncode) {
+        $HostArgs += @('--encode-mp4',$VideoOnly)
+        # GPU-resident NV12 -> NVENC: only the compressed stream crosses to
+        # FFmpeg for MP4 muxing. A recording with a live preview keeps the
+        # established CPU preview/readback path. Realtime never encodes.
+        if (-not $LivePreview -and $RecordingEncoder -ne 'Ffmpeg') {
+            $HostArgs += if ($RecordingEncoder -eq 'D3D12') { '--nvenc-d3d12' } else { '--nvenc-d3d12-auto' }
+        }
+    }
     else { $HostArgs += @('--encode-chunks-dir',$HostEncodedChunkDirectory) }
     if (-not $IsPreviewOnly -and -not $DirectEncode) {
         # A new writer thread per frame costs 10-50 ms on Windows, while the
@@ -2095,6 +2104,9 @@ try {
         recording = -not $IsPreviewOnly
         codec = if ($IsPreviewOnly) { $null } else { $Codec }
         quality = if ($IsPreviewOnly) { $null } else { $Quality }
+        recording_encoder_requested = if ($IsPreviewOnly) { $null } else { $RecordingEncoder }
+        recording_encoder_active = if ($IsPreviewOnly) { $null } elseif ($HostText -match 'DLSS5_NVENC_TIMING d3d12=1') { 'D3D12NVENC' } else { 'FFmpegNVENC' }
+        recording_encoder_fallback = $HostText -match 'D3D12 NVENC unavailable; using FFmpeg NVENC'
         performance_profile = $PerformanceProfile
         hardware_profile = $ResolvedHardwareProfile
         realtime_render_preset = if($IsPreviewOnly){$ResolvedRealtimeRenderPreset}else{$null}
@@ -2284,3 +2296,8 @@ try {
         Remove-Item -LiteralPath $ResolvedOnlineSource.HeadersPath -Force
     }
 }
+
+# A successful display-only run need not invoke FFmpeg after setup probes.
+# Do not leak an old native probe/cleanup exit code to the player or callers.
+# Failures rethrow above and never reach this success exit.
+exit 0

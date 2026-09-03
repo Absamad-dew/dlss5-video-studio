@@ -14,6 +14,7 @@ Relevant upstream projects:
 - Depth Anything 3: https://github.com/ByteDance-Seed/Depth-Anything-3
 - Torchvision RAFT: https://github.com/pytorch/vision
 - FFmpeg: https://github.com/FFmpeg/FFmpeg
+- NVIDIA NVENC API header (MIT): https://github.com/FFmpeg/nv-codec-headers/tree/n13.0.19.0 — downloaded by `scripts/Install-NvCodecHeaders.ps1` with SHA-256 verification; its original license notice is retained in the header. No NVIDIA encoder DLL is bundled by this installer; the host loads the installed driver from System32.
 - yt-dlp: https://github.com/yt-dlp/yt-dlp
 
 ## Core model pack

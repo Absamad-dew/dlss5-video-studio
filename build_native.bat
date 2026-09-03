@@ -3,6 +3,11 @@ setlocal
 set "SRC=%~dp0native"
 set "SDK=%~dp0third_party\nvidia_ngx_sdk"
 set "SL=%~dp0third_party\streamline-sdk-v2.12.0"
+set "NVCODEC=%~dp0third_party\nvcodec\include"
+if not exist "%NVCODEC%\ffnvcodec\nvEncodeAPI.h" (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Install-NvCodecHeaders.ps1"
+  if errorlevel 1 exit /b 1
+)
 if not defined DLSS5_BUILD_OUT set "DLSS5_BUILD_OUT=%~dp0dist\engine"
 set "OUT=%DLSS5_BUILD_OUT%"
 
@@ -21,7 +26,7 @@ call "%VCVARS%" >nul
 if errorlevel 1 exit /b 1
 
 pushd "%SRC%"
-cl /nologo /std:c++20 /utf-8 /O2 /openmp /EHsc /W3 /MD /I"%SDK%\include" /I"%SL%\include" dlss5_video_host.cpp ^
+cl /nologo /std:c++20 /utf-8 /O2 /openmp /EHsc /W3 /MD /I"%SDK%\include" /I"%SL%\include" /I"%NVCODEC%" dlss5_video_host.cpp ^
   /Fe:"%OUT%\dlss5-video-host.exe" ^
   /link "%SDK%\lib\Windows_x86_64\x64\nvsdk_ngx_d.lib" ^
   "%SL%\lib\x64\sl.interposer.lib" ^
