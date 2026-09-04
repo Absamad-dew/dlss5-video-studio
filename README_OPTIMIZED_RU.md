@@ -1,4 +1,9 @@
-# DLSS5 Video Studio 22 · GPU-direct NVENC / Realtime / VR
+# DLSS5 Video Studio 22.1 · IW3 / Realtime / Recording / VR
+
+Новая отдельная вкладка **IW3 / VR**: оригинальный iw3 (RowFlow, MLBW, Video Inpaint),
+его собственные настройки глубины и стерео. DLSS5 включается дополнительно;
+настройки самого DLSS5 также доступны в прежнем VR-режиме без «Эксперта».
+Установка компонентов: `INSTALL_IW3.cmd`. Подробности: `IW3_VR_V22_1_RU.md`.
 
 Исправление 22.0.1: восстановлены веса и потоковый модуль Video Depth Anything
 Small, отсутствие которых блокировало Medium/Maximum. Установка отдельно:

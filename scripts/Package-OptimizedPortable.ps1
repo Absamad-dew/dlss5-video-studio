@@ -176,6 +176,34 @@ Copy-Item -LiteralPath (Join-Path $Build 'python\m2svid_worker.py') -Destination
 Copy-Item -LiteralPath (Join-Path $Build 'python\moebius_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\temporal_atlas_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\install_depth_models.py') -Destination (Join-Path $Target 'tools') -Force
+New-Item -ItemType Directory -Force -Path (Join-Path $Target 'tools/iw3')|Out-Null
+foreach($Name in @('iw3_worker.py','install_iw3.py','iw3-lock.json')){
+    Copy-Item -LiteralPath (Join-Path $Build "python/$Name") -Destination (Join-Path $Target "tools/iw3/$Name") -Force
+}
+foreach($Name in @('iw3-ui.ps1','process-iw3.ps1','iw3-settings.json')){
+    Copy-Item -LiteralPath (Join-Path $Build "app/$Name") -Destination (Join-Path $Target "app/$Name") -Force
+}
+Copy-Item -LiteralPath (Join-Path $Build 'scripts/Install-Iw3.ps1') -Destination (Join-Path $Target 'scripts') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_IW3.cmd') -Destination $Target -Force
+if($MainModelSource){
+    foreach($Relative in @('third_party/nunif','models/iw3','licenses/iw3')){
+        if($Relative-eq'models/iw3'){
+            $Source=Join-Path $MainModelSource $Relative
+            if(Test-Path -LiteralPath $Source){
+                $Destination=Join-Path $Target $Relative
+                New-Item -ItemType Directory -Force -Path $Destination|Out-Null
+                Get-ChildItem -LiteralPath $Source | Where-Object {$_.Name-ne'scene_cache'} | Copy-Item -Destination $Destination -Recurse -Force
+            }
+            continue
+        }
+        $Source=Join-Path $MainModelSource $Relative
+        if(Test-Path -LiteralPath $Source -PathType Container){
+            $Destination=Join-Path $Target $Relative
+            New-Item -ItemType Directory -Force -Path $Destination|Out-Null
+            Copy-Item -Path (Join-Path $Source '*') -Destination $Destination -Recurse -Force
+        }
+    }
+}
 Copy-Item -LiteralPath (Join-Path $Build 'scripts\Install-DepthModels.ps1') -Destination (Join-Path $Target 'scripts') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_VR_MODELS.cmd') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'scripts\Install-VRGenerativeModels.ps1') -Destination (Join-Path $Target 'scripts') -Force
@@ -192,6 +220,7 @@ Copy-Item -LiteralPath (Join-Path $Build 'dist\DLSS5 Video Studio.exe') -Destina
 Copy-Item -LiteralPath (Join-Path $Build 'README_OPTIMIZED_RU.md') -Destination (Join-Path $Target 'README_RU.md') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'OPTIMIZATION_V22_RU.md'),(Join-Path $Build 'THIRD_PARTY_NOTICES.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'REALTIME_DEPTH_FIX_V22_0_1_RU.md') -Destination $Target -Force
+Copy-Item -LiteralPath (Join-Path $Build 'IW3_VR_V22_1_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'VR_RESEARCH_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'VERSION_OPTIMIZED.txt') -Destination (Join-Path $Target 'VERSION.txt') -Force
 

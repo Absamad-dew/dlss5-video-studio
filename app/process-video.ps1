@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory)] [string] $InputVideo,
     [string] $OutputVideo,
+    [string] $ParentWorkDirectory,
     [Parameter(Mandatory)] [string] $ConfigPath,
     [ValidateSet('H264','H265')] [string] $Codec = 'H265',
     [ValidateRange(0,51)] [int] $Quality = 18,
@@ -895,7 +896,12 @@ if ($UseExternalUpscaler) {
 # may contain any Unicode characters because FFmpeg/PowerShell handle them.
 $RunId = 'job-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '-' + ([Guid]::NewGuid().ToString('N').Substring(0,8))
 $FastDrive = [IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -eq [IO.DriveType]::Fixed } | Sort-Object AvailableFreeSpace -Descending | Select-Object -First 1
-$WorkBase = if ($IsPreviewOnly) {
+$WorkBase = if ($ParentWorkDirectory) {
+    # An owning workflow (iw3) keeps child scratch inside its cancellable job.
+    $ParentWork = Get-Item -LiteralPath $ParentWorkDirectory -ErrorAction Stop
+    if(-not $ParentWork.PSIsContainer -or $ParentWork.Name -notlike 'job-iw3-*' -or $ParentWork.Parent.Name -ne 'temp' -or $ParentWork.Parent.Parent.Name -ne 'DLSS5VideoStudio' -or $ParentWork.FullName -match '[^\x00-\x7F]') { throw 'Invalid iw3 parent work directory.' }
+    Join-Path $ParentWork.FullName 'DLSS5VideoStudio\temp'
+} elseif ($IsPreviewOnly) {
     # Realtime is latency-sensitive and constantly writes/reads motion+depth
     # chunks.  The old "most free space" rule often selected a large archive
     # disk; use the local system SSD instead so other disk jobs cannot stall

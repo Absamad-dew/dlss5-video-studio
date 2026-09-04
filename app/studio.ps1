@@ -1,4 +1,5 @@
-﻿Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Xaml
+﻿param([switch]$ValidateUi)
+Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Xaml
 Add-Type -AssemblyName System.Windows.Forms
 
 $ErrorActionPreference = 'Stop'
@@ -7,6 +8,7 @@ $Root = [IO.Path]::GetFullPath((Join-Path $ScriptDirectory '..'))
 Import-Module (Join-Path $ScriptDirectory 'depth-models.psm1') -Force
 $Runner = Join-Path $ScriptDirectory 'process-video.ps1'
 $RealtimeRunner = Join-Path $ScriptDirectory 'realtime-player.ps1'
+$Iw3Runner = Join-Path $ScriptDirectory 'process-iw3.ps1'
 $Ffprobe = Join-Path $Root 'tools\ffprobe.exe'
 $PresetStore = Join-Path $Root 'settings\presets.json'
 $DLoRALCheckpoint = Join-Path $Root 'models\upscalers\dloral\model.pkl'
@@ -27,7 +29,7 @@ $Invariant = [Globalization.CultureInfo]::InvariantCulture
 $Xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DLSS5 Video Studio 22.0.1 · GPU-direct NVENC" Width="1500" Height="960"
+        Title="DLSS5 Video Studio 22.1 · iw3 VR" Width="1500" Height="960"
         MinWidth="1120" MinHeight="720" WindowStartupLocation="CenterScreen"
         Background="#090D14" Foreground="#DCE7F5" FontFamily="Segoe UI">
   <Window.Resources>
@@ -93,6 +95,7 @@ $Xaml = @'
             <TabItem Header="▶  REALTIME" Tag="Realtime"><Border Background="#0D1822" Padding="14"><StackPanel><TextBlock Text="Живой GPU-вывод" FontSize="18" FontWeight="SemiBold" Foreground="#61D9FF"/><TextBlock Text="Буфер, перемотка, полноэкранный плеер, DLSS-G и отдельные настройки задержки." Foreground="#93A8C2" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
             <TabItem Header="●  ЗАПИСЬ" Tag="Recording"><Border Background="#14170F" Padding="14"><StackPanel><TextBlock Text="Файл H.264 / H.265" FontSize="18" FontWeight="SemiBold" Foreground="#B7E36E"/><TextBlock Text="Локальное видео или ссылка; детальные motion/depth-параметры и автоматическое имя результата." Foreground="#A8B696" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
             <TabItem Header="◉  VR / 3D" Tag="VR"><Border Background="#151224" Padding="14"><StackPanel><TextBlock Text="Отдельный VR-конвейер" FontSize="18" FontWeight="SemiBold" Foreground="#B59CFF"/><TextBlock Text="SBS/Over-Under, GAPW-геометрия, Temporal Atlas из соседних кадров, локальная AI-дорисовка и DLSS5." Foreground="#AEA3CE" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
+            <TabItem Header="◈  IW3 / VR" Tag="IW3"><Border Background="#102322" Padding="14"><StackPanel><TextBlock Text="Оригинальный движок iw3" FontSize="18" FontWeight="SemiBold" Foreground="#75DFC3"/><TextBlock Text="RowFlow / MLBW, оригинальная глубина и Video Inpaint. Наши дополнения — только по выбору." Foreground="#A7CDC2" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
           </TabControl>
 
           <GroupBox x:Name="QuickGroup" Header="БЫСТРЫЙ ЗАПУСК">
@@ -503,14 +506,21 @@ function Get-WorkspaceMode {
 function Update-ExpertUi {
     $Expert=[bool]$ExpertCheck.IsChecked
     foreach($Panel in @($StageGroup,$UpscalerGroup,$NeuralGroup,$AdvancedParams)){$Panel.Visibility=if($Expert){'Visible'}else{'Collapsed'}}
+    $Workspace=Get-WorkspaceMode
+    if($Workspace -in @('VR','IW3')){$NeuralGroup.Visibility='Visible';$AdvancedParams.Visibility='Visible'}
+    $NeuralGroup.IsEnabled=$true
+    $NeuralGroup.Header=if($Workspace-eq'VR'){'DLSS 5 В VR · ИНТЕНСИВНОСТЬ, ОКРУЖЕНИЕ, ПЕРСОНАЖИ'}else{'ПРЕСЕТ И НЕЙРОННЫЙ РЕНДЕРИНГ'}
+    if($Workspace-eq'IW3'){$StageGroup.Visibility='Collapsed';$UpscalerGroup.Visibility='Collapsed';Update-Iw3Ui}
 }
 function Update-WorkspaceUi {
     $Workspace=Get-WorkspaceMode
     $Realtime=$Workspace-eq'Realtime'
     $Vr=$Workspace-eq'VR'
+    $Iw3=$Workspace-eq'IW3'
     $RealtimePanel.Visibility=if($Realtime){'Visible'}else{'Collapsed'}
-    $RecordingPanel.Visibility=if($Realtime){'Collapsed'}else{'Visible'}
+    $RecordingPanel.Visibility=if($Realtime -or $Iw3){'Collapsed'}else{'Visible'}
     $VrGroup.Visibility=if($Vr){'Visible'}else{'Collapsed'}
+    if($Iw3Group){$Iw3Group.Visibility=if($Iw3){'Visible'}else{'Collapsed'}}
     $QuickGroup.Visibility=if($Realtime){'Visible'}else{'Collapsed'}
     $RecordingPathPanel.Visibility=if($Realtime){'Collapsed'}else{'Visible'}
     if($Realtime){
@@ -521,7 +531,7 @@ function Update-WorkspaceUi {
         if(-not $Vr){Select-StringTag $VrModeCombo 'Off'}
     }
     Update-ExpertUi;Update-ProfileUi;Update-VrUi;Update-Estimate
-    $RuntimeStatus.Text=if($Realtime){'● REALTIME · GPU-direct'}elseif($Vr){'● VR / 3D · запись'}else{'● ЗАПИСЬ · H.264 / H.265'}
+    $RuntimeStatus.Text=if($Realtime){'● REALTIME · GPU-direct'}elseif($Vr){'● VR / 3D · запись'}elseif($Iw3){'● IW3 · оригинальный стереоконвейер'}else{'● ЗАПИСЬ · H.264 / H.265'}
 }
 function Apply-QuickScenario {
     $Scenario=Combo-Tag $QuickScenarioCombo
@@ -788,6 +798,7 @@ function Update-VrUi {
     Update-Estimate
 }
 function Update-Estimate {
+    if((Get-WorkspaceMode)-eq'IW3'){$ExpectedTimeText.Text='IW3: время уточняется по фактической скорости после загрузки модели.';return}
     if (-not $script:SourceInfo -or -not $ModeCombo.SelectedItem -or -not $UpscalerCombo.SelectedItem) { return }
     $Geometry=Get-EstimatedGeometry; if(-not $Geometry){return}
     $Fps=[double]$script:SourceInfo.fps; if($Fps -le 0){$Fps=30}
@@ -896,6 +907,10 @@ function Get-AutomaticOutputPath {
     $Order = Get-PipelineOrder
     $PipelineTag = if ($Order -eq 'DLSSOnly') { 'DLSS5' } elseif ($Order -eq 'DLSSThenVSR') { 'DLSS5_' + $UpscalerTag } else { $UpscalerTag + '_DLSS5' }
     $VrTag = switch (Combo-Tag $VrModeCombo) { 'DepthSBS' { '_3D-VR' } 'CinemaSBS' { '_VR-SBS' } 'Equirect360' { '_VR360' } default { '' } }
+    if((Get-WorkspaceMode)-eq'IW3'){
+        $PipelineTag='iw3_'+(Combo-Tag $Iw3Controls['method'])
+        $VrTag=switch(Combo-Tag $Iw3Controls['layout']){'FullSBS'{'_LRF_Full_SBS'}'HalfSBS'{'_LR'}'FullOU'{'_TBF_fulltb'}default{'_TB'}}
+    }
     $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
     $Candidate = Join-Path $Directory ("{0}_{1}{2}_{3}_{4}_{5}_{6}.mp4" -f $Base,$PipelineTag,$VrTag,$Mode,$Profile,$CodecTag,$Stamp)
     if (Test-Path -LiteralPath $Candidate) {
@@ -942,7 +957,8 @@ function Update-ProfileUi {
     $BrowseOutput.IsEnabled = -not $Realtime
     $CodecCombo.IsEnabled = -not $Realtime
     $QualitySlider.IsEnabled = -not $Realtime
-    $ComparisonCheck.IsEnabled = -not $Realtime
+    $ComparisonCheck.IsEnabled = (-not $Realtime) -and (Get-WorkspaceMode)-ne'IW3'
+    $PerformanceCombo.IsEnabled = (Get-WorkspaceMode)-ne'IW3' -or (Combo-Tag $Iw3Controls['dlss_mode'])-ne'Off'
     $KeepTempCheck.IsEnabled = -not $Realtime
     $VrModeCombo.IsEnabled = -not $Realtime
     $RealtimePanel.IsEnabled = $Realtime
@@ -1214,6 +1230,7 @@ function Finalize-Run {
         $ShownFps = if ($script:Result.recording) { [double]$script:Result.end_to_end_fps } else { [double]$script:Result.display_fps }
         $VsrFps = [double]$script:Result.upscaler_fps
         $SpeedText.Text = if ($VsrFps -gt 0) { ('{0:0.00} FPS · VSR {1:0.00} · DLSS {2:0.00}' -f $ShownFps,$VsrFps,[double]$script:Result.dlss5_fps) } else { ('{0:0.00} FPS · DLSS {1:0.00}' -f $ShownFps,[double]$script:Result.dlss5_fps) }
+        if($script:Result.iw3_commit){$SpeedText.Text=('{0:0.00} FPS всего · iw3 {1:0.00}' -f $ShownFps,[double]$script:Result.iw3_fps)}
         $Progress.Value = 100
         $EtaText.Text = 'Осталось: 00:00'
         if ($script:Result.recording) {
@@ -1255,6 +1272,11 @@ $Timer = New-Object Windows.Threading.DispatcherTimer
 $Timer.Interval = [TimeSpan]::FromMilliseconds(100)
 $Timer.Add_Tick({
     try {
+        if($script:Iw3InstallProcess -and $script:Iw3InstallProcess.HasExited){
+            $InstallCode=$script:Iw3InstallProcess.ExitCode
+            $script:Iw3InstallProcess.Dispose();$script:Iw3InstallProcess=$null
+            Add-Log ("Установка iw3 завершена: код $InstallCode. Журнал: temp/iw3-install.log")
+        }
         if ($script:Process -and $script:RunStartedAt) {
             $ElapsedText.Text = 'Прошло: ' + (Format-Time (((Get-Date)-$script:RunStartedAt).TotalSeconds))
             if ($null -ne $script:LastEtaSeconds -and $script:LastProgressAt) {
@@ -1409,16 +1431,17 @@ $RunButton.Add_Click({
     $Config = $null
     try {
         if ($script:Process) { throw 'Обработка уже выполняется.' }
+        if($script:Iw3InstallProcess -and -not $script:Iw3InstallProcess.HasExited){throw 'Дождитесь завершения установки iw3. Журнал: temp/iw3-install.log'}
         $WorkspaceMode=Get-WorkspaceMode
         $Realtime = $WorkspaceMode -eq 'Realtime'
         $DepthStatus = Get-DepthModelStatus -Root $Root -Profile (Combo-Tag $DepthModelCombo)
-        if (-not $DepthStatus.Ready) {
+        if (-not $DepthStatus.Ready -and ($WorkspaceMode-ne'IW3' -or (Combo-Tag $Iw3Controls['dlss_mode'])-ne'Off')) {
             throw "Модель глубины $($DepthStatus.Profile) установлена не полностью. Запустите $($DepthStatus.Installer) в папке программы или выберите установленную модель. Не хватает: $($DepthStatus.Missing -join ', ')"
         }
         $IsOnlineSource = $InputBox.Text -match '^https?://'
         if ([string]::IsNullOrWhiteSpace($InputBox.Text)) { throw 'Выберите видеофайл или вставьте ссылку.' }
         if (-not $IsOnlineSource -and -not (Test-Path -LiteralPath $InputBox.Text -PathType Leaf)) { throw 'Выберите существующий входной видеофайл.' }
-        if ([string]$UpscalerCombo.SelectedItem.Tag -eq 'DLoRAL' -and -not (Test-Path -LiteralPath $DLoRALCheckpoint -PathType Leaf)) {
+        if ($WorkspaceMode-ne'IW3' -and [string]$UpscalerCombo.SelectedItem.Tag -eq 'DLoRAL' -and -not (Test-Path -LiteralPath $DLoRALCheckpoint -PathType Leaf)) {
             throw 'DLoRAL checkpoint ещё не скачан: Google Drive превысил квоту. Запустите INSTALL_MODELS.cmd позже; NanoVSR, AnimeSR v2 и FlashVSR уже готовы.'
         }
         if($WorkspaceMode-eq'VR' -and (Combo-Tag $VRGenerativeBackendCombo)-ne'Off' -and -not (Test-VrGenerativeBackendInstalled (Combo-Tag $VRGenerativeBackendCombo))){
@@ -1493,6 +1516,19 @@ $RunButton.Add_Click({
             if ($RealtimeFullscreenCheck.IsChecked) { $Args += '-Fullscreen' }
             if ($RealtimeAudioCheck.IsChecked) { $Args += '-EnableAudio' }
             if ($RealtimeFillPauseCheck.IsChecked) { $Args += '-FillBufferOnPause' }
+        } elseif ($WorkspaceMode-eq'IW3') {
+            Save-Iw3Settings
+            $Iw3JobSettings=[IO.Path]::ChangeExtension($Output,'.iw3.json')
+            [IO.File]::WriteAllText($Iw3JobSettings,((Get-Iw3Settings)|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+            $Args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$Iw3Runner+'"'),
+                '-InputVideo',('"'+$InputBox.Text+'"'),'-OutputVideo',('"'+$Output+'"'),
+                '-SettingsPath',('"'+$Iw3JobSettings+'"'),'-ConfigPath',('"'+$Config+'"'),
+                '-Codec',(Combo-Tag $CodecCombo),'-Quality',[int]$QualitySlider.Value,
+                '-OutputMode',(Combo-Tag $ModeCombo),'-PerformanceProfile',(Combo-Tag $PerformanceCombo),
+                '-DepthModelProfile',(Combo-Tag $DepthModelCombo),
+                '-StartSeconds',([string]::Format($Invariant,'{0:0.######}',$Start)),'-FrameCount',$Frames,
+                '-NetworkMaxHeight',[int](Combo-Tag $SourceNetworkHeightCombo),'-NetworkCookiesBrowser',(Combo-Tag $SourceCookiesCombo))
+            if($KeepTempCheck.IsChecked){$Args+='-KeepTemporaryFiles'}
         } else {
             $Args = @(
                 '-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$Runner+'"'),
@@ -1600,6 +1636,8 @@ $RunButton.Add_Click({
         $Progress.IsIndeterminate = $true
         $ProgressHint.Text = if ($Realtime) {
             'Прямой вывод GPU без NVENC и создания файла.'
+        } elseif ($WorkspaceMode-eq'IW3') {
+            'Оригинальный iw3. При первом выборе глубины возможна загрузка весов; затем анализ сцен и стереоконвертация.'
         } elseif ((Combo-Tag $UpscalerCombo) -eq 'None') {
             'Быстрый DLSS-only: NGX прогревается параллельно с первым motion/depth-пакетом; внешний x4-апскейл отключён.'
         } else {
@@ -1641,6 +1679,7 @@ $Preview.Add_MediaEnded({$Preview.Position=[TimeSpan]::Zero;$Preview.Play()})
 $Window.Add_PreviewKeyDown({param($S,$E);if($E.Key -eq [Windows.Input.Key]::Escape -and $script:Process -and -not $script:Process.HasExited){Stop-ActiveRun;$E.Handled=$true}})
 $Window.Add_Closing({param($S,$E);if($script:Process-and-not$script:Process.HasExited){$A=[Windows.MessageBox]::Show('Обработка выполняется. Остановить её и закрыть окно?','DLSS5 Video Studio','YesNo','Warning');if($A-ne'Yes'){$E.Cancel=$true;return};Stop-ActiveRun}})
 
+. (Join-Path $ScriptDirectory 'iw3-ui.ps1')
 $WorkspaceTabs.SelectedIndex=0
 $ModeCombo.SelectedIndex=2
 $CodecCombo.SelectedIndex=0
@@ -1700,4 +1739,5 @@ Update-WorkspaceUi
 Update-VrUi
 Update-ExpertUi
 Refresh-StageList
+if($ValidateUi){$Timer.Stop();Write-Output 'STUDIO_UI_VALIDATED';return}
 $Window.ShowDialog() | Out-Null

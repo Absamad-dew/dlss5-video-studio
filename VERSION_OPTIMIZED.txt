@@ -1,2 +1,2 @@
-22.0.1-depth-realtime-fix
-Restore Video Depth Small weights and streaming code; preflight selected depth before network/audio; repair single-model installer arguments; shut down Streamline before releasing frame-generation resources.
+22.1.0-iw3-vr
+Separate pinned original iw3 pipeline with RowFlow/MLBW/Video Inpaint; optional DLSS5; always-accessible VR neural rendering controls; exact-frame audio mux and safe output publication.

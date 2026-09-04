@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path -LiteralPath $PortableRoot).Path
 $manifestPath = Join-Path $root 'MANIFEST.json'
-$mutableDirectories = @('.corebroker', 'output', 'qa-output', 'settings', 'temp')
+$mutableDirectories = @('.corebroker', 'output', 'qa-output', 'settings', 'temp', 'models/iw3/scene_cache')
 $runtimeFiles = @(
     'engine/ReShade.ini',
     'engine/ReShade.log',

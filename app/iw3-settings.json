@@ -1,0 +1,514 @@
+{
+  "schema": 1,
+  "fields": [
+    {
+      "key": "method",
+      "label": "Метод iw3",
+      "type": "choice",
+      "default": "row_flow_v3",
+      "options": [
+        {
+          "value": "row_flow_v3",
+          "label": "RowFlow V3 · основной"
+        },
+        {
+          "value": "mlbw_l2",
+          "label": "MLBW L2 · 2 слоя"
+        },
+        {
+          "value": "mlbw_l4",
+          "label": "MLBW L4 · 4 слоя"
+        },
+        {
+          "value": "mlbw_l2s",
+          "label": "MLBW L2 Small"
+        },
+        {
+          "value": "mlbw_l4s",
+          "label": "MLBW L4 Small"
+        },
+        {
+          "value": "mlbw_l2_inpaint",
+          "label": "MLBW L2 + Video Inpaint"
+        },
+        {
+          "value": "forward_fill",
+          "label": "Forward Fill · без нейросети варпа"
+        },
+        {
+          "value": "forward_inpaint",
+          "label": "Forward + Video Inpaint"
+        },
+        {
+          "value": "row_flow_v3_sym",
+          "label": "RowFlow V3 Sym · эксперимент"
+        }
+      ],
+      "help": "Оригинальные веса и алгоритмы iw3. Inpaint использует 12-кадровую видеомодель. Sym быстрее, но может давать другие артефакты.",
+      "group": "Стерео"
+    },
+    {
+      "key": "depth_model",
+      "label": "Модель глубины iw3",
+      "type": "choice",
+      "default": "Any_V2_S",
+      "options": [
+        {
+          "value": "Any_V2_S",
+          "label": "Depth Anything V2 Small · быстрый"
+        },
+        {
+          "value": "VDA_S",
+          "label": "Video Depth Anything Small · стабильное видео"
+        },
+        {
+          "value": "Any_V2_B",
+          "label": "DA V2 Base · веса вручную, ~390 МБ"
+        },
+        {
+          "value": "Any_V2_L",
+          "label": "DA V2 Large · веса вручную, ~1.3 ГБ"
+        },
+        {
+          "value": "Any_V3_Mono",
+          "label": "DA3 Mono · отдельная модель ~1.3 ГБ"
+        },
+        {
+          "value": "Any_S",
+          "label": "Depth Anything V1 Small"
+        },
+        {
+          "value": "Distill_Any_S",
+          "label": "Distill Any Depth Small"
+        },
+        {
+          "value": "ZoeD_Any_N",
+          "label": "ZoeDepth / Any NYU · исходный CLI default"
+        }
+      ],
+      "help": "Собственный depth-конвейер iw3. Small/VDA/DA3 Mono загружаются при первом запуске. Для DA V2 Base/Large оригинальный iw3 требует вручную положить depth_anything_v2_vitb.pth / depth_anything_v2_vitl.pth в models/iw3/pretrained_models/hub/checkpoints (CC-BY-NC-4.0).",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "divergence",
+      "label": "3D Strength / Divergence",
+      "type": "number",
+      "default": 2,
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "help": "0 — плоско; 2 — разумная отправная точка. Большие значения сильнее раскрывают фон и увеличивают артефакты. Для RowFlow/Inpaint обученный диапазон до 5, MLBW до 10.",
+      "group": "Стерео"
+    },
+    {
+      "key": "convergence",
+      "label": "Convergence / плоскость экрана",
+      "type": "number",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "help": "Глубина, на которой левое и правое изображения совпадают. В режиме SOD — желаемое положение найденного объекта.",
+      "group": "Стерео"
+    },
+    {
+      "key": "convergence_mode",
+      "label": "Режим convergence",
+      "type": "choice",
+      "default": "constant",
+      "options": [
+        {
+          "value": "constant",
+          "label": "Constant · вручную"
+        },
+        {
+          "value": "sod_v1",
+          "label": "SOD V1 · по главному объекту"
+        }
+      ],
+      "help": "Оригинальный автоматический convergence iw3. SOD требует небольшой дополнительной модели.",
+      "group": "Стерео"
+    },
+    {
+      "key": "synthetic_view",
+      "label": "Какие ракурсы создавать",
+      "type": "choice",
+      "default": "both",
+      "options": [
+        {
+          "value": "both",
+          "label": "Оба глаза · симметричное распределение"
+        },
+        {
+          "value": "right",
+          "label": "Только правый · левый оригинал"
+        },
+        {
+          "value": "left",
+          "label": "Только левый · правый оригинал"
+        }
+      ],
+      "help": "При одном синтетическом глазе его смещение удваивается. Это увеличивает сложность заполнения.",
+      "group": "Стерео"
+    },
+    {
+      "key": "layout",
+      "label": "Стереоформат",
+      "type": "choice",
+      "default": "FullSBS",
+      "options": [
+        {
+          "value": "FullSBS",
+          "label": "Full SBS · полное разрешение каждого глаза"
+        },
+        {
+          "value": "HalfSBS",
+          "label": "Half SBS · половина ширины глаза"
+        },
+        {
+          "value": "FullOU",
+          "label": "Full Over-Under"
+        },
+        {
+          "value": "HalfOU",
+          "label": "Half Over-Under"
+        }
+      ],
+      "help": "Из 3840×2160 Full SBS получится 7680×2160. Half SBS помещает оба глаза в 3840×2160; это снижает горизонтальную детализацию.",
+      "group": "Стерео"
+    },
+    {
+      "key": "foreground_scale",
+      "label": "Foreground Scale",
+      "type": "number",
+      "default": 0,
+      "min": -3,
+      "max": 3,
+      "step": 0.1,
+      "help": "Положительные значения усиливают передний план, отрицательные — фон. Для видео iw3 рекомендует 0.",
+      "group": "Стерео"
+    },
+    {
+      "key": "ipd_offset",
+      "label": "Your Own Size / IPD offset",
+      "type": "number",
+      "default": 0,
+      "min": -10,
+      "max": 10,
+      "step": 0.1,
+      "help": "Сдвиг изображений с добавлением полей. Влияет на воспринимаемый масштаб. Если это настраивается в VR-плеере, оставьте 0.",
+      "group": "Стерео"
+    },
+    {
+      "key": "preserve_screen_border",
+      "label": "Preserve Screen Border",
+      "type": "bool",
+      "default": false,
+      "help": "Снижает параллакс на боковых границах. Может уменьшить неприятные обрезания объектов.",
+      "group": "Стерео"
+    },
+    {
+      "key": "resolution",
+      "label": "Разрешение depth (0 = iw3 auto)",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "max": 1536,
+      "step": 14,
+      "help": "Короткая сторона входа depth-модели, не разрешение готового видео. 392/518 — быстрые варианты; 756 и выше дороже.",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "limit_resolution",
+      "label": "Не превышать разрешение исходника",
+      "type": "bool",
+      "default": true,
+      "help": "Ограничивает входное разрешение depth, если исходник меньше указанного.",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "edge_x",
+      "label": "Edge Fix X",
+      "type": "number",
+      "default": 2,
+      "min": 0,
+      "max": 12,
+      "step": 1,
+      "help": "Расширение ближних областей глубины по горизонтали. Может убрать ореолы, но чрезмерное значение растягивает контуры.",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "edge_y",
+      "label": "Edge Fix Y",
+      "type": "number",
+      "default": 1,
+      "min": 0,
+      "max": 12,
+      "step": 1,
+      "help": "Расширение по вертикали. Для нейрозаполнения также попробуйте Edge Fix 0/0.",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "depth_aa",
+      "label": "Depth Anti-aliasing",
+      "type": "bool",
+      "default": false,
+      "help": "Обученное сглаживание depth iw3. Поддерживается не всеми depth-моделями.",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "tta",
+      "label": "TTA / Flip Augmentation",
+      "type": "bool",
+      "default": false,
+      "help": "Дополнительное предсказание по зеркальному изображению. Медленнее; полезность зависит от модели.",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "ema_normalize",
+      "label": "Flicker Reduction / EMA",
+      "type": "bool",
+      "default": true,
+      "help": "Стабилизирует диапазон глубины между кадрами. Это не размытие RGB. Для видео ниже 15 FPS upstream отключает EMA.",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "ema_decay",
+      "label": "EMA Decay",
+      "type": "number",
+      "default": 0.75,
+      "min": 0,
+      "max": 0.99,
+      "step": 0.01,
+      "help": "Больше — медленнее меняется диапазон глубины; чрезмерное значение запаздывает на изменениях сцены.",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "ema_buffer",
+      "label": "Lookahead Buffer, кадров",
+      "type": "number",
+      "default": 30,
+      "min": 1,
+      "max": 150,
+      "step": 1,
+      "help": "Сколько кадров учитывает нормализация диапазона. Это буфер анализа, а не буфер воспроизведения.",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "scene_detect",
+      "label": "Scene Boundary Detection / TransNetV2",
+      "type": "bool",
+      "default": true,
+      "help": "Сброс временного состояния на склейках. Особенно важен для Video Depth Anything.",
+      "group": "Глубина и стабильность"
+    },
+    {
+      "key": "stereo_width",
+      "label": "Stereo Width (0 = depth native)",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "max": 3840,
+      "step": 128,
+      "help": "Разрешение расчёта сетки варпа отдельно от RGB. 0 сохраняет путь iw3 по умолчанию; увеличение может улучшить контуры, но замедлить.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "warp_steps",
+      "label": "Warp Steps (0 = iw3 auto)",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "max": 8,
+      "step": 1,
+      "help": "Только RowFlow: число последовательных деформаций. 0 использует оригинальную автонастройку iw3.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "mask_inner_dilation",
+      "label": "Mask Inner Dilation",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "max": 12,
+      "step": 1,
+      "help": "Только Inpaint. Захват части края объекта в маску: слишком большое значение повреждает силуэт.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "mask_outer_dilation",
+      "label": "Mask Outer Dilation",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "max": 32,
+      "step": 1,
+      "help": "Только Inpaint. Расширяет маску в сторону раскрытого фона.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "inpaint_max_width",
+      "label": "Inpaint Max Width (0 = без уменьшения)",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "max": 3840,
+      "step": 128,
+      "help": "В оригинальном iw3 этот лимит уменьшает RGB всего ракурса, а не только маску. Для нативной детализации 2–4K оставьте 0.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "batch_size",
+      "label": "Batch Size",
+      "type": "number",
+      "default": 2,
+      "min": 1,
+      "max": 16,
+      "step": 1,
+      "help": "Пакет depth-инференса. Больше может ускорить обработку, но увеличивает VRAM. Видео-Inpaint имеет собственное окно 12 кадров.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "max_workers",
+      "label": "Max Workers",
+      "type": "choice",
+      "default": "0",
+      "options": [
+        {
+          "value": "0",
+          "label": "0"
+        },
+        {
+          "value": "1",
+          "label": "1"
+        },
+        {
+          "value": "2",
+          "label": "2"
+        },
+        {
+          "value": "3",
+          "label": "3"
+        },
+        {
+          "value": "4",
+          "label": "4"
+        },
+        {
+          "value": "8",
+          "label": "8"
+        },
+        {
+          "value": "16",
+          "label": "16"
+        }
+      ],
+      "help": "0 — без дополнительного пула потоков inference (исходный default iw3). Больше потоков не всегда быстрее и требует больше памяти; последовательные модели могут игнорировать это значение.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "low_vram",
+      "label": "Low VRAM",
+      "type": "bool",
+      "default": false,
+      "help": "Оригинальный режим экономии памяти iw3 без замены модели. Может снизить скорость.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "disable_amp",
+      "label": "FP32 вместо AMP",
+      "type": "bool",
+      "default": false,
+      "help": "По умолчанию используется AMP. FP32 заметно тяжелее и нужен главным образом для диагностики.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "max_fps",
+      "label": "Ограничение исходного FPS",
+      "type": "choice",
+      "default": "0",
+      "options": [
+        {
+          "value": "0",
+          "label": "Сохранить FPS источника"
+        },
+        {
+          "value": "30",
+          "label": "Не более 30 FPS · как default CLI iw3"
+        },
+        {
+          "value": "60",
+          "label": "Не более 60 FPS"
+        },
+        {
+          "value": "120",
+          "label": "Не более 120 FPS"
+        }
+      ],
+      "help": "Это ограничение обрабатываемых кадров, не генерация новых.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "pix_fmt",
+      "label": "Глубина цвета",
+      "type": "choice",
+      "default": "yuv420p",
+      "options": [
+        {
+          "value": "yuv420p",
+          "label": "8-bit 4:2:0 · совместимость"
+        },
+        {
+          "value": "yuv420p10le",
+          "label": "10-bit 4:2:0 · HEVC"
+        }
+      ],
+      "help": "10-bit доступен с H.265. Не превращает 8-bit источник в настоящий HDR.",
+      "group": "Скорость и заполнение"
+    },
+    {
+      "key": "dlss_mode",
+      "label": "Дополнительно: DLSS 5",
+      "type": "choice",
+      "default": "Off",
+      "options": [
+        {
+          "value": "Off",
+          "label": "Выкл. · чистый iw3"
+        },
+        {
+          "value": "PreStereo",
+          "label": "DLSS 5 → iw3"
+        }
+      ],
+      "help": "Выключен по умолчанию. При включении сначала обрабатывается исходный ракурс нашим DLSS5-конвейером, затем оригинальным iw3. Настройки DLSS 5 — в блоке ниже.",
+      "group": "Наши дополнения"
+    },
+    {
+      "key": "target_fps",
+      "label": "Дополнительно: плавность",
+      "type": "choice",
+      "default": "0",
+      "options": [
+        {
+          "value": "0",
+          "label": "Без интерполяции · чистый iw3"
+        },
+        {
+          "value": "72",
+          "label": "72 FPS"
+        },
+        {
+          "value": "90",
+          "label": "90 FPS"
+        },
+        {
+          "value": "120",
+          "label": "120 FPS"
+        }
+      ],
+      "help": "Не NVIDIA MFG: наша запись использует motion-compensated интерполяцию после стереосинтеза. Дорого на 4K, возможны артефакты движения.",
+      "group": "Наши дополнения"
+    }
+  ]
+}

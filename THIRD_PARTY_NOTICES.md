@@ -52,6 +52,18 @@ Optional generative VR inference uses the official Google Research M2SVid source
 - License: Apache License 2.0
 - Local license after installation: `licenses/vr/M2SVid-Apache-2.0.txt`
 
+# iw3 / nunif
+
+The separate IW3 workspace uses unmodified nagadomi/nunif source pinned to commit
+`d23721f1b5f0a4c92c3ee1be013180bf298730c5`, MIT-licensed:
+https://github.com/nagadomi/nunif/tree/d23721f1b5f0a4c92c3ee1be013180bf298730c5/iw3 .
+The installer verifies the source archive and original stereo/inpaint checkpoints
+with SHA-256. The portable copy retains `third_party/nunif/LICENSE` and
+`licenses/iw3/nunif-MIT.txt`. Optional depth models have their own upstream terms;
+some larger models prohibit commercial use. This is not a blanket model license.
+PyAV 15.0.0 (BSD-3-Clause, linked FFmpeg has additional terms) and diskcache 5.6.3
+(Apache-2.0) are installed in an isolated directory with their package metadata.
+
 # OpenCLIP
 
 M2SVid conditioning uses the LAION OpenCLIP ViT-H-14 checkpoint through OpenCLIP.

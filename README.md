@@ -1,4 +1,10 @@
-# DLSS5 Video Studio 22
+# DLSS5 Video Studio 22.1
+
+22.1 adds a separate **IW3 / VR** workspace using the unmodified, pinned upstream
+iw3 engine: RowFlow/MLBW, original depth processing and 12-frame Video Inpaint.
+Studio DLSS5 and optical interpolation are opt-in, disabled in reference mode.
+The existing VR tab now exposes the actual DLSS5 controls without Expert mode.
+Run `INSTALL_IW3.cmd`; see [settings, architecture and limitations](IW3_VR_V22_1_RU.md).
 
 Windows video player/processor that reconstructs motion and depth from ordinary video, evaluates NVIDIA NGX through a D3D12 host, and can present the result with official NVIDIA DLSS Frame Generation through Streamline + Reflex.
 

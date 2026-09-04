@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "upstream": {
+    "repository": "nagadomi/nunif",
+    "commit": "d23721f1b5f0a4c92c3ee1be013180bf298730c5",
+    "url": "https://codeload.github.com/nagadomi/nunif/zip/d23721f1b5f0a4c92c3ee1be013180bf298730c5",
+    "sha256": "9638fb5604fcdc34af8db139e82c3c5004a077ce8befb84c3d18b738232ecada"
+  },
+  "assets": [
+    {
+      "name": "iw3_depth_aa_20250530.pth",
+      "bytes": 297693,
+      "sha256": "5a36c8ebfdde78b60784535b9cd77016cd617faab42228dfa9ae17b657ab9c18",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_depth_aa_20250530.pth"
+    },
+    {
+      "name": "iw3_light_inpaint_v1_20250919.pth",
+      "bytes": 9070711,
+      "sha256": "8b1a85df321ede3ea45d0b37a7f2c509e941687c062e1d584aab8808c253db6d",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_light_inpaint_v1_20250919.pth"
+    },
+    {
+      "name": "iw3_light_video_inpaint_v1_20250919.pth",
+      "bytes": 9282225,
+      "sha256": "788e13a77f4ace05c76bfcd6577b15e9ca220cbb3f9c43d3f14510dc15cb9aae",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_light_video_inpaint_v1_20250919.pth"
+    },
+    {
+      "name": "iw3_mask_mlbw_l2_d1_20250903.pth",
+      "bytes": 958587,
+      "sha256": "fe3ab406ba102662550e34798eac03c0e14b9486bcdc460b0b0e4b97dccfb1b7",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mask_mlbw_l2_d1_20250903.pth"
+    },
+    {
+      "name": "iw3_mlbw_l2s_d1_20250627.pth",
+      "bytes": 481383,
+      "sha256": "d66467d9b055bf7ca651aeb24d11d2ccc9ad447d040a5b3e455962821c891e28",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l2s_d1_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l2_d1_20250627.pth",
+      "bytes": 958267,
+      "sha256": "0a780170538f8d71b484e7886369c199f1bd7d23cf8b8c5ee45baf06e74f064d",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l2_d1_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l2_d2_20250627.pth",
+      "bytes": 958267,
+      "sha256": "dd2e0017b878e4470a03142ee5a2eab269b1a45af27085a4ffcc52b0c068b0e7",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l2_d2_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l2_d2_weak_20250627.pth",
+      "bytes": 958267,
+      "sha256": "1497f7264225297634dcd322c008cf026b53f6281913d729a55f7c2b18795f06",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l2_d2_weak_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l2_d3_20250627.pth",
+      "bytes": 958267,
+      "sha256": "083665140fd24eba0411210c37a0e748196b6e8ae6447eb97bb5bd8cf32fa1fb",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l2_d3_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l2_d3_weak_20250627.pth",
+      "bytes": 958267,
+      "sha256": "382be234a570451b1256d1202e59ac4728bdf6a3f6ed8db990e831b7825ed16c",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l2_d3_weak_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l4s_d1_20250627.pth",
+      "bytes": 1865127,
+      "sha256": "e25ff643f44695f25bdd86fbd775fe9f7f55991c76cf4531c5f40a21cfc3aeda",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l4s_d1_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l4_d1_20250627.pth",
+      "bytes": 3721403,
+      "sha256": "f91aa9657d7a0f7a820c943c2502e9fd5d3359408958775029795940ef210c82",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l4_d1_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l4_d2_20250627.pth",
+      "bytes": 3721403,
+      "sha256": "cde44984d160cee19ddf0a5991623df3e50f491687e65f013e7de68dd6cc0932",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l4_d2_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l4_d2_weak_20250627.pth",
+      "bytes": 3721403,
+      "sha256": "2eacd5df7b252508dce4819eafec38a3e139d30af570e5f80af00364afa724d5",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l4_d2_weak_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l4_d3_20250627.pth",
+      "bytes": 3721403,
+      "sha256": "88ae50d1918b95d6744b725f8d34512740937afee20c61f51e099ce53bf46aef",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l4_d3_20250627.pth"
+    },
+    {
+      "name": "iw3_mlbw_l4_d3_weak_20250627.pth",
+      "bytes": 3721403,
+      "sha256": "94b2e5af60a9c98147875aa3e95fcddb8ade53835435cb6d2ba70fdef0e744d9",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_mlbw_l4_d3_weak_20250627.pth"
+    },
+    {
+      "name": "iw3_row_flow_v3_20250627.pth",
+      "bytes": 485179,
+      "sha256": "2e4daa14a72a5f751ffff489c1809ce2c4c6aea6191d47f67f2f72afe4ef612a",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_row_flow_v3_20250627.pth"
+    },
+    {
+      "name": "iw3_row_flow_v3_sym_20250628.pth",
+      "bytes": 485179,
+      "sha256": "b61518f9c83e1f0c19d8a8844dbe5304e5f47bfb65928d5bb74256c1640186a0",
+      "url": "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_row_flow_v3_sym_20250628.pth"
+    }
+  ]
+}
