@@ -798,7 +798,11 @@ function Update-VrUi {
     Update-Estimate
 }
 function Update-Estimate {
-    if((Get-WorkspaceMode)-eq'IW3'){$ExpectedTimeText.Text='IW3: время уточняется по фактической скорости после загрузки модели.';return}
+    if((Get-WorkspaceMode)-eq'IW3'){
+        $ExpectedTimeText.Text='IW3: размер ракурсов и файла — в блоке IW3 ниже. ETA уточняется после загрузки модели.'
+        if(Get-Command Update-Iw3Geometry -ErrorAction SilentlyContinue){Update-Iw3Geometry}
+        return
+    }
     if (-not $script:SourceInfo -or -not $ModeCombo.SelectedItem -or -not $UpscalerCombo.SelectedItem) { return }
     $Geometry=Get-EstimatedGeometry; if(-not $Geometry){return}
     $Fps=[double]$script:SourceInfo.fps; if($Fps -le 0){$Fps=30}
@@ -877,7 +881,7 @@ function Update-InputInfo {
         $P=(& $Ffprobe -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,r_frame_rate,codec_name,nb_frames,pix_fmt,color_transfer -show_entries format=duration,size -of json $InputBox.Text)|ConvertFrom-Json
         $V=$P.streams[0]; $Duration=[double]$P.format.duration; $Fps=Parse-UiRate $(if($V.avg_frame_rate -and $V.avg_frame_rate-ne'0/0'){$V.avg_frame_rate}else{$V.r_frame_rate})
         $Frames=if($V.nb_frames){[long]$V.nb_frames}else{[long][math]::Floor($Duration*$Fps)}
-        $script:SourceInfo=[pscustomobject]@{width=[int]$V.width;height=[int]$V.height;fps=$Fps;duration=$Duration;frames=$Frames;codec=[string]$V.codec_name;size=[long]$P.format.size}
+        $script:SourceInfo=[pscustomobject]@{input=$InputBox.Text;width=[int]$V.width;height=[int]$V.height;fps=$Fps;duration=$Duration;frames=$Frames;codec=[string]$V.codec_name;size=[long]$P.format.size}
         $Dur=[TimeSpan]::FromSeconds($Duration); $MiB=[math]::Round(([long]$P.format.size/1MB),1)
         $SourceResolutionText.Text="Исходник: $($V.width) × $($V.height)"
         $VideoInfo.Text=('{0:0.###} FPS · {1} · {2} · {3:N0} кадров · {4:N1} MiB' -f $Fps,$V.codec_name,$Dur.ToString('hh\:mm\:ss\.fff'),$Frames,$MiB)
@@ -1316,6 +1320,10 @@ $Timer.Add_Tick({
                     $VideoInfo.Text="$($Source.title) · $(Format-Time ([double]$Source.duration_seconds))"
                     $StatusText.Text='Ссылка открыта'
                     $DetailText.Text="Прямой поток $HeightText подготовлен · можно перематывать"
+                    if((Get-WorkspaceMode)-eq'IW3' -and [int]$Source.width-gt 0 -and [int]$Source.height-gt 0){
+                        $script:SourceInfo=[pscustomobject]@{input=$InputBox.Text;width=[int]$Source.width;height=[int]$Source.height}
+                        Update-Iw3Geometry
+                    }
                 } catch { Add-Log ('Source JSON: '+$_.Exception.Message) }
             } elseif ($L -match '^STUDIO_PLAYER_READY (?<j>.+)$') {
                 try {
@@ -1366,6 +1374,8 @@ $Timer.Add_Tick({
                 $script:Result=$null
             } elseif ($L -eq 'STUDIO_PLAYER_CLOSED') {
                 $script:Cancelled=$true
+            } elseif ($L -match '^STUDIO_IW3_GEOMETRY (?<j>.+)$') {
+                try {Show-Iw3Geometry ($Matches.j|ConvertFrom-Json)}catch{Add-Log ('IW3 geometry: '+$_.Exception.Message)}
             } elseif ($L -match '^STUDIO_PLAN (?<j>.+)$') {
                 try {
                     $Plan=$Matches.j|ConvertFrom-Json
@@ -1445,6 +1455,14 @@ $RunButton.Add_Click({
         $IsOnlineSource = $InputBox.Text -match '^https?://'
         if ([string]::IsNullOrWhiteSpace($InputBox.Text)) { throw 'Выберите видеофайл или вставьте ссылку.' }
         if (-not $IsOnlineSource -and -not (Test-Path -LiteralPath $InputBox.Text -PathType Leaf)) { throw 'Выберите существующий входной видеофайл.' }
+        if($WorkspaceMode-eq'IW3' -and -not $IsOnlineSource){
+            Update-InputInfo
+            if($script:SourceInfo){
+                $Geometry=Get-Iw3Geometry $SourceInfo.width $SourceInfo.height (Get-Iw3Settings) (Combo-Tag $ModeCombo) (Combo-Tag $CodecCombo)
+                Show-Iw3Geometry $Geometry
+                if(-not $Geometry.valid){throw ($Geometry.errors -join "`n")}
+            }
+        }
         if ($WorkspaceMode-ne'IW3' -and [string]$UpscalerCombo.SelectedItem.Tag -eq 'DLoRAL' -and -not (Test-Path -LiteralPath $DLoRALCheckpoint -PathType Leaf)) {
             throw 'DLoRAL checkpoint ещё не скачан: Google Drive превысил квоту. Запустите INSTALL_MODELS.cmd позже; NanoVSR, AnimeSR v2 и FlashVSR уже готовы.'
         }

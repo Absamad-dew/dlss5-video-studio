@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$StudioRoot,[string]$OutputConfigPath,[string]$ScreenshotPath)
 $ErrorActionPreference='Stop'
 if(-not $StudioRoot){$StudioRoot=Split-Path -Parent $PSScriptRoot}
@@ -40,6 +40,21 @@ foreach($Model in $Iw3Da3Catalog.models){
 Set-Iw3Settings @{depth_model='Any_V2_S'};Update-Iw3Ui
 Assert (-not $Iw3Controls['da3_microbatch'].IsEnabled) 'DA3 controls enabled for V2'
 Assert (-not $Iw3Da3InstallButton.IsEnabled) 'DA3 installer enabled for non-DA3'
+$InputBox.Text='geometry-test.mp4'
+$script:SourceInfo=[pscustomobject]@{input=$InputBox.Text;width=3840;height=1632;fps=25;duration=12}
+Select-StringTag $ModeCombo '2160p';Select-StringTag $CodecCombo 'H265'
+Update-Iw3Geometry
+Assert ($Iw3GeometryInfo.Text.Contains('7680×1632')) '4K SBS geometry not visible'
+$Iw3Controls['ipd_offset'].Value=10
+Assert ($Iw3GeometryInfo.Text.Contains('8192×8192')) 'IPD limit warning not refreshed'
+$Iw3Controls['ipd_offset'].Value=0
+Select-StringTag $CodecCombo 'H264'
+Assert ($Iw3GeometryInfo.Text.Contains('4096×4096')) 'Codec geometry warning not refreshed'
+Select-StringTag $CodecCombo 'H265'
+$InputBox.Text='another-video.mp4'
+Assert (-not $Iw3GeometryInfo.Text.Contains('7680×1632')) 'Stale geometry shown for another source'
+$InputBox.Text='geometry-test.mp4'
+Update-Iw3Geometry
 if($ScreenshotPath){
     $Visual=$Window.Content
     $Visual.Measure([Windows.Size]::new(1500,1000));$Visual.Arrange([Windows.Rect]::new(0,0,1500,1000));$Visual.UpdateLayout()

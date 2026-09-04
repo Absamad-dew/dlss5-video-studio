@@ -44,6 +44,6 @@ try{
     }
     $Entry=$Archive.CreateEntry('IW3_UPDATE_MANIFEST.json')
     $Writer=[IO.StreamWriter]::new($Entry.Open(),[Text.UTF8Encoding]::new($false))
-    try{$Writer.Write((@{version='22.2.0-iw3-da3';files=@($Manifest.ToArray())}|ConvertTo-Json -Depth 5))}finally{$Writer.Dispose()}
+    try{$Writer.Write((@{version='22.2.1-iw3-geometry';files=@($Manifest.ToArray())}|ConvertTo-Json -Depth 5))}finally{$Writer.Dispose()}
 }finally{$Archive.Dispose()}
 Write-Output ('IW3_UPDATE_BUILT '+(Get-Hash $OutputZip)+' '+(Get-Item -LiteralPath $OutputZip).Length)

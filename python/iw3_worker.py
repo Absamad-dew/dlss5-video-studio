@@ -67,7 +67,79 @@ def configure_imports(root):
     os.environ.setdefault('HF_HUB_DISABLE_SYMLINKS_WARNING', '1')
 
 
-def build_cli(settings, source, output, codec, quality, source_fps, height=0):
+def plan_geometry(width, height, settings, mode='Source', codec='H265'):
+    """Pure preflight; mirrored by Get-Iw3Geometry in iw3-ui.ps1 (parity tested).
+
+    Presets are per-eye bounding boxes, not a forced height. Portrait swaps the
+    box axes. Source keeps its raster, including odd sizes: reject an unsupported
+    final 4:2:0 layout rather than silently crop/resize it.
+    """
+    width, height = int(width), int(height)
+    if min(width, height) <= 0:
+        raise ValueError('Cannot calculate iw3 output: invalid source dimensions')
+    bounds = {'2160p': (3840,2160), '1440p': (2560,1440), '1080p': (1920,1080),
+              '720p': (1280,720), '540p': (960,540)}
+    if mode == 'Source':
+        w, h = width, height
+        box = None
+    else:
+        bw, bh = bounds[mode]
+        if height > width:
+            bw, bh = bh, bw
+        box = [bw,bh]
+        # Rational arithmetic avoids a one-pixel loss on an exact boundary.
+        scale = min(Fraction(bw,width), Fraction(bh,height))
+        w, h = max(2,int(width*scale)//2*2), max(2,int(height*scale)//2*2)
+    input_geometry = [w,h]
+    vf = f'scale={w}:{h}:flags=lanczos' if [w,h] != [width,height] else None
+    # Match the pinned iw3 Inpaint rounding, then IPD border padding.
+    cap = int(settings['inpaint_max_width'])
+    if settings['method'].endswith('inpaint') and cap and w > cap:
+        cap += cap % 2
+        h = int((cap / w)*h)
+        h += h % 2
+        w = cap
+    content_geometry = [w,h]
+    pad = int(abs(settings['ipd_offset'])*.01*max(w,h))
+    pad -= pad % 2
+    w += 3*pad
+    eye_geometry = [w,h]
+    layout = settings['layout']
+    if layout == 'HalfSBS': w //= 2
+    if layout == 'HalfOU': h //= 2
+    packed_eye = [w,h]
+    output = [w*2,h] if layout.endswith('SBS') else [w,h*2]
+    # Keep the existing H.264 portable compatibility ceiling. HEVC is 8K per
+    # axis, including Blackwell; no silent switch to software or Half SBS.
+    limit = 8192 if codec == 'H265' else 4096
+    errors = []
+    if min(output) < 2 or any(n % 2 for n in output):
+        errors.append(f'IW3: размер {output[0]}×{output[1]} несовместим с 4:2:0; '
+                      'выберите пресет разрешения с чётными размерами.')
+    if max(output) > limit:
+        errors.append(f'IW3: {layout} даёт {output[0]}×{output[1]}, предел {codec} '
+                      f'в portable — {limit}×{limit}. Выберите меньший пресет, '
+                      'другую стереоупаковку или H.265; качество автоматически не уменьшается.')
+    if codec == 'H264' and settings['pix_fmt'] != 'yuv420p':
+        errors.append('IW3: для 10-bit выберите H.265.')
+    return dict(source_geometry=[width,height], input_geometry=input_geometry,
+                content_eye_geometry=content_geometry, eye_geometry=eye_geometry,
+                packed_eye_geometry=packed_eye, output_geometry=output, bounds=box,
+                output_mode=mode, layout=layout, codec=codec, encoder_limit=limit,
+                video_filter=vf, valid=not errors, errors=errors)
+
+
+def require_geometry(plan, prepare=False, dlss=False):
+    errors = list(plan['errors'])
+    # The lossless range and optional DLSS pass encode the original raster first.
+    if (prepare or dlss) and max(plan['source_geometry']) > 8192:
+        errors.append('Исходник превышает 8192 пикселя: lossless-подготовка / DLSS '
+                      'не смогут сохранить его в NVENC HEVC. Подготовьте меньший исходник.')
+    if errors:
+        raise ValueError('\n'.join(errors))
+
+
+def build_cli(settings, source, output, codec, quality, source_fps, geometry=None):
     s = settings
     args = ['-i', str(source), '-o', str(output), '--yes', '--gpu', '0',
             '--method', s['method'], '--depth-model', s['depth_model'],
@@ -93,8 +165,8 @@ def build_cli(settings, source, output, codec, quality, source_fps, height=0):
             args += ['--' + key.replace('_', '-'), str(int(s[key]))]
     args += {'FullSBS': [], 'HalfSBS': ['--half-sbs'],
              'FullOU': ['--tb'], 'HalfOU': ['--half-tb']}[s['layout']]
-    if height:
-        args += ['--vf', f'scale=-2:{height}:flags=lanczos']
+    if geometry and geometry['video_filter']:
+        args += ['--vf', geometry['video_filter']]
     return args
 
 
@@ -224,18 +296,11 @@ def main(args):
     args.output = args.output.resolve()
     if args.output.exists() or args.output == Path(source):
         raise FileExistsError('Output already exists; choose a new filename.')
+    geometry = plan_geometry(stream['width'], stream['height'], s, args.output_mode, args.codec)
+    emit('STUDIO_IW3_GEOMETRY', geometry)
+    prepare = bool(args.network or args.start or args.frames)
+    require_geometry(geometry, prepare=prepare, dlss=s['dlss_mode'] != 'Off')
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    height = 0 if args.output_mode == 'Source' else int(args.output_mode.rstrip('p'))
-    eye_height = height or stream['height']
-    eye_width = round(stream['width'] * eye_height / stream['height'] / 2) * 2
-    if s['method'].endswith('inpaint') and s['inpaint_max_width']:
-        scale = min(1, s['inpaint_max_width'] / eye_width)
-        eye_width, eye_height = round(eye_width * scale), round(eye_height * scale)
-    geometry = (eye_width * (2 if s['layout'] == 'FullSBS' else 1),
-                eye_height * (2 if s['layout'] == 'FullOU' else 1))
-    if args.codec == 'H264' and max(geometry) > 4096:
-        raise ValueError('This full-resolution stereo layout exceeds H.264 NVENC dimensions. '
-                         'Choose H.265, Half SBS/OU, or a lower output resolution.')
     work_parent = root / 'temp/DLSS5VideoStudio/temp'
     work_parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='job-iw3-', dir=work_parent))
@@ -248,7 +313,6 @@ def main(args):
         # Exact fractional seeks and frame ranges are transport concerns. The iw3
         # CLI accepts integer seconds and may include keyframe preroll; prepare a
         # bounded lossless clip instead of changing its temporal algorithms.
-        prepare = bool(args.network or args.start or args.frames)
         if prepare:
             emit('STUDIO_PROGRESS_JSON', {'phase': 'Input', 'message': 'Точный отрезок без потери качества',
                                          'percent': 1, 'processed_frames': 0, 'total_frames': requested})
@@ -312,7 +376,10 @@ def main(args):
                 if shutil.disk_usage(work).free < 1024**3:
                     raise RuntimeError('Less than 1 GiB free disk space; processing stopped safely.')
         stereo = work / 'iw3-stereo.mp4'
-        cli = build_cli(s, engine_source, stereo, args.codec, args.quality, fps, height)
+        # Inner DLSS / range transport must not unexpectedly change the raster.
+        if dlss_report and list(dlss_report['output_geometry']) != geometry['source_geometry']:
+            raise RuntimeError('DLSS output size differs from the iw3 plan; refusing an unplanned stereo size.')
+        cli = build_cli(s, engine_source, stereo, args.codec, args.quality, fps, geometry)
         if s['method'].endswith('inpaint') and s['divergence'] * (1 if s['synthetic_view'] == 'both' else 2) > 5:
             print('IW3_WARNING Strong disparity exceeds the inpaint model training range; '
                   'settings are preserved, but edge artifacts may increase.', flush=True)
@@ -339,6 +406,8 @@ def main(args):
         torch.cuda.empty_cache()
         out_info = probe(root, stereo, count=True)
         out_stream = next(x for x in out_info['streams'] if x['codec_type'] == 'video')
+        if [out_stream['width'],out_stream['height']] != geometry['output_geometry']:
+            raise RuntimeError('Actual iw3 output differs from the preflight geometry; refusing publication.')
         frame_count = int(out_stream['nb_read_frames'])
         output_fps = float(Fraction(out_stream['avg_frame_rate']))
         if frame_count < 1 or (requested and abs(frame_count-total) > 1):
@@ -378,6 +447,7 @@ def main(args):
                   'frames': int(final_stream['nb_read_frames']),
                   'output_geometry': [final_stream['width'], final_stream['height']],
                   'container_geometry': [final_stream['width'], final_stream['height']],
+                  'geometry_plan': geometry,
                   'pipeline_label': 'iw3' + (' + '+s['depth_model'] if da3_selected else ' original') + (' + DLSS5' if s['dlss_mode'] != 'Off' else ''),
                   'iw3_commit': COMMIT, 'iw3_settings': s, 'iw3_seconds': engine_seconds,
                   'iw3_peak_allocated_vram_mb': peak_vram_mb,

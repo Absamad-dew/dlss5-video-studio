@@ -1,4 +1,8 @@
-# DLSS5 Video Studio 22.2
+# DLSS5 Video Studio 22.2.1
+
+22.2.1 fixes IW3 ultrawide 4K export: presets fit a per-eye bounding box instead
+of forcing video height. The UI displays eye/container dimensions; preflight
+checks HEVC/H.264 limits, IPD padding and Inpaint resizing before processing.
 
 22.2 adds **DA3 Mono Large / Small / Base / Large 1.1 / Giant 1.1** to IW3 / VR.
 Real, distinct pinned checkpoints; per-model install/status, independent depth

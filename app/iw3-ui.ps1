@@ -12,6 +12,10 @@ $Iw3Intro=[Windows.Controls.TextBlock]::new()
 $Iw3Intro.Text='Оригинальные RowFlow / MLBW и 12-кадровый Video Inpaint. Выберите исходную depth-модель iw3 или новые DA3 через Studio-провайдер. GAPW/Atlas не применяются. DLSS 5 и интерполяция включаются отдельно. Для ссылок и точных отрезков создаётся lossless-файл (лимит 8 ГиБ); длинное видео лучше открыть локальным файлом целиком.'
 $Iw3Intro.TextWrapping='Wrap';$Iw3Intro.Margin='0,0,0,12'
 [void]$Iw3Content.Children.Add($Iw3Intro)
+$script:Iw3GeometryInfo=[Windows.Controls.TextBlock]::new()
+$Iw3GeometryInfo.TextWrapping='Wrap';$Iw3GeometryInfo.Margin='0,0,0,12'
+$Iw3GeometryInfo.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#78D9FF')
+[void]$Iw3Content.Children.Add($Iw3GeometryInfo)
 $Iw3DepthTop=[Windows.Controls.StackPanel]::new()
 [void]$Iw3Content.Children.Add($Iw3DepthTop)
 $Iw3Buttons=[Windows.Controls.WrapPanel]::new()
@@ -134,6 +138,61 @@ function Save-Iw3Settings {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Iw3Store)|Out-Null
     [IO.File]::WriteAllText($Iw3Store,((Get-Iw3Settings)|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
 }
+function Get-Iw3Geometry([int]$Width,[int]$Height,$Settings,[string]$Mode,[string]$Codec){
+    # Pure UI counterpart of iw3_worker.plan_geometry; cross-language parity test.
+    if($Width-le 0 -or $Height-le 0){throw 'Неизвестно разрешение исходника.'}
+    $W=$Width;$H=$Height;$Box=$null
+    if($Mode-ne'Source'){
+        $Boxes=@{'2160p'=@(3840,2160);'1440p'=@(2560,1440);'1080p'=@(1920,1080);'720p'=@(1280,720);'540p'=@(960,540)}
+        if(-not $Boxes.ContainsKey($Mode)){throw 'Неизвестный пресет разрешения.'}
+        $BW=$Boxes[$Mode][0];$BH=$Boxes[$Mode][1]
+        if($Height-gt$Width){$Swap=$BW;$BW=$BH;$BH=$Swap}
+        $Box=@($BW,$BH)
+        if([long]$BW*$Height-le[long]$BH*$Width){
+            $W=$BW;$H=[int][math]::Max(2,2*[math]::Floor($Height*[double]$BW/$Width/2))
+        }else{
+            $H=$BH;$W=[int][math]::Max(2,2*[math]::Floor($Width*[double]$BH/$Height/2))
+        }
+    }
+    $InputGeometry=@($W,$H)
+    $Vf=if($W-ne$Width -or $H-ne$Height){"scale=${W}:${H}:flags=lanczos"}else{$null}
+    $Cap=[int]$Settings.inpaint_max_width
+    if($Settings.method.EndsWith('inpaint') -and $Cap-gt 0 -and $W-gt$Cap){
+        $Cap+=$Cap%2;$H=[int][math]::Floor(($Cap/[double]$W)*$H);$H+=$H%2;$W=$Cap
+    }
+    $ContentGeometry=@($W,$H)
+    $Pad=[int][math]::Floor([math]::Abs([double]$Settings.ipd_offset)*.01*[math]::Max($W,$H));$Pad-=$Pad%2
+    $W+=3*$Pad;$Eye=@($W,$H)
+    $Layout=[string]$Settings.layout
+    if($Layout-eq'HalfSBS'){$W=[int][math]::Floor($W/2)}
+    if($Layout-eq'HalfOU'){$H=[int][math]::Floor($H/2)}
+    $PackedEye=@($W,$H)
+    $Output=if($Layout.EndsWith('SBS')){@(($W*2),$H)}else{@($W,($H*2))}
+    $Limit=if($Codec-eq'H265'){8192}else{4096}
+    $Errors=[Collections.Generic.List[string]]::new()
+    if([math]::Min($Output[0],$Output[1])-lt 2 -or $Output[0]%2 -or $Output[1]%2){
+        $Errors.Add("IW3: размер $($Output[0])×$($Output[1]) несовместим с 4:2:0; выберите пресет разрешения с чётными размерами.")
+    }
+    if([math]::Max($Output[0],$Output[1])-gt$Limit){
+        $Errors.Add("IW3: $Layout даёт $($Output[0])×$($Output[1]), предел $Codec в portable — ${Limit}×${Limit}. Выберите меньший пресет, другую стереоупаковку или H.265; качество автоматически не уменьшается.")
+    }
+    if($Codec-eq'H264' -and $Settings.pix_fmt-ne'yuv420p'){$Errors.Add('IW3: для 10-bit выберите H.265.')}
+    return [pscustomobject]@{source_geometry=@($Width,$Height);input_geometry=$InputGeometry;content_eye_geometry=$ContentGeometry;eye_geometry=$Eye;packed_eye_geometry=$PackedEye;output_geometry=$Output;bounds=$Box;output_mode=$Mode;layout=$Layout;codec=$Codec;encoder_limit=$Limit;video_filter=$Vf;valid=($Errors.Count-eq 0);errors=@($Errors.ToArray())}
+}
+function Show-Iw3Geometry($Plan){
+    $Iw3GeometryInfo.Text="Исходник $($Plan.source_geometry[0])×$($Plan.source_geometry[1]) → ракурс $($Plan.eye_geometry[0])×$($Plan.eye_geometry[1]) → файл $($Plan.output_geometry[0])×$($Plan.output_geometry[1]) ($($Plan.layout), $($Plan.codec)).`n4K — рамка 3840×2160 на глаз с сохранением пропорций; для портретного видео рамка поворачивается. Source — исходный размер."
+    if(-not $Plan.valid){$Iw3GeometryInfo.Text+="`n"+($Plan.errors -join "`n")}
+    $Iw3GeometryInfo.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString($(if($Plan.valid){'#78D9FF'}else{'#FF9D96'}))
+}
+function Update-Iw3Geometry {
+    if(-not $Iw3GeometryInfo -or -not $Iw3Controls.ContainsKey('target_fps') -or -not $Iw3Controls['target_fps'].SelectedItem){return}
+    if(-not $script:SourceInfo -or $script:SourceInfo.input -ne $InputBox.Text){
+        $Iw3GeometryInfo.Text='Расчёт: исходник → каждый глаз → готовый файл. Для ссылки точный размер проверяется сразу после открытия потока, до DLSS и загрузки модели. 4K вписывается в 3840×2160 на глаз без обрезки.'
+        $Iw3GeometryInfo.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#78D9FF');return
+    }
+    if(-not $ModeCombo.SelectedItem -or -not $CodecCombo.SelectedItem){return}
+    Show-Iw3Geometry (Get-Iw3Geometry $SourceInfo.width $SourceInfo.height (Get-Iw3Settings) (Combo-Tag $ModeCombo) (Combo-Tag $CodecCombo))
+}
 function Update-Iw3Ui {
     if(-not $Iw3Controls.ContainsKey('dlss_mode') -or -not $Iw3Controls['dlss_mode'].SelectedItem){return}
     $Active=(Get-WorkspaceMode)-eq'IW3'
@@ -156,6 +215,7 @@ function Update-Iw3Ui {
         $Iw3Controls['depth_aa'].IsEnabled=-not $ModelId.StartsWith('Studio_DA3')
         if(-not $Iw3Controls['depth_aa'].IsEnabled){$Iw3Controls['depth_aa'].IsChecked=$false}
     }
+    Update-Iw3Geometry
     if(-not $Installing){
         if($Model.Count -eq 1){
             $M=$Model[0];$Status='Нужно установить'
@@ -195,3 +255,6 @@ function Update-Iw3Da3Install {
 $Iw3Saved=@{}
 if(Test-Path -LiteralPath $Iw3Store){try{$Loaded=Get-Content -Encoding UTF8 -Raw -LiteralPath $Iw3Store|ConvertFrom-Json;foreach($Property in $Loaded.PSObject.Properties){$Iw3Saved[$Property.Name]=$Property.Value}}catch{}}
 Set-Iw3Settings $Iw3Saved
+foreach($Key in @('ipd_offset','inpaint_max_width')){$Iw3Controls[$Key].Add_ValueChanged({Update-Iw3Geometry})}
+$InputBox.Add_TextChanged({Update-Iw3Geometry})
+Update-Iw3Geometry

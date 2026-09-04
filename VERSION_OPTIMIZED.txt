@@ -1,2 +1,2 @@
-22.2.0-iw3-da3
-Five pinned DA3 depth models for iw3: Mono Large, Small, Base, Large 1.1, Giant 1.1; model installer/status, independent microbatch, bounded disk usage, original stereo/inpaint and optional DLSS5 retained.
+22.2.1-iw3-geometry
+Aspect-preserving per-eye resolution boxes; visible stereo dimensions; early NVENC dimension checks including HEVC, IPD and Inpaint. Five pinned DA3 models and optional DLSS5 retained.
