@@ -126,6 +126,19 @@ class Iw3SettingsTest(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 worker.validate_settings(ROOT,values)
 
+    def test_model_preflight_failure_precedes_workdir_and_dlss(self):
+        with tempfile.TemporaryDirectory() as folder:
+            args=SimpleNamespace(root=ROOT,settings=None,codec='H265',input='input.mp4',network=None,
+                                 start=0,frames=300,output=Path(folder)/'out.mp4',output_mode='Source')
+            info={'streams':[{'codec_type':'video','width':1920,'height':1080,
+                             'avg_frame_rate':'25/1','duration':'12'}],'format':{}}
+            with patch.object(worker,'configure_imports'), patch.object(worker,'probe',return_value=info), \
+                 patch('iw3_model_assets.preflight',side_effect=RuntimeError('download failed')), \
+                 patch.object(worker,'dlss_pass') as dlss, patch.object(worker.tempfile,'mkdtemp') as mkdir:
+                with self.assertRaisesRegex(RuntimeError,'download failed'):
+                    worker.main(args)
+                dlss.assert_not_called();mkdir.assert_not_called()
+
     def test_all_quality_controls_forward_to_iw3(self):
         s=worker.validate_settings(ROOT,{'resolution':518,'stereo_width':1920,'warp_steps':2,
                                         'mask_inner_dilation':2,'mask_outer_dilation':4,

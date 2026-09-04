@@ -1389,6 +1389,24 @@ $Timer.Add_Tick({
                     $DetailText.Text="$($P.phase) · $($P.processed_frames) из $($P.total_frames) кадров · $([math]::Round([double]$P.percent,1))%"
                     if([double]$P.phase_fps-gt 0){$SpeedText.Text=('{0:0.00} FPS' -f [double]$P.phase_fps)}
                     if($null-ne$P.eta_seconds){$script:LastEtaSeconds=[double]$P.eta_seconds;$script:LastProgressAt=Get-Date;$EtaText.Text='Осталось: '+(Format-Time $script:LastEtaSeconds)}
+                    else{$script:LastEtaSeconds=$null;$script:LastProgressAt=$null;$EtaText.Text='Осталось: рассчитывается'}
+                    if($P.phase -eq 'Models'){
+                        $DetailText.Text='Подготовка моделей до обработки видео'
+                        $Progress.IsIndeterminate=([double]$P.download_total_bytes -le 0)
+                        $SpeedText.Text=''
+                        if([double]$P.download_total_bytes -gt 0){
+                            $Progress.Value=[math]::Min(100,100*[double]$P.download_bytes/[double]$P.download_total_bytes)
+                            $DetailText.Text=('{0:0.1} / {1:0.1} МБ · попытка {2}' -f ([double]$P.download_bytes/1e6),([double]$P.download_total_bytes/1e6),$P.download_attempt)
+                        }
+                        if([double]$P.download_mbps -gt 0){
+                            $SpeedText.Text=('{0:0.2} МБ/с' -f [double]$P.download_mbps)
+                            if([double]$P.download_total_bytes -gt [double]$P.download_bytes){
+                                $script:LastEtaSeconds=([double]$P.download_total_bytes-[double]$P.download_bytes)/(1e6*[double]$P.download_mbps)
+                                $script:LastProgressAt=Get-Date
+                                $EtaText.Text='Загрузка: '+(Format-Time $script:LastEtaSeconds)
+                            }
+                        }
+                    }
                 }catch{Add-Log ('Progress JSON: '+$_.Exception.Message)}
             } elseif ($L -match '^STUDIO_PROGRESS (?<a>\d+)/(?<b>\d+)$') {
                 $Progress.IsIndeterminate = $false

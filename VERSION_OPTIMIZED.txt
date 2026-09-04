@@ -1,2 +1,2 @@
-22.2.1-iw3-geometry
-Aspect-preserving per-eye resolution boxes; visible stereo dimensions; early NVENC dimension checks including HEVC, IPD and Inpaint. Five pinned DA3 models and optional DLSS5 retained.
+22.2.2-iw3-model-resilience
+Bounded and verified IW3 model downloads with retry/resume, preflight loading before video work, visible model progress and recovery from interrupted downloads. Geometry, five pinned DA3 models and optional DLSS5 retained.

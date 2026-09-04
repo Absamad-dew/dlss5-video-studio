@@ -300,6 +300,8 @@ def main(args):
     emit('STUDIO_IW3_GEOMETRY', geometry)
     prepare = bool(args.network or args.start or args.frames)
     require_geometry(geometry, prepare=prepare, dlss=s['dlss_mode'] != 'Off')
+    from iw3_model_assets import preflight, network_guard
+    preflight(root, s, da3_selected)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     work_parent = root / 'temp/DLSS5VideoStudio/temp'
     work_parent.mkdir(parents=True, exist_ok=True)
@@ -396,7 +398,10 @@ def main(args):
         utils.set_state_args(native, tqdm_fn=Progress, depth_model=provider)
         torch.cuda.reset_peak_memory_stats()
         engine_started = time.monotonic()
-        utils.iw3_main(native)
+        emit('STUDIO_PROGRESS_JSON', {'phase': 'Model loading', 'message': 'Загрузка проверенной модели iw3 в GPU',
+             'percent': 39 if dlss_report else 1, 'processed_frames': 0, 'total_frames': total})
+        with network_guard():
+            utils.iw3_main(native)
         engine_seconds = time.monotonic() - engine_started
         peak_vram_mb = torch.cuda.max_memory_allocated()/1024**2
         del native, provider

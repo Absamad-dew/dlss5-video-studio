@@ -177,7 +177,7 @@ Copy-Item -LiteralPath (Join-Path $Build 'python\moebius_worker.py') -Destinatio
 Copy-Item -LiteralPath (Join-Path $Build 'python\temporal_atlas_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\install_depth_models.py') -Destination (Join-Path $Target 'tools') -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $Target 'tools/iw3')|Out-Null
-foreach($Name in @('iw3_worker.py','install_iw3.py','iw3-lock.json','iw3_da3.py','iw3_da3_install.py')){
+foreach($Name in @('iw3_worker.py','iw3_model_assets.py','install_iw3.py','iw3-lock.json','iw3_da3.py','iw3_da3_install.py')){
     Copy-Item -LiteralPath (Join-Path $Build "python/$Name") -Destination (Join-Path $Target "tools/iw3/$Name") -Force
 }
 foreach($Name in @('iw3-ui.ps1','process-iw3.ps1','iw3-settings.json','iw3-da3-models.json')){
