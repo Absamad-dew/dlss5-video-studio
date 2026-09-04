@@ -9,6 +9,21 @@ $WorkspaceTabs.SelectedIndex=2
 Update-WorkspaceUi
 Assert ($NeuralGroup.Visibility -eq 'Visible') 'VR DLSS controls are hidden'
 Assert ($NeuralGroup.IsEnabled) 'VR DLSS controls are disabled'
+$VrModeCombo.SelectedIndex=1
+Select-StringTag $VRGenerativeBackendCombo 'Off'
+$StereoExpectations=[ordered]@{
+    GAPW=@('РЕКОМЕНДАЦИЯ ДЛЯ КАЧЕСТВА','Temporal Atlas')
+    TemporalLDI=@('МНОГОСЛОЙНЫЙ КЛАССИЧЕСКИЙ ПУТЬ','Moebius')
+    Layered=@('БАЛАНС БЕЗ ГЕНЕРАТИВНОЙ МОДЕЛИ','z-buffer')
+    Inverse=@('МАКСИМАЛЬНАЯ СКОРОСТЬ','backward/inverse warp')
+}
+foreach($Method in $StereoExpectations.Keys){
+    Select-StringTag $VRStereoMethodCombo $Method
+    Update-VrUi
+    foreach($Fragment in $StereoExpectations[$Method]){Assert ($VRStereoMethodInfo.Text.Contains($Fragment)) ("Stereo explanation missing for $Method`: $Fragment")}
+    Assert (-not [string]::IsNullOrWhiteSpace([string]$VRStereoMethodCombo.SelectedItem.ToolTip)) ("Stereo option tooltip missing: $Method")
+}
+Select-StringTag $VRStereoMethodCombo 'GAPW'
 $IntensitySlider.Value=.45;$StructureSlider.Value=1.35;$SkinSlider.Value=.25
 $Ini=Get-Ini
 Assert ($Ini.Contains('NRIntensity=0.45')) 'Intensity not forwarded to DLSS'
@@ -24,6 +39,8 @@ Assert (-not $NeuralGroup.IsEnabled) 'DLSS unexpectedly enabled for reference mo
 Set-Iw3Settings @{dlss_mode='PreStereo';divergence=0;scene_detect=$false;method='mlbw_l2_inpaint'}
 Update-Iw3Ui
 Assert ($NeuralGroup.IsEnabled) 'Optional iw3 DLSS controls not enabled'
+Assert ($Iw3HelpBlocks['method'].Text.Contains('12-кадровая видеомодель')) 'Selected IW3 stereo method explanation missing'
+Assert (-not [string]::IsNullOrWhiteSpace([string]$Iw3Controls['method'].SelectedItem.ToolTip)) 'IW3 method option tooltip missing'
 $Saved=Get-Iw3Settings
 Assert ($Saved.divergence -eq 0 -and -not $Saved.scene_detect) 'Zero/false settings lost'
 Assert ($Iw3Controls['mask_outer_dilation'].IsEnabled) 'Inpaint mask controls inaccessible'
@@ -56,8 +73,15 @@ Assert (-not $Iw3GeometryInfo.Text.Contains('7680×1632')) 'Stale geometry shown
 $InputBox.Text='geometry-test.mp4'
 Update-Iw3Geometry
 if($ScreenshotPath){
+    $WorkspaceTabs.SelectedIndex=2
+    Select-StringTag $VrModeCombo 'DepthSBS'
+    Select-StringTag $VRGenerativeBackendCombo 'Off'
+    Select-StringTag $VRStereoMethodCombo 'GAPW'
+    $VRFineStereoExpander.IsExpanded=$true
+    Update-WorkspaceUi
     $Visual=$Window.Content
     $Visual.Measure([Windows.Size]::new(1500,1000));$Visual.Arrange([Windows.Rect]::new(0,0,1500,1000));$Visual.UpdateLayout()
+    $VRStereoMethodInfo.BringIntoView();$Visual.UpdateLayout()
     $Bitmap=[Windows.Media.Imaging.RenderTargetBitmap]::new(1500,1000,96,96,[Windows.Media.PixelFormats]::Pbgra32)
     $Bitmap.Render($Visual)
     $Encoder=[Windows.Media.Imaging.PngBitmapEncoder]::new();$Encoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($Bitmap))

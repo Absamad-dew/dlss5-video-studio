@@ -29,7 +29,7 @@ $Invariant = [Globalization.CultureInfo]::InvariantCulture
 $Xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DLSS5 Video Studio 22.1 · iw3 VR" Width="1500" Height="960"
+        Title="DLSS5 Video Studio 22.2.3 · понятные настройки" Width="1500" Height="960"
         MinWidth="1120" MinHeight="720" WindowStartupLocation="CenterScreen"
         Background="#090D14" Foreground="#DCE7F5" FontFamily="Segoe UI">
   <Window.Resources>
@@ -49,6 +49,8 @@ $Xaml = @'
     <Style TargetType="Slider"><Setter Property="Margin" Value="2,2,2,8"/></Style>
     <Style TargetType="GroupBox"><Setter Property="Foreground" Value="#9CB1CA"/><Setter Property="BorderBrush" Value="#2A3A52"/><Setter Property="Margin" Value="0,0,0,12"/><Setter Property="Padding" Value="10"/></Style>
     <Style TargetType="TabItem"><Setter Property="Foreground" Value="#C9D7E9"/><Setter Property="Padding" Value="14,8"/><Setter Property="FontWeight" Value="SemiBold"/></Style>
+    <Style x:Key="SectionHelp" TargetType="TextBlock"><Setter Property="Foreground" Value="#91A4BD"/><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="Margin" Value="0,0,0,9"/><Setter Property="FontSize" Value="12"/></Style>
+    <Style x:Key="FineHelp" TargetType="TextBlock"><Setter Property="Foreground" Value="#9AABC1"/><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="Margin" Value="0,0,0,8"/><Setter Property="FontSize" Value="11"/></Style>
   </Window.Resources>
 
   <Grid Margin="18">
@@ -66,6 +68,7 @@ $Xaml = @'
         <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel>
           <GroupBox Header="ВИДЕО">
             <StackPanel>
+              <TextBlock Style="{StaticResource SectionHelp}" Text="Здесь выбирается источник, а не качество готового файла. Для ссылки сначала задайте качество загружаемого потока; разрешение обработки, DLSS и кодек настраиваются в разделе «Выход». Чем лучше исходник, тем меньше деталей модели приходится угадывать."/>
               <TextBlock Text="Видеофайл или ссылка на видео"/>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="45"/><ColumnDefinition Width="92"/></Grid.ColumnDefinitions><TextBox x:Name="InputBox"/><Button x:Name="BrowseInput" Grid.Column="1" Content="…" ToolTip="Выбрать локальный файл"/><Button x:Name="PasteInput" Grid.Column="2" Content="Вставить" ToolTip="Вставить ссылку из буфера обмена"/></Grid>
               <Border Background="#0B1722" BorderBrush="#28435D" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,1,0,8"><StackPanel>
@@ -87,8 +90,8 @@ $Xaml = @'
           </GroupBox>
 
           <Border Background="#0C1622" BorderBrush="#263A51" BorderThickness="1" CornerRadius="10" Padding="11" Margin="0,0,0,12"><StackPanel>
-            <TextBlock Text="ЧТО ДЕЛАЕТ НАСТРОЙКА" Foreground="#60D7FF" FontWeight="SemiBold"/>
-            <TextBlock x:Name="ContextHelpText" Text="Наведите курсор на параметр — здесь появится понятное объяснение и влияние на скорость, качество или память." Foreground="#9DB0C8" TextWrapping="Wrap" Margin="0,4,0,0"/>
+            <TextBlock Text="ПОДСКАЗКА ПО ПАРАМЕТРУ" Foreground="#60D7FF" FontWeight="SemiBold"/>
+            <TextBlock x:Name="ContextHelpText" Text="Наведите курсор или выберите настройку. Здесь будет объяснение: что меняется, когда параметр полезен и чем приходится платить — скоростью, памятью либо стабильностью." Foreground="#9DB0C8" TextWrapping="Wrap" Margin="0,4,0,0"/>
           </StackPanel></Border>
 
           <TabControl x:Name="WorkspaceTabs" Height="112" Margin="0,0,0,12" Background="#0A1019" BorderBrush="#334B6D">
@@ -100,6 +103,7 @@ $Xaml = @'
 
           <GroupBox x:Name="QuickGroup" Header="БЫСТРЫЙ ЗАПУСК">
             <StackPanel>
+              <TextBlock Style="{StaticResource SectionHelp}" Text="Сценарий одновременно выставляет согласованный набор параметров. Начните с него, затем включите экспертные настройки и меняйте только то, эффект чего понимаете; ручные изменения не отменяют остальные параметры профиля."/>
               <TextBlock Text="Сценарий"/><ComboBox x:Name="QuickScenarioCombo"><ComboBoxItem Content="Ultra Fast · минимальная задержка" Tag="UltraFast"/><ComboBoxItem Content="Fast · живой просмотр" Tag="Fast"/><ComboBoxItem Content="Medium · универсальный" Tag="Medium"/><ComboBoxItem Content="Heavy · высокая точность" Tag="Heavy"/><ComboBoxItem Content="Maximum · максимум качества" Tag="Maximum"/><ComboBoxItem Content="VR 3D · Depth + DLSS5" Tag="DepthVR"/></ComboBox>
               <CheckBox x:Name="ExpertCheck" Content="Показать экспертные настройки" IsChecked="False" Margin="0,7,0,0"/>
               <TextBlock x:Name="QuickScenarioInfo" Foreground="#7F91AA" TextWrapping="Wrap" Margin="0,4,0,0"/>
@@ -108,6 +112,7 @@ $Xaml = @'
 
           <GroupBox x:Name="VrGroup" Header="VR-ВЫВОД">
             <StackPanel>
+              <TextBlock Style="{StaticResource SectionHelp}" Text="Этот блок либо упаковывает плоское видео для VR-кинотеатра, либо строит два действительно разных ракурса из карты глубины. Для настоящего объёма выберите «3D VR · разные ракурсы из depth». Сначала используйте Cinematic; Maximum рассчитан на офлайн-запись и заметно тяжелее."/>
               <Border Background="#17122A" BorderBrush="#6B55A5" BorderThickness="1" CornerRadius="9" Padding="10" Margin="0,0,0,9"><StackPanel><TextBlock Text="DLSS 5 — ЯВНАЯ ЧАСТЬ VR-КОНВЕЙЕРА" Foreground="#C6B3FF" FontWeight="SemiBold"/><TextBlock Text="Обычный режим применяет настоящий DLSS5 Feature 18 до построения глаз. Максимальный режим дополнительно разделяет стереопару и запускает ещё один независимый DLSS5-проход для каждого глаза." Foreground="#A99BD0" TextWrapping="Wrap" Margin="0,3,0,0"/></StackPanel></Border>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                 <StackPanel><TextBlock Text="Профиль VR"/><ComboBox x:Name="VRQualityPresetCombo"><ComboBoxItem Content="Cinematic · рекомендуется" Tag="Cinematic"/><ComboBoxItem Content="Fast · быстрее" Tag="Fast"/><ComboBoxItem Content="Maximum · всё качество" Tag="Maximum"/><ComboBoxItem Content="Вручную" Tag="Custom"/></ComboBox></StackPanel>
@@ -135,12 +140,14 @@ $Xaml = @'
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions><TextBlock x:Name="VRGenerativeStatusText" Text="Temporal Atlas: проверка установки…" Foreground="#A7B8C8" TextWrapping="Wrap" VerticalAlignment="Center"/><Button x:Name="InstallVRModelsButton" Grid.Column="1" Content="Установить ~28 МБ"/></Grid>
                 </StackPanel></Border>
               </Expander>
-              <Expander Header="ТОНКАЯ НАСТРОЙКА DEPTH-СТЕРЕО" Foreground="#C1B4EE" Margin="2,4,2,9">
+              <Expander x:Name="VRFineStereoExpander" Header="ТОНКАЯ НАСТРОЙКА DEPTH-СТЕРЕО" Foreground="#C1B4EE" Margin="2,4,2,9">
                 <Border BorderBrush="#3A315B" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
+                  <TextBlock Style="{StaticResource FineHelp}" Text="Стереорендер отвечает за геометрию второго ракурса, стабилизация — за поведение глубины во времени, а параллакс — за силу воспринимаемого объёма. Меняйте по одному параметру и проверяйте короткий фрагмент с волосами, руками, тонкими предметами и движением камеры."/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
-                    <StackPanel><TextBlock Text="Стереорендер"/><ComboBox x:Name="VRStereoMethodCombo"><ComboBoxItem Content="GAPW · чистые маски для Atlas" Tag="GAPW"/><ComboBoxItem Content="Temporal LDI · старый многослойный" Tag="TemporalLDI"/><ComboBoxItem Content="Layered z-splat · баланс" Tag="Layered"/><ComboBoxItem Content="Inverse warp · максимум FPS" Tag="Inverse"/></ComboBox></StackPanel>
+                    <StackPanel><TextBlock Text="Метод стереорендера"/><ComboBox x:Name="VRStereoMethodCombo"><ComboBoxItem Content="GAPW · качество / Atlas" Tag="GAPW" ToolTip="Лучший выбор для качества: корректная видимость слоёв, обратная выборка RGB и точная маска раскрытого фона. Обязателен для Temporal Atlas."/><ComboBoxItem Content="Temporal LDI · слои + fill" Tag="TemporalLDI" ToolTip="Многослойная проекция с дальней фоновой пластиной и temporal-fill. База для Moebius/M2SVid; тяжелее и чувствительнее к ошибкам depth."/><ComboBoxItem Content="Layered z-splat · баланс" Tag="Layered" ToolTip="Быстрый многослойный forward-splat с z-buffer и пространственным заполнением. Хороший компромисс без генеративного восстановления."/><ComboBoxItem Content="Inverse warp · максимум FPS" Tag="Inverse" ToolTip="Самый быстрый и экономный вариант. Не моделирует видимость нескольких слоёв, поэтому хуже на силуэтах и раскрытых областях."/></ComboBox></StackPanel>
                     <StackPanel Grid.Column="2"><TextBlock Text="Стабилизация depth"/><ComboBox x:Name="VRTemporalModeCombo"><ComboBoxItem Content="Motion-compensated · рекомендуется" Tag="Motion"/><ComboBoxItem Content="EMA · проще" Tag="EMA"/><ComboBoxItem Content="Выключена" Tag="Off"/></ComboBox></StackPanel>
                   </Grid>
+                  <Border Background="#121C2A" BorderBrush="#48658A" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,1,0,10"><StackPanel><TextBlock Text="КАК ВЫБРАТЬ МЕТОД СТЕРЕО" Foreground="#8FD6FF" FontWeight="SemiBold"/><TextBlock x:Name="VRStereoMethodInfo" Foreground="#B7C9DE" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                     <StackPanel><TextBlock Text="Опорный глаз"/><ComboBox x:Name="VREyeAnchorCombo"><ComboBoxItem Content="Симметрично · объём" Tag="Symmetric"/><ComboBoxItem Content="Левый исходный · чище/быстрее" Tag="Left"/><ComboBoxItem Content="Правый исходный · чище/быстрее" Tag="Right"/></ComboBox></StackPanel>
                     <StackPanel Grid.Column="2"><TextBlock Text="Совместимость файла"/><ComboBox x:Name="VRPixelFormatCombo"><ComboBoxItem Content="8-bit 4:2:0 · все шлемы" Tag="Compatible8Bit"/><ComboBoxItem Content="10-bit HEVC · меньше полос" Tag="HEVC10Bit"/></ComboBox></StackPanel>
@@ -184,6 +191,7 @@ $Xaml = @'
 
           <GroupBox x:Name="OutputGroup" Header="ВЫХОД">
             <StackPanel>
+            <TextBlock Style="{StaticResource SectionHelp}" Text="Разрешение — фактический размер просмотра или записанного файла. Внутреннее разрешение DLSS задаётся отдельно: например, выход 4K + DLSS Quality означает рендер примерно в 75% и восстановление до 4K. H.265 предпочтителен для 2K/4K, H.264 нужен главным образом для совместимости."/>
             <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
               <StackPanel><TextBlock Text="Разрешение обработки и вывода"/><ComboBox x:Name="ModeCombo"><ComboBoxItem Content="Как в оригинале" Tag="Source"/><ComboBoxItem Content="2160p / до 4K" Tag="2160p"/><ComboBoxItem Content="1440p" Tag="1440p"/><ComboBoxItem Content="1080p" Tag="1080p"/><ComboBoxItem Content="720p" Tag="720p"/><ComboBoxItem Content="540p · минимальная нагрузка" Tag="540p"/></ComboBox></StackPanel>
               <StackPanel Grid.Column="2"><TextBlock Text="Кодек"/><ComboBox x:Name="CodecCombo"><ComboBoxItem Content="H.265 / HEVC (рекомендуется)" Tag="H265"/><ComboBoxItem Content="H.264 / AVC" Tag="H264"/></ComboBox></StackPanel>
@@ -202,6 +210,7 @@ $Xaml = @'
 
           <GroupBox x:Name="RealtimePanel" Header="REALTIME-ПЛЕЕР">
             <StackPanel>
+              <TextBlock Style="{StaticResource SectionHelp}" Text="Realtime сначала готовит выбранный запас кадров, затем показывает видео из буфера. Для плавности важнее стабильная скорость базового рендера, чем высокий множитель MFG. Если есть зависания: увеличьте буфер, оставьте размер чанка «Авто» и начните с Fast/1080p."/>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                 <StackPanel><TextBlock Text="Профиль realtime"/><ComboBox x:Name="RealtimeQualityCombo"><ComboBoxItem Content="Ultra Fast" Tag="UltraFast"/><ComboBoxItem Content="Fast" Tag="Fast"/><ComboBoxItem Content="Medium" Tag="Medium"/><ComboBoxItem Content="Heavy" Tag="Heavy"/><ComboBoxItem Content="Maximum" Tag="Maximum"/><ComboBoxItem Content="Вручную" Tag="Custom"/></ComboBox></StackPanel>
                 <StackPanel Grid.Column="2"><TextBlock Text="Окно плеера"/><CheckBox x:Name="RealtimeFullscreenCheck" Content="Сразу на весь экран" IsChecked="True"/><CheckBox x:Name="RealtimeAudioCheck" Content="Синхронный звук" IsChecked="True"/><TextBlock Text="F1: меню · F2: текущий/реальный FPS" Foreground="#7F91AA" Margin="0,3,0,0"/></StackPanel>
@@ -219,6 +228,7 @@ $Xaml = @'
               <Border Background="#0B1722" BorderBrush="#28435D" BorderThickness="1" CornerRadius="8" Padding="9" Margin="0,0,0,7"><TextBlock x:Name="RealtimeQualityInfo" Foreground="#78D9FF" TextWrapping="Wrap"/></Border>
               <Expander Header="ТОНКАЯ НАСТРОЙКА REALTIME" Foreground="#B6C5D8" Margin="2,1,2,9">
                 <Border BorderBrush="#27384F" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
+                  <TextBlock Style="{StaticResource FineHelp}" Text="Guide-карта — уменьшенная служебная карта движения и глубины, а не само видео. Полный depth считается не обязательно каждый кадр: между проходами он переносится motion-векторами. Чем чаще depth, выше guide и больше итераций RAFT, тем точнее контуры и ниже FPS."/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Разрешение guide-карты"/><TextBlock x:Name="GuideWidthValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#60D7FF"/></Grid><Slider x:Name="GuideWidthSlider" Minimum="256" Maximum="768" Value="320" TickFrequency="64" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Полная глубина: каждые N кадров"/><TextBlock x:Name="DepthIntervalValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#60D7FF"/></Grid><Slider x:Name="DepthIntervalSlider" Minimum="1" Maximum="24" Value="24" TickFrequency="1" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Минимальный интервал адаптивной глубины"/><TextBlock x:Name="DepthMinIntervalValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#60D7FF"/></Grid><Slider x:Name="DepthMinIntervalSlider" Minimum="1" Maximum="24" Value="12" TickFrequency="1" IsSnapToTickEnabled="True"/>
@@ -240,11 +250,13 @@ $Xaml = @'
 
           <GroupBox x:Name="RecordingPanel" Header="ЗАПИСЬ И ТОЧНЫЕ MOTION / DEPTH-КАРТЫ">
             <StackPanel>
+              <TextBlock Style="{StaticResource SectionHelp}" Text="Запись использует тот же оптимизированный конвейер, но не обязана укладываться в реальное время. Универсальный профиль обычно достаточен; ручной режим нужен для сложных силуэтов, быстрого движения или поиска причины temporal-артефактов."/>
               <TextBlock Text="Универсальный профиль выше одновременно настраивает guide-разрешение, частоту нейроглубины, optical flow и размер чанка. Программа сама выбирает аппаратный класс по VRAM; названия видеокарт больше не нужны." Foreground="#96AB82" TextWrapping="Wrap" Margin="0,0,0,7"/>
               <Border Background="#0B2022" BorderBrush="#267A75" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,8"><TextBlock Text="Аппаратный конвейер записи: source-RGB передаётся через общую память и расширяется на GPU; guide, DLSS и controller изолированы по CPU, а кадры идут прямо в один фоновый NV12/NVENC поток без временных RGB-файлов. Выбранные разрешение и качество не снижаются." Foreground="#72DCCB" TextWrapping="Wrap"/></Border>
               <CheckBox x:Name="RecordFineGuideCheck" Content="Переопределить профиль и настроить карты вручную" IsChecked="False"/>
               <Expander x:Name="RecordFineGuideExpander" Header="ТОНКАЯ НАСТРОЙКА ЗАПИСИ / VR" Foreground="#B6C5D8" IsExpanded="False">
                 <Border BorderBrush="#33452C" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
+                  <TextBlock Style="{StaticResource FineHelp}" Text="Для максимального качества начните с depth 1/1–1/2 и RAFT Balanced/Quality, затем уменьшайте нагрузку. Большой чанк повышает загрузку GPU, но требует больше VRAM и дольше задерживает отображение прогресса; «0» выбирает размер автоматически."/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Разрешение guide-карты"/><TextBlock x:Name="RecordGuideWidthValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordGuideWidthSlider" Minimum="256" Maximum="1024" Value="480" TickFrequency="64" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Полная нейроглубина: каждые N кадров"/><TextBlock x:Name="RecordDepthIntervalValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordDepthIntervalSlider" Minimum="1" Maximum="48" Value="2" TickFrequency="1" IsSnapToTickEnabled="True"/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="72"/></Grid.ColumnDefinitions><TextBlock Text="Минимальный адаптивный интервал"/><TextBlock x:Name="RecordDepthMinValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#B7E36E"/></Grid><Slider x:Name="RecordDepthMinSlider" Minimum="1" Maximum="48" Value="2" TickFrequency="1" IsSnapToTickEnabled="True"/>
@@ -268,6 +280,7 @@ $Xaml = @'
 
           <GroupBox x:Name="StageGroup" Header="ОЧЕРЕДНОСТЬ НЕЙРОННЫХ ПРОХОДОВ">
             <StackPanel>
+              <TextBlock Style="{StaticResource SectionHelp}" Text="Порядок доступен только когда включена внешняя VSR-модель. DLSS → VSR обычно сохраняет больше скорости; VSR → DLSS даёт DLSS уже увеличенный кадр, но резко повышает нагрузку. Кодирование и VR-упаковка всегда идут последними."/>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="94"/></Grid.ColumnDefinitions>
                 <ListBox x:Name="StageList" Height="68" Background="#0C131E" Foreground="#DCE7F5" BorderBrush="#2B3D57" Padding="4"/>
                 <StackPanel Grid.Column="1"><Button x:Name="StageUp" Content="▲ Выше"/><Button x:Name="StageDown" Content="▼ Ниже"/></StackPanel>
@@ -278,6 +291,7 @@ $Xaml = @'
 
           <GroupBox x:Name="UpscalerGroup" Header="НЕЙРОННЫЙ ВИДЕО-АПСКЕЙЛ">
             <StackPanel>
+              <TextBlock Style="{StaticResource SectionHelp}" Text="Это необязательная внешняя x4-модель поверх основного DLSS5-конвейера. Она нужна для восстановления очень слабого источника, но может быть в разы тяжелее DLSS и придумывать детали. Для обычного 1080p–4K сначала попробуйте «Без внешней модели»."/>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                 <StackPanel><TextBlock Text="Модель"/><ComboBox x:Name="UpscalerCombo"><ComboBoxItem Content="Без внешней модели · только DLSS5" Tag="None"/><ComboBoxItem Content="NanoVSR · только быстрый preview" Tag="NanoVSR"/><ComboBoxItem Content="AnimeSR v2 · аниме temporal x4" Tag="AnimeSR"/><ComboBoxItem Content="FlashVSR v1.1 · diffusion" Tag="FlashVSR"/><ComboBoxItem Content="DLoRAL · максимум деталей" Tag="DLoRAL"/></ComboBox></StackPanel>
                 <StackPanel Grid.Column="2"><TextBlock Text="Вариант"/><ComboBox x:Name="UpscalerVariantCombo"><ComboBoxItem Content="Авто · адаптация VRAM" Tag="Auto"/><ComboBoxItem Content="Realtime · минимум вычислений" Tag="Realtime"/><ComboBoxItem Content="Balanced · быстрее" Tag="Balanced"/><ComboBoxItem Content="Quality · сильная детализация" Tag="Quality"/><ComboBoxItem Content="Max · стабильность" Tag="Max"/></ComboBox></StackPanel>
@@ -290,6 +304,7 @@ $Xaml = @'
 
           <GroupBox x:Name="NeuralGroup" Header="ПРЕСЕТ И НЕЙРОННЫЙ РЕНДЕРИНГ">
             <StackPanel>
+              <TextBlock Style="{StaticResource SectionHelp}" Text="Здесь регулируется именно DLSS5 Feature 18. Intensity задаёт общую силу, Local Structure — детали окружения, Skin Structure — лица и персонажей. Слишком высокие значения не гарантируют больше настоящих деталей и могут изменить фактуру или форму."/>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="90"/><ColumnDefinition Width="90"/></Grid.ColumnDefinitions><ComboBox x:Name="PresetBox" IsEditable="True"/><Button x:Name="SavePreset" Grid.Column="1" Content="Сохранить"/><Button x:Name="DeletePreset" Grid.Column="2" Content="Удалить"/></Grid>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="58"/></Grid.ColumnDefinitions><TextBlock Text="NR Intensity"/><TextBlock x:Name="IntensityValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#60D7FF"/></Grid>
               <Slider x:Name="IntensitySlider" Minimum="0" Maximum="2" TickFrequency="0.05" IsSnapToTickEnabled="True"/>
@@ -310,6 +325,7 @@ $Xaml = @'
 
           <Expander x:Name="AdvancedParams" Header="РАСШИРЕННЫЕ ПАРАМЕТРЫ" Foreground="#B6C5D8" Margin="2,0,2,12">
             <Border BorderBrush="#27384F" BorderThickness="1" CornerRadius="8" Padding="11" Margin="0,8,0,0"><StackPanel>
+              <TextBlock Style="{StaticResource FineHelp}" Text="Калибровка входных motion/depth и HDR-цвета. Оставляйте значения профиля, если не исправляете конкретную проблему: неправильное направление depth, неверный масштаб движения, выцветший HDR или ошибочную яркость paper-white."/>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="58"/></Grid.ColumnDefinitions><TextBlock Text="Motion Scale X"/><TextBlock x:Name="MotionXValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#9C8CFF"/></Grid><Slider x:Name="MotionXSlider" Minimum="0.5" Maximum="1.5" TickFrequency="0.01" IsSnapToTickEnabled="True"/>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="58"/></Grid.ColumnDefinitions><TextBlock Text="Motion Scale Y"/><TextBlock x:Name="MotionYValue" Grid.Column="1" HorizontalAlignment="Right" Foreground="#9C8CFF"/></Grid><Slider x:Name="MotionYSlider" Minimum="0.5" Maximum="1.5" TickFrequency="0.01" IsSnapToTickEnabled="True"/>
               <TextBlock Text="Depth Convention"/><ComboBox x:Name="DepthCombo"><ComboBoxItem Content="Automatic" Tag="0"/><ComboBoxItem Content="Normal depth" Tag="1"/><ComboBoxItem Content="Inverted depth" Tag="2"/></ComboBox>
@@ -321,6 +337,7 @@ $Xaml = @'
 
           <GroupBox x:Name="RangeGroup" Header="ДИАПАЗОН">
             <StackPanel>
+              <TextBlock Style="{StaticResource SectionHelp}" Text="Старт задаётся в секундах. Количество кадров ограничивает только запись и тесты; Realtime играет дальше без этого лимита. Для подбора VR и neural-параметров используйте 24–75 кадров сцены с движением, затем запускайте весь ролик."/>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="Старт, секунд"/><TextBox x:Name="StartBox" Text="0"/></StackPanel><StackPanel Grid.Column="2"><TextBlock Text="Количество кадров"/><TextBox x:Name="FramesBox" Text="8"/></StackPanel></Grid>
               <CheckBox x:Name="FullVideoCheck" Content="Обработать всё видео от указанного старта"/>
               <TextBlock x:Name="RangeHint" Text="Для быстрого подбора настроек начните с 8–24 кадров." Foreground="#7F91AA" TextWrapping="Wrap"/>
@@ -358,6 +375,7 @@ $AdditionalNames = @(
     'RecordMotionPresetCombo','RecordMotionBackendCombo','RecordRaftSlider','RecordRaftValue','RecordChunkSlider','RecordChunkValue',
     'VRDepthGammaSlider','VRDepthGammaValue','VROcclusionSlider','VROcclusionValue','VREdgeSlider','VREdgeValue',
     'VRTemporalSlider','VRTemporalValue','VREyeSwapCheck','VRStereoMethodCombo','VRTemporalModeCombo','VRDLSSModeCombo','VRQualityPresetCombo',
+    'VRStereoMethodInfo','VRFineStereoExpander',
     'VREyeAnchorCombo','VRPixelFormatCombo','VRForegroundSlider','VRForegroundValue',
     'VRBackgroundSlider','VRBackgroundValue','VRZBufferSlider','VRZBufferValue','VRHoleFillSlider','VRHoleFillValue',
     'VRConvergenceModeCombo','VRDisparityCurveCombo','VRLDILayersSlider','VRLDILayersValue',
@@ -759,6 +777,34 @@ function Move-Stage([int]$Delta) {
     Refresh-StageList; $StageList.SelectedIndex=$To
     if ((Get-PipelineOrder) -eq 'DLSSThenVSR') { $LivePreviewCheck.IsChecked=$false; $LivePreviewCheck.IsEnabled=$false } elseif ((Get-WorkspaceMode) -ne 'Realtime') { $LivePreviewCheck.IsEnabled=$true }
 }
+function Update-VRStereoMethodInfo {
+    if(-not $VRStereoMethodInfo -or -not $VRStereoMethodCombo.SelectedItem){return}
+    $Method=Combo-Tag $VRStereoMethodCombo
+    $Description=switch($Method){
+        'GAPW' {
+            'РЕКОМЕНДАЦИЯ ДЛЯ КАЧЕСТВА. Сначала forward z-splat определяет, какой слой видим, но цвет восстанавливается обратной выборкой из исходного кадра. Поэтому меньше «летящих» пикселей и цветных обломков на волосах, плечах и тонких объектах. Создаёт точную маску реально раскрывшегося фона для Temporal Atlas. Без Atlas оставшиеся дыры заполняются только локальным фоновым seed. Нагрузка выше, чем у Layered и Inverse.'
+        }
+        'TemporalLDI' {
+            'МНОГОСЛОЙНЫЙ КЛАССИЧЕСКИЙ ПУТЬ. Forward-проекция разделяет глубину на слои, добавляет дальнюю фоновую пластину и может переносить заполнение из соседнего кадра по motion. Это обязательная основа для Moebius и M2SVid. Полезен при сильном параллаксе без Temporal Atlas, но чувствительнее к ошибкам depth: возможны ореолы, размазанные края и temporal-шлейфы. Медленнее Layered и Inverse.'
+        }
+        'Layered' {
+            'БАЛАНС БЕЗ ГЕНЕРАТИВНОЙ МОДЕЛИ. Быстрый forward z-splat распределяет пиксели по нескольким слоям глубины, выбирает ближний через z-buffer и заполняет остаток пространственным push-pull. Даёт более правильные перекрытия, чем Inverse, но на волосах и тонкой геометрии чаще оставляет fly-pixels и растянутый фон, чем GAPW. Temporal Atlas с ним не работает.'
+        }
+        default {
+            'МАКСИМАЛЬНАЯ СКОРОСТЬ. Один backward/inverse warp с минимальной памятью и без многослойного разрешения видимости. Подходит для realtime, слабого 3D и быстрой проверки настроек. На сильном параллаксе может растягивать передний план, дублировать границы и неверно заполнять участки, которые второй глаз должен увидеть впервые.'
+        }
+    }
+    $Backend=if($VRGenerativeBackendCombo.SelectedItem){Combo-Tag $VRGenerativeBackendCombo}else{'Off'}
+    $Compatibility=if($Backend-eq'TemporalAtlas'){
+        'Сейчас выбран Temporal Atlas: программа автоматически удерживает GAPW, потому что Atlas требует его disocclusion-маски.'
+    }elseif($Backend-ne'Off'){
+        "Сейчас выбран $Backend`: программа автоматически удерживает Temporal LDI как совместимую основу этой модели."
+    }else{
+        'Генеративное восстановление выключено: доступны все четыре метода. Для качества начните с GAPW, для скорости — с Inverse, для компромисса без AI — с Layered.'
+    }
+    $VRStereoMethodInfo.Text=$Description+"`n`n"+$Compatibility
+}
+
 function Update-VrUi {
     if (-not $VrModeCombo.SelectedItem) { return }
     $VrMode=Combo-Tag $VrModeCombo
@@ -773,6 +819,8 @@ function Update-VrUi {
     }elseif($Generative -and -not $Atlas -and (Combo-Tag $VRStereoMethodCombo)-ne'TemporalLDI'){
         Select-StringTag $VRStereoMethodCombo 'TemporalLDI'
     }
+    $VRStereoMethodCombo.IsEnabled=$DepthStereo -and -not $Generative
+    Update-VRStereoMethodInfo
     foreach($Control in @($VRGenerativeResolutionCombo,$VRGenerativeChunkSlider,$VRGenerativeOverlapSlider)){$Control.IsEnabled=$Generative}
     $Hybrid=$Generative -and (Combo-Tag $VRGenerativeBackendCombo)-eq'M2SVidHybrid'
     $Sparse=$Generative -and (Combo-Tag $VRGenerativeBackendCombo)-eq'MoebiusSparse'
@@ -1032,7 +1080,7 @@ $RealtimeFpsCombo.Add_SelectionChanged({Update-Estimate})
 $FrameGenerationCombo.Add_SelectionChanged({Update-ProfileUi;Update-Estimate})
 $RealtimeTargetFpsCombo.Add_SelectionChanged({Update-Estimate})
 $VrTargetFpsCombo.Add_SelectionChanged({Update-Estimate})
-$VRStereoMethodCombo.Add_SelectionChanged({Update-VrUi})
+$VRStereoMethodCombo.Add_SelectionChanged({Update-VrUi;$ContextHelpText.Text=$VRStereoMethodInfo.Text})
 $VRConvergenceModeCombo.Add_SelectionChanged({Update-VrUi})
 $VRDLSSModeCombo.Add_SelectionChanged({Update-Estimate})
 $VRGenerativeBackendCombo.Add_SelectionChanged({
@@ -1076,7 +1124,10 @@ $PreviewPaneButton.Add_Click({
 })
 
 $HelpText=[ordered]@{
+    InputBox='Локальный путь либо прямая страница видео. Для ссылки программа сама получает метаданные и выбранный поток. Локальный файл надёжнее для длинной записи и не зависит от сети.'
+    OutputBox='Папка, куда программа положит автоматически названный результат, JSON-отчёт и при необходимости сравнение. Имя вручную вводить не требуется.'
     QuickScenarioCombo='Меняет сразу несколько связанных параметров. Это безопасная стартовая точка; после выбора любой параметр можно скорректировать вручную.'
+    ExpertCheck='Показывает ручные блоки motion/depth, порядок проходов, внешний апскейл и тонкую настройку DLSS5. Скрытие не отключает уже выбранные параметры.'
     SourceNetworkHeightCombo='Ограничивает разрешение загружаемого потока по ссылке. Это вход до DLSS5; большее разрешение даёт больше исходных деталей, но требует больше сети, памяти и GPU.'
     SourceCookiesCombo='Использует авторизацию выбранного браузера только для сайтов, где публичного доступа недостаточно. Для открытого видео оставьте «Публичное».'
     ModeCombo='Фактическое разрешение окна или готового файла. Оно не обязано совпадать с входным разрешением ссылки или внутренним render-разрешением DLSS.'
@@ -1101,6 +1152,8 @@ $HelpText=[ordered]@{
     TemporalDepthSlider='Смешивает depth между кадрами. Больше — стабильнее, но возможно запаздывание на резкой смене глубины.'
     SceneCutSlider='Определяет резкость реакции на монтажную склейку. Малое значение быстрее сбрасывает temporal history, но может давать ложные сбросы.'
     GuideMotionBackendCombo='DIS использует CPU и быстрее; RAFT — нейросетевой optical flow на CUDA, обычно точнее на персонажах и деформациях.'
+    GuideMotionPresetCombo='Определяет точность поиска движения внутри выбранного backend. Quality использует больше итераций/уровней и лучше держит мелкие деформации, но отнимает время у показа кадров.'
+    RaftUpdatesSlider='Число уточнений нейросетевого optical flow RAFT. 3–4 достаточно для realtime; 6–8 полезно для офлайн-записи с тонкими движущимися границами. Для DIS не используется.'
     VrTargetFpsCombo='Частота записанного VR-файла. 72/90/120 создаются motion-compensated интерполяцией после DLSS5 и стереосинтеза, поэтому оба глаза остаются синхронны.'
     VrModeCombo='Depth 3D строит разные ракурсы глаз; Cinema SBS упаковывает плоское видео; 360 подходит только для готового источника 2:1.'
     VrLayoutCombo='Half экономит разрешение контейнера; Full сохраняет полное разрешение каждого глаза. SBS располагает глаза слева/справа, OU — сверху/снизу.'
@@ -1114,7 +1167,7 @@ $HelpText=[ordered]@{
     VRGenerativeChunkSlider='Радиус просмотра назад и вперёд в кадрах. 8 — хороший баланс, 12 — качество. Используются разреженные расстояния 1/2/4/8/12, поэтому время растёт умеренно.'
     VRGenerativeOverlapSlider='Для Temporal Atlas — число итераций RAFT. 4 быстро, 6 качественно, 8 для Maximum. Для Moebius единица равна 32 пикселям перекрытия ROI.'
     InstallVRModelsButton='Скачивает компактную MI-GAN для локального заполнения остаточных областей. RAFT уже входит в основной пакет. Незавершённая загрузка возобновляется.'
-    VRStereoMethodCombo='GAPW создаёт строгую карту раскрытых областей и является обязательной базой Temporal Atlas. Temporal LDI — старый многослойный путь. Layered быстрее, Inverse — максимум FPS.'
+    VRStereoMethodCombo='Выбирает способ геометрически построить второй ракурс, а не depth-модель. GAPW — качество и обязательная база Atlas; Temporal LDI — многослойное восстановление для Moebius/M2SVid; Layered — баланс без AI; Inverse — скорость с более слабыми краями. Под списком показано полное сравнение текущего варианта.'
     VRTemporalModeCombo='Motion-compensated переносит предыдущую глубину по optical flow перед смешиванием и не приклеивает объём к экрану. EMA дешевле, но может плыть; Off полезен для диагностики.'
     VRConvergenceModeCombo='По главному объекту удерживает нулевой параллакс около центрального персонажа. Comfort выбирает устойчивый средний диапазон. Manual использует только ползунок плоскости фокуса.'
     VRDisparityCurveCombo='Cinematic усиливает хорошо читаемые средние планы; Comfort мягко ограничивает экстремальный параллакс; Linear переносит depth без художественного ремаппинга.'
@@ -1148,13 +1201,38 @@ $HelpText=[ordered]@{
     RecordFineGuideCheck='Открывает ручные motion/depth-параметры записи и VR. Если выключено, работает выбранный универсальный профиль.'
     RecordGuideWidthSlider='Разрешение служебных карт записи. Больше помогает тонким контурам, но увеличивает расчёт и объём sidecar-данных.'
     RecordDepthIntervalSlider='Период полного нейросетевого depth-прохода в записи. 1 означает расчёт на каждом кадре.'
+    RecordDepthMinSlider='Минимальная пауза между внеплановыми depth-проходами. Уменьшайте, если быстрые объекты успевают оторваться от глубины; слишком малое значение почти отменяет экономию адаптивного режима.'
+    RecordConfidenceSlider='Если надёжность переноса motion падает ниже этого порога, полная глубина пересчитывается раньше. Высокий порог осторожнее, но запускает нейросеть чаще.'
+    RecordMotionSlider='Порог величины движения для внепланового обновления depth. Малое значение лучше реагирует на динамику и сильнее нагружает GPU.'
+    RecordTemporalSlider='Сила смешивания карты глубины с историей. Больше уменьшает дрожание и «дыхание» объёма, но может оставить шлейф после быстрого движения.'
+    RecordSceneSlider='Порог обнаружения монтажной склейки. На склейке история depth/motion сбрасывается. Слишком чувствительное значение создаёт лишние сбросы внутри одной сцены.'
+    RecordMotionPresetCombo='Точность optical flow в записываемом файле. Quality выбирайте для финального VR с людьми и деформациями; Balanced — обычный старт; Realtime — только когда важнее скорость.'
+    RecordMotionBackendCombo='DIS считает движение на CPU и экономит VRAM. RAFT-small использует CUDA и обычно точнее на волосах, руках, поворотах и неоднородных деформациях, но конкурирует с depth/DLSS за GPU.'
+    RecordRaftSlider='Число итераций RAFT в записи. После 6–8 прирост обычно меньше, а время и нагрузка продолжают расти. Не используется с DIS.'
+    RecordChunkSlider='Сколько кадров обрабатывается одной порцией. Больше лучше загружает GPU и требует больше VRAM; меньше быстрее освобождает память и чаще обновляет прогресс. 0 — аппаратный авторасчёт.'
     RecordWorkerSlider='Ручное число CPU-потоков guide для записи/VR. Авто обычно лучше; настройка нужна для необычных систем или параллельной нагрузки.'
+    StageList='Показывает только активные нейронные проходы. Выбранный верхний пункт выполняется раньше. Порядок имеет смысл лишь при включённой внешней VSR-модели.'
+    StageUp='Перемещает выбранный нейронный проход раньше. DLSS первым обычно быстрее и дешевле; VSR первым передаёт DLSS увеличенный кадр.'
+    StageDown='Перемещает выбранный нейронный проход позже. Финальная VR-упаковка и кодирование всё равно остаются после списка.'
     UpscalerCombo='Дополнительная VSR-модель x4. Она необязательна и значительно тяжелее DLSS5; None оставляет только основной DLSS5-конвейер.'
     UpscalerVariantCombo='Компромисс конкретной VSR-модели между скоростью, VRAM и восстановлением деталей. Не меняет универсальный профиль motion/depth.'
     UpscalerStrengthSlider='Смешивает результат внешней VSR-модели с обычным масштабированием. 1.00 — максимальное влияние модели.'
+    PresetBox='Сохраняет весь набор параметров DLSS5 Feature 18. Встроенные профили нельзя перезаписать: введите своё имя и нажмите «Сохранить».'
     IntensitySlider='Общая сила DLSS5 neural rendering. Увеличивает дорисовку деталей, но на максимуме может менять исходную структуру.'
+    ToneSlider='Сила локальной тональной реконструкции DLSS5. Повышение подчёркивает локальный контраст и материал, но может усилить шум, ореолы и нестабильность яркости.'
     StructureSlider='Влияние DLSS5 на окружение, поверхности и мелкую структуру сцены.'
     SkinSlider='Отдельная сила восстановления персонажей, лиц и кожи. Отрицательное значение оставляет кожу ближе к оригиналу.'
+    NrPresetCombo='Внутренний вариант весов/поведения Feature 18. Default безопаснее как база; #1–#3 экспериментируйте на коротком одинаковом фрагменте — номер сам по себе не означает больше качества.'
+    StyleCombo='Характер neural-реконструкции. Natural старается меньше менять исходную фактуру; Cinematic допускает более выраженный локальный контраст; Default использует базовое поведение DLL.'
+    AutoMaskCheck='Автоматически разделяет области кадра для разных ветвей neural rendering. Полезно для персонажа и окружения; неверная маска может дать границу между обработанными областями.'
+    UpliftCheck='Разрешает более сильное нейронное восстановление деталей. Эффект заметнее на слабом источнике, но возрастает риск придуманных текстур.'
+    UICorrectionCheck='Защищает интерфейс, титры и плоскую графику от чрезмерной нейрообработки. Для кино без HUD обычно почти не влияет.'
+    MotionXSlider='Калибрует горизонтальную составляющую motion-векторов, поступающих в DLSS5. 1.00 — без коррекции. Неверное значение вызывает шлейфы и дрожание деталей.'
+    MotionYSlider='Калибрует вертикальную составляющую motion-векторов. Меняйте только при устойчивом рассогласовании движения по вертикали.'
+    DepthCombo='Сообщает DLSS5 направление карты глубины. Automatic выбирает соглашение программы; Normal/Inverted нужны, если ближние и дальние области явно перепутаны.'
+    TransferSlider='Корректирует HDR transfer-функцию перед neural rendering. Не является обычной яркостью; неверное значение может вымыть света или провалить тени.'
+    ColorSlider='Сила цветовой реконструкции DLSS5. 1.00 сохраняет профиль; уменьшение ближе к исходнику, увеличение усиливает вмешательство и риск цветового мерцания.'
+    PaperSlider='Масштаб HDR paper-white — опорной яркости интерфейса и средних тонов. Не повышайте для SDR и не используйте как замену экспозиции.'
     QualitySlider='Параметр QP аппаратного NVENC. Меньше — выше качество и размер файла; на скорость DLSS5 почти не влияет.'
     StartBox='Позиция начала в секундах. Realtime воспроизводит отсюда до конца; запись начинает выбранный диапазон отсюда.'
     FramesBox='Число кадров только для записи и быстрых тестов. Во вкладке Realtime параметр не используется.'
@@ -1165,7 +1243,12 @@ $HelpText=[ordered]@{
 }
 foreach($Entry in $HelpText.GetEnumerator()){
     $Control=Get-Variable -Name $Entry.Key -ValueOnly -ErrorAction SilentlyContinue
-    if($Control){$Control.ToolTip=[string]$Entry.Value;$Control.Add_MouseEnter({param($Sender,$EventArgs)$ContextHelpText.Text=[string]$Sender.ToolTip})}
+    if($Control){
+        $Control.ToolTip=[string]$Entry.Value
+        $Control.Add_MouseEnter({param($Sender,$EventArgs)$ContextHelpText.Text=[string]$Sender.ToolTip})
+        $Control.Add_GotKeyboardFocus({param($Sender,$EventArgs)$ContextHelpText.Text=[string]$Sender.ToolTip})
+        $Control.Add_PreviewMouseDown({param($Sender,$EventArgs)$ContextHelpText.Text=[string]$Sender.ToolTip})
+    }
 }
 $PresetBox.Add_SelectionChanged({$N=[string]$PresetBox.SelectedItem;if($BuiltIn.Contains($N)){Apply-Settings $BuiltIn[$N]}elseif($script:UserPresets.Contains($N)){Apply-Settings $script:UserPresets[$N]};Refresh-Labels})
 $SavePreset.Add_Click({$N=$PresetBox.Text.Trim();if(-not$N){$N='Мой пресет '+(Get-Date -Format 'HHmmss')};if($BuiltIn.Contains($N)){[Windows.MessageBox]::Show('Введите другое имя: встроенный пресет не перезаписывается.','DLSS5 Video Studio')|Out-Null;return};$script:UserPresets[$N]=Current-Settings;Save-Presets;Refresh-Presets $N})

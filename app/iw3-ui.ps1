@@ -1,6 +1,7 @@
 ﻿# Dot-sourced by studio.ps1 after the main WPF controls have been resolved.
 $script:Iw3Schema=Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $ScriptDirectory 'iw3-settings.json')|ConvertFrom-Json
 $script:Iw3Controls=@{}
+$script:Iw3HelpBlocks=@{}
 $script:Iw3Da3Catalog=Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $ScriptDirectory 'iw3-da3-models.json')|ConvertFrom-Json
 $script:Iw3Store=Join-Path $Root 'settings/iw3.json'
 $script:Iw3Group=[Windows.Controls.GroupBox]::new()
@@ -92,7 +93,7 @@ foreach($Field in $Iw3Schema.fields){
     switch($Field.type){
         'choice' {
             $Control=[Windows.Controls.ComboBox]::new()
-            foreach($Option in $Field.options){$Item=[Windows.Controls.ComboBoxItem]::new();$Item.Content=$Option.label;$Item.Tag=[string]$Option.value;[void]$Control.Items.Add($Item)}
+            foreach($Option in $Field.options){$Item=[Windows.Controls.ComboBoxItem]::new();$Item.Content=$Option.label;$Item.Tag=[string]$Option.value;if($Option.help){$Item.ToolTip=[string]$Option.help};[void]$Control.Items.Add($Item)}
             $Control.Add_SelectionChanged({Update-Iw3Ui})
         }
         'bool' {$Control=[Windows.Controls.CheckBox]::new();$Control.Content=$Field.label}
@@ -114,7 +115,11 @@ foreach($Field in $Iw3Schema.fields){
     if($Field.key -eq 'depth_model'){$Help.Text='DA3: выберите модель и установите кнопкой ниже. Параметры depth и стабильности — в одноимённом разделе.'}
     $Help.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#BACCE2')
     [void]$Stack.Children.Add($Help)
+    $Iw3HelpBlocks[$Field.key]=$Help
 }
+$Iw3Controls['method'].Add_SelectionChanged({
+    if($Iw3HelpBlocks.ContainsKey('method') -and $ContextHelpText){$ContextHelpText.Text=$Iw3HelpBlocks['method'].Text}
+})
 $Parent=$VrGroup.Parent
 $Index=$Parent.Children.IndexOf($VrGroup)
 $Parent.Children.Insert($Index+1,$Iw3Group)
@@ -202,6 +207,12 @@ function Update-Iw3Ui {
         $NeuralGroup.Header='DLSS 5 · НАСТРОЙКИ ДОПОЛНИТЕЛЬНОГО ПРОХОДА ПЕРЕД IW3'
     }
     $Method=Combo-Tag $Iw3Controls['method']
+    $MethodField=@($Iw3Schema.fields|Where-Object key -eq 'method')|Select-Object -First 1
+    $MethodOption=@($MethodField.options|Where-Object value -eq $Method)|Select-Object -First 1
+    if($Iw3HelpBlocks.ContainsKey('method') -and $MethodOption -and $MethodOption.help){
+        $Iw3HelpBlocks['method'].Text=$MethodField.help+"`n`nВЫБРАНО: "+$MethodOption.help
+        $Iw3Controls['method'].ToolTip=$Iw3HelpBlocks['method'].Text
+    }
     foreach($Key in @('mask_inner_dilation','mask_outer_dilation','inpaint_max_width')){if($Iw3Controls.ContainsKey($Key)){$Iw3Controls[$Key].IsEnabled=$Method.EndsWith('inpaint')}}
     if($Iw3Controls.ContainsKey('warp_steps')){$Iw3Controls['warp_steps'].IsEnabled=$Method.StartsWith('row_flow')}
     $ModelId=Combo-Tag $Iw3Controls['depth_model']
