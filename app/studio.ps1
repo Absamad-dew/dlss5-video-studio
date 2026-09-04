@@ -95,7 +95,7 @@ $Xaml = @'
             <TabItem Header="▶  REALTIME" Tag="Realtime"><Border Background="#0D1822" Padding="14"><StackPanel><TextBlock Text="Живой GPU-вывод" FontSize="18" FontWeight="SemiBold" Foreground="#61D9FF"/><TextBlock Text="Буфер, перемотка, полноэкранный плеер, DLSS-G и отдельные настройки задержки." Foreground="#93A8C2" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
             <TabItem Header="●  ЗАПИСЬ" Tag="Recording"><Border Background="#14170F" Padding="14"><StackPanel><TextBlock Text="Файл H.264 / H.265" FontSize="18" FontWeight="SemiBold" Foreground="#B7E36E"/><TextBlock Text="Локальное видео или ссылка; детальные motion/depth-параметры и автоматическое имя результата." Foreground="#A8B696" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
             <TabItem Header="◉  VR / 3D" Tag="VR"><Border Background="#151224" Padding="14"><StackPanel><TextBlock Text="Отдельный VR-конвейер" FontSize="18" FontWeight="SemiBold" Foreground="#B59CFF"/><TextBlock Text="SBS/Over-Under, GAPW-геометрия, Temporal Atlas из соседних кадров, локальная AI-дорисовка и DLSS5." Foreground="#AEA3CE" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
-            <TabItem Header="◈  IW3 / VR" Tag="IW3"><Border Background="#102322" Padding="14"><StackPanel><TextBlock Text="Оригинальный движок iw3" FontSize="18" FontWeight="SemiBold" Foreground="#75DFC3"/><TextBlock Text="RowFlow / MLBW, оригинальная глубина и Video Inpaint. Наши дополнения — только по выбору." Foreground="#A7CDC2" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
+            <TabItem Header="◈  IW3 / VR" Tag="IW3"><Border Background="#102322" Padding="14"><StackPanel><TextBlock Text="iw3 + современные модели DA3" FontSize="18" FontWeight="SemiBold" Foreground="#75DFC3"/><TextBlock Text="Оригинальные RowFlow / MLBW / Video Inpaint; выбор depth от Small до Giant 1.1. DLSS 5 — дополнительно." Foreground="#A7CDC2" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
           </TabControl>
 
           <GroupBox x:Name="QuickGroup" Header="БЫСТРЫЙ ЗАПУСК">
@@ -1272,6 +1272,9 @@ $Timer = New-Object Windows.Threading.DispatcherTimer
 $Timer.Interval = [TimeSpan]::FromMilliseconds(100)
 $Timer.Add_Tick({
     try {
+        if($script:Iw3Da3InstallProcess -and (-not $script:Iw3Da3PollAt -or ((Get-Date)-$script:Iw3Da3PollAt).TotalSeconds -ge 1)){
+            $script:Iw3Da3PollAt=Get-Date;Update-Iw3Da3Install
+        }
         if($script:Iw3InstallProcess -and $script:Iw3InstallProcess.HasExited){
             $InstallCode=$script:Iw3InstallProcess.ExitCode
             $script:Iw3InstallProcess.Dispose();$script:Iw3InstallProcess=$null
@@ -1432,6 +1435,7 @@ $RunButton.Add_Click({
     try {
         if ($script:Process) { throw 'Обработка уже выполняется.' }
         if($script:Iw3InstallProcess -and -not $script:Iw3InstallProcess.HasExited){throw 'Дождитесь завершения установки iw3. Журнал: temp/iw3-install.log'}
+        if($script:Iw3Da3InstallProcess -and -not $script:Iw3Da3InstallProcess.HasExited){throw 'Дождитесь завершения установки DA3. Прогресс — во вкладке iw3.'}
         $WorkspaceMode=Get-WorkspaceMode
         $Realtime = $WorkspaceMode -eq 'Realtime'
         $DepthStatus = Get-DepthModelStatus -Root $Root -Profile (Combo-Tag $DepthModelCombo)

@@ -1,5 +1,9 @@
 # IW3 / VR — отдельный режим в Studio 22.1
 
+Обновление 22.2: семейство DA3 расширено до пяти вариантов, включая исправленные
+Large/Giant 1.1. Установка DA3 теперь отдельная, до запуска обработки;
+см. [актуальные настройки и ограничения](IW3_DA3_V22_2_RU.md).
+
 Четвёртая вкладка **IW3 / VR** запускает оригинальный движок
 [nagadomi/nunif](https://github.com/nagadomi/nunif/tree/d23721f1b5f0a4c92c3ee1be013180bf298730c5/iw3),
 а не похожий фильтр Studio. Закреплён commit
@@ -85,7 +89,7 @@ GAPW, Temporal Atlas, MI-GAN, Moebius, comfort-коррекции Studio зде�
 `INSTALL_IW3.cmd` устанавливает проверенный исходный код, лёгкие стереомодели и
 изолированные PyAV 15.0.0 / diskcache 5.6.3. Рабочие PyTorch/CUDA не обновляются.
 Компоненты живут в `third_party/nunif`, `models/iw3`, `tools/iw3`.
-Большинство отсутствующих моделей глубины и их upstream-код загружаются самим iw3
+Большинство отсутствующих моделей глубины (кроме DA3) и их upstream-код загружаются самим iw3
 при первом применении. Исключение: DA V2 Base/Large — оригинальный iw3 требует
 скачать веса CC-BY-NC-4.0 вручную с Hugging Face `depth-anything` и поместить
 `depth_anything_v2_vitb.pth` / `depth_anything_v2_vitl.pth` в

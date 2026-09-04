@@ -186,6 +186,13 @@ def main(args):
     if args.codec == 'H264' and s['pix_fmt'] != 'yuv420p':
         raise ValueError('10-bit iw3 output requires H.265.')
     configure_imports(root)
+    from iw3_da3 import is_da3, require_ready, create_provider
+    from iw3_da3_install import get_model
+    da3_selected = is_da3(root, s['depth_model'])
+    if da3_selected:
+        require_ready(root, s['depth_model'])
+        if s['depth_model'].startswith('Studio_DA3') and s['depth_aa']:
+            raise ValueError('DepthAA iw3 is trained for DA3 Mono, not DA3 Main. Disable Depth Anti-aliasing.')
     manual_depth = {'Any_V2_B':'depth_anything_v2_vitb.pth','Any_V2_L':'depth_anything_v2_vitl.pth'}
     if s['depth_model'] in manual_depth:
         checkpoint = root / 'models/iw3/pretrained_models/hub/checkpoints' / manual_depth[s['depth_model']]
@@ -310,13 +317,22 @@ def main(args):
             print('IW3_WARNING Strong disparity exceeds the inpaint model training range; '
                   'settings are preserved, but edge artifacts may increase.', flush=True)
         emit('IW3_ENGINE', {'commit': COMMIT, 'method': s['method'], 'depth_model': s['depth_model'],
+                           'da3_checkpoint': get_model(root,s['depth_model']) if da3_selected else None,
                            'extras': {'dlss5': s['dlss_mode'], 'target_fps': s['target_fps']}})
-        native = utils.create_parser().parse_args(cli)
-        utils.set_state_args(native, tqdm_fn=Progress)
+        parser = utils.create_parser()
+        if da3_selected:
+            # Extend only the accepted depth name; use iw3's public provider hook.
+            action = next(a for a in parser._actions if a.dest == 'depth_model')
+            action.choices = list(action.choices) + [s['depth_model']]
+        native = parser.parse_args(cli)
+        provider = create_provider(root, s) if da3_selected else None
+        utils.set_state_args(native, tqdm_fn=Progress, depth_model=provider)
+        torch.cuda.reset_peak_memory_stats()
         engine_started = time.monotonic()
         utils.iw3_main(native)
         engine_seconds = time.monotonic() - engine_started
-        del native
+        peak_vram_mb = torch.cuda.max_memory_allocated()/1024**2
+        del native, provider
         # Original queues/models are not kept alive during optional interpolation.
         import gc
         gc.collect()
@@ -362,8 +378,10 @@ def main(args):
                   'frames': int(final_stream['nb_read_frames']),
                   'output_geometry': [final_stream['width'], final_stream['height']],
                   'container_geometry': [final_stream['width'], final_stream['height']],
-                  'pipeline_label': 'iw3 original' + (' + DLSS5' if s['dlss_mode'] != 'Off' else ''),
+                  'pipeline_label': 'iw3' + (' + '+s['depth_model'] if da3_selected else ' original') + (' + DLSS5' if s['dlss_mode'] != 'Off' else ''),
                   'iw3_commit': COMMIT, 'iw3_settings': s, 'iw3_seconds': engine_seconds,
+                  'iw3_peak_allocated_vram_mb': peak_vram_mb,
+                  'da3_checkpoint': get_model(root,s['depth_model']) if da3_selected else None,
                   'iw3_fps': frame_count / engine_seconds, 'elapsed_seconds': time.monotonic()-begin,
                   'end_to_end_fps': frame_count/(time.monotonic()-begin),
                   'dlss5_fps': dlss_report.get('dlss5_fps', 0) if dlss_report else 0,

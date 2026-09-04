@@ -64,6 +64,19 @@ some larger models prohibit commercial use. This is not a blanket model license.
 PyAV 15.0.0 (BSD-3-Clause, linked FFmpeg has additional terms) and diskcache 5.6.3
 (Apache-2.0) are installed in an isolated directory with their package metadata.
 
+# DA3 extension for iw3 (Studio 22.2)
+
+Official DA3 source is pinned to `3d835ec1a5802d64a8b8b15f817a1ab54809bfe4`:
+https://github.com/ByteDance-Seed/Depth-Anything-3 . Mono uses the iw3 author's
+fork pinned to `1087894cb489ed7b299a197610a6a9c781ef266c`:
+https://github.com/nagadomi/Depth-Anything-3_iw3 . Original source/license files
+are retained; the separate Studio adapter does not modify upstream files.
+Mono/Small/Base weights are Apache-2.0; Large 1.1/Giant 1.1 are CC-BY-NC-4.0.
+Model cards remain beside the downloaded checkpoints. Weights are not included
+in Git. See `app/iw3-da3-models.json` for exact repositories, revisions and SHA-256.
+The lightweight depth-only adapter omits unused camera/GS branches; it is not
+the official DA3 Streaming or a 3D Gaussian renderer.
+
 # OpenCLIP
 
 M2SVid conditioning uses the LAION OpenCLIP ViT-H-14 checkpoint through OpenCLIP.

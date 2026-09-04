@@ -27,6 +27,19 @@ Assert ($NeuralGroup.IsEnabled) 'Optional iw3 DLSS controls not enabled'
 $Saved=Get-Iw3Settings
 Assert ($Saved.divergence -eq 0 -and -not $Saved.scene_detect) 'Zero/false settings lost'
 Assert ($Iw3Controls['mask_outer_dilation'].IsEnabled) 'Inpaint mask controls inaccessible'
+foreach($Model in $Iw3Da3Catalog.models){
+    Set-Iw3Settings @{depth_model=$Model.id}
+    Update-Iw3Ui
+    Assert ((Get-Iw3Settings).depth_model -eq $Model.id) ('DA3 selection lost: '+$Model.id)
+    Assert ($Iw3Da3InstallButton.IsEnabled) ('DA3 installer inaccessible: '+$Model.id)
+    Assert ($Iw3Controls['da3_microbatch'].IsEnabled) 'DA3 microbatch inaccessible'
+    Assert ($Iw3Controls['da3_sky_strength'].IsEnabled -eq ($Model.id -eq 'Any_V3_Mono')) 'Sky mask exposed for unsupported DA3'
+    Assert ($Iw3Controls['depth_aa'].IsEnabled -eq ($Model.id -eq 'Any_V3_Mono')) 'Untrained DepthAA exposed for DA3 Main'
+    Assert ($Iw3Da3Status.Text.Contains($Model.name)) 'DA3 model details missing'
+}
+Set-Iw3Settings @{depth_model='Any_V2_S'};Update-Iw3Ui
+Assert (-not $Iw3Controls['da3_microbatch'].IsEnabled) 'DA3 controls enabled for V2'
+Assert (-not $Iw3Da3InstallButton.IsEnabled) 'DA3 installer enabled for non-DA3'
 if($ScreenshotPath){
     $Visual=$Window.Content
     $Visual.Measure([Windows.Size]::new(1500,1000));$Visual.Arrange([Windows.Rect]::new(0,0,1500,1000));$Visual.UpdateLayout()

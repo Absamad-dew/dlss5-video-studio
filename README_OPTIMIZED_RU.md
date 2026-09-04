@@ -1,4 +1,8 @@
-# DLSS5 Video Studio 22.1 · IW3 / Realtime / Recording / VR
+# DLSS5 Video Studio 22.2 · IW3 / Realtime / Recording / VR
+
+В IW3 добавлены **DA3 Mono Large / Small / Base / Large 1.1 / Giant 1.1**:
+отдельные настоящие веса, установка выбранной модели из интерфейса, статус/прогресс,
+microbatch, тонкая настройка depth и неба Mono. См. `IW3_DA3_V22_2_RU.md`.
 
 Новая отдельная вкладка **IW3 / VR**: оригинальный iw3 (RowFlow, MLBW, Video Inpaint),
 его собственные настройки глубины и стерео. DLSS5 включается дополнительно;

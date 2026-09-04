@@ -177,16 +177,29 @@ Copy-Item -LiteralPath (Join-Path $Build 'python\moebius_worker.py') -Destinatio
 Copy-Item -LiteralPath (Join-Path $Build 'python\temporal_atlas_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\install_depth_models.py') -Destination (Join-Path $Target 'tools') -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $Target 'tools/iw3')|Out-Null
-foreach($Name in @('iw3_worker.py','install_iw3.py','iw3-lock.json')){
+foreach($Name in @('iw3_worker.py','install_iw3.py','iw3-lock.json','iw3_da3.py','iw3_da3_install.py')){
     Copy-Item -LiteralPath (Join-Path $Build "python/$Name") -Destination (Join-Path $Target "tools/iw3/$Name") -Force
 }
-foreach($Name in @('iw3-ui.ps1','process-iw3.ps1','iw3-settings.json')){
+foreach($Name in @('iw3-ui.ps1','process-iw3.ps1','iw3-settings.json','iw3-da3-models.json')){
     Copy-Item -LiteralPath (Join-Path $Build "app/$Name") -Destination (Join-Path $Target "app/$Name") -Force
 }
 Copy-Item -LiteralPath (Join-Path $Build 'scripts/Install-Iw3.ps1') -Destination (Join-Path $Target 'scripts') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'scripts/Install-Iw3Da3.ps1') -Destination (Join-Path $Target 'scripts') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_IW3.cmd') -Destination $Target -Force
 if($MainModelSource){
-    foreach($Relative in @('third_party/nunif','models/iw3','licenses/iw3')){
+    # Keep the DA3 readiness metadata and actual installed Main checkpoints together.
+    $Da3Catalog=Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $Build 'app/iw3-da3-models.json')|ConvertFrom-Json
+    foreach($Da3Model in $Da3Catalog.models){
+        if(-not $Da3Model.path.StartsWith('models/depth/')){continue}
+        $Da3Source=Join-Path $MainModelSource $Da3Model.path
+        if(Test-Path -LiteralPath $Da3Source -PathType Leaf){
+            $Da3Destination=Split-Path -Parent (Join-Path $Target $Da3Model.path)
+            New-Item -ItemType Directory -Force -Path $Da3Destination|Out-Null
+            Copy-Item -LiteralPath $Da3Source -Destination $Da3Destination -Force
+            Get-ChildItem -LiteralPath (Split-Path -Parent $Da3Source) -Filter '*MODEL_CARD.md' -File | Copy-Item -Destination $Da3Destination -Force
+        }
+    }
+    foreach($Relative in @('third_party/nunif','third_party/iw3-da3','third_party/iw3-da3-mono','models/iw3','licenses/iw3')){
         if($Relative-eq'models/iw3'){
             $Source=Join-Path $MainModelSource $Relative
             if(Test-Path -LiteralPath $Source){
@@ -221,6 +234,7 @@ Copy-Item -LiteralPath (Join-Path $Build 'README_OPTIMIZED_RU.md') -Destination 
 Copy-Item -LiteralPath (Join-Path $Build 'OPTIMIZATION_V22_RU.md'),(Join-Path $Build 'THIRD_PARTY_NOTICES.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'REALTIME_DEPTH_FIX_V22_0_1_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'IW3_VR_V22_1_RU.md') -Destination $Target -Force
+Copy-Item -LiteralPath (Join-Path $Build 'IW3_DA3_V22_2_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'VR_RESEARCH_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'VERSION_OPTIMIZED.txt') -Destination (Join-Path $Target 'VERSION.txt') -Force
 

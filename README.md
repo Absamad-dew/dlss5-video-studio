@@ -1,4 +1,9 @@
-# DLSS5 Video Studio 22.1
+# DLSS5 Video Studio 22.2
+
+22.2 adds **DA3 Mono Large / Small / Base / Large 1.1 / Giant 1.1** to IW3 / VR.
+Real, distinct pinned checkpoints; per-model install/status, independent depth
+microbatch, foreground depth mapping and Mono sky control. Stereo/inpaint remains
+original iw3. See [DA3 settings, installation and limitations](IW3_DA3_V22_2_RU.md).
 
 22.1 adds a separate **IW3 / VR** workspace using the unmodified, pinned upstream
 iw3 engine: RowFlow/MLBW, original depth processing and 12-frame Video Inpaint.

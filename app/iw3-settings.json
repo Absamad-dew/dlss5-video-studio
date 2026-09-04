@@ -71,7 +71,23 @@
         },
         {
           "value": "Any_V3_Mono",
-          "label": "DA3 Mono · отдельная модель ~1.3 ГБ"
+          "label": "DA3 Mono Large · кино / небо · 1.34 ГБ"
+        },
+        {
+          "value": "Studio_DA3_Small",
+          "label": "DA3 Small · Studio → iw3 · 137 МБ"
+        },
+        {
+          "value": "Studio_DA3_Base",
+          "label": "DA3 Base · Studio → iw3 · 542 МБ"
+        },
+        {
+          "value": "Studio_DA3_Large_11",
+          "label": "DA3 Large 1.1 · качество · 1.64 ГБ · NC"
+        },
+        {
+          "value": "Studio_DA3_Giant_11",
+          "label": "DA3 Giant 1.1 · максимальная модель · 5.42 ГБ · NC"
         },
         {
           "value": "Any_S",
@@ -86,8 +102,26 @@
           "label": "ZoeDepth / Any NYU · исходный CLI default"
         }
       ],
-      "help": "Собственный depth-конвейер iw3. Small/VDA/DA3 Mono загружаются при первом запуске. Для DA V2 Base/Large оригинальный iw3 требует вручную положить depth_anything_v2_vitb.pth / depth_anything_v2_vitl.pth в models/iw3/pretrained_models/hub/checkpoints (CC-BY-NC-4.0).",
+      "help": "DA3 устанавливается кнопкой выше; до начала обработки проверяется готовность. Mono — исходная модель iw3; Small/Base/Large 1.1/Giant 1.1 — наш провайдер официальных DA3 к стереоконвейеру iw3. Это покадровая глубина + EMA, не DA3 Streaming/3DGS. Для видео сравните Mono и Large 1.1. NC = только некоммерческое использование. DA V2 Base/Large по-прежнему требуют ручной установки весов.",
       "group": "Глубина и стабильность"
+    },
+    {
+      "key":"da3_microbatch", "label":"DA3: кадров за один inference", "type":"number",
+      "default":1,"min":1,"max":4,"step":1,
+      "help":"Независимо от общего Batch Size iw3. 1 — минимум VRAM; 2–4 иногда быстрее. Кадры не пропускаются и RGB не уменьшается. Low VRAM принудительно использует 1. Это не число кадров временного анализа.",
+      "group":"Глубина и стабильность"
+    },
+    {
+      "key":"da3_depth_shift", "label":"DA3: мягкость переднего плана", "type":"number",
+      "default":0.2,"min":0,"max":2,"step":0.05,
+      "help":"Преобразование расстояния в disparity: 1/(depth + shift). 0.2 — исходное значение iw3 Mono; больше смягчает влияние близких объектов. Не заменяет общую силу 3D / Divergence.",
+      "group":"Глубина и стабильность"
+    },
+    {
+      "key":"da3_sky_strength", "label":"DA3 Mono: небо на дальнем плане", "type":"number",
+      "default":1,"min":0,"max":1,"step":0.05,
+      "help":"1 — исходная обработка неба iw3 Mono. Уменьшите, если модель ошибочно считает часть сцены небом. У Main Small/Base/Large/Giant нет этой маски; настройка там недоступна.",
+      "group":"Глубина и стабильность"
     },
     {
       "key": "divergence",
@@ -215,7 +249,7 @@
       "min": 0,
       "max": 1536,
       "step": 14,
-      "help": "Короткая сторона входа depth-модели, не разрешение готового видео. 392/518 — быстрые варианты; 756 и выше дороже.",
+      "help": "Короткая сторона входа depth, не разрешение готового видео. DA3 auto = 518; остальные — исходный auto iw3. 518 — старт для 2–4K; 756/1036 позволяют исследовать мелкие границы, но намного дороже и не всегда лучше. RGB 2–4K сохраняется независимо.",
       "group": "Глубина и стабильность"
     },
     {
