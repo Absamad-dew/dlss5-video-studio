@@ -24,12 +24,13 @@ $MoebiusDiffusers = Join-Path $Root 'models\vr\moebius\site-packages\diffusers\_
 $TemporalAtlasWorker = Join-Path $Root 'tools\vr_generative\temporal_atlas_worker.py'
 $MiganModel = Join-Path $Root 'models\vr\migan\migan_pipeline_v2.onnx'
 $RaftWeights = Join-Path $Root 'models\motion\raft_small_C_T_V2-01064c6d.pth'
+$script:RowFlowReady = (Test-Path -LiteralPath (Join-Path $Root 'third_party\nunif\iw3\backward_warp.py') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $Root 'models\iw3\pretrained_models\hub\checkpoints\iw3_row_flow_v3_20250627.pth') -PathType Leaf)
 $Invariant = [Globalization.CultureInfo]::InvariantCulture
 
 $Xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DLSS5 Video Studio 22.2.3 · понятные настройки" Width="1500" Height="960"
+        Title="DLSS5 Video Studio 22.3.0 · единая depth-карта + RowFlow V3" Width="1500" Height="960"
         MinWidth="1120" MinHeight="720" WindowStartupLocation="CenterScreen"
         Background="#090D14" Foreground="#DCE7F5" FontFamily="Segoe UI">
   <Window.Resources>
@@ -97,7 +98,7 @@ $Xaml = @'
           <TabControl x:Name="WorkspaceTabs" Height="112" Margin="0,0,0,12" Background="#0A1019" BorderBrush="#334B6D">
             <TabItem Header="▶  REALTIME" Tag="Realtime"><Border Background="#0D1822" Padding="14"><StackPanel><TextBlock Text="Живой GPU-вывод" FontSize="18" FontWeight="SemiBold" Foreground="#61D9FF"/><TextBlock Text="Буфер, перемотка, полноэкранный плеер, DLSS-G и отдельные настройки задержки." Foreground="#93A8C2" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
             <TabItem Header="●  ЗАПИСЬ" Tag="Recording"><Border Background="#14170F" Padding="14"><StackPanel><TextBlock Text="Файл H.264 / H.265" FontSize="18" FontWeight="SemiBold" Foreground="#B7E36E"/><TextBlock Text="Локальное видео или ссылка; детальные motion/depth-параметры и автоматическое имя результата." Foreground="#A8B696" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
-            <TabItem Header="◉  VR / 3D" Tag="VR"><Border Background="#151224" Padding="14"><StackPanel><TextBlock Text="Отдельный VR-конвейер" FontSize="18" FontWeight="SemiBold" Foreground="#B59CFF"/><TextBlock Text="SBS/Over-Under, GAPW-геометрия, Temporal Atlas из соседних кадров, локальная AI-дорисовка и DLSS5." Foreground="#AEA3CE" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
+            <TabItem Header="◉  VR / 3D" Tag="VR"><Border Background="#151224" Padding="14"><StackPanel><TextBlock Text="Отдельный VR-конвейер" FontSize="18" FontWeight="SemiBold" Foreground="#B59CFF"/><TextBlock Text="SBS/Over-Under, RowFlow V3 или GAPW, единая depth-карта, Temporal Atlas и DLSS5." Foreground="#AEA3CE" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
             <TabItem Header="◈  IW3 / VR" Tag="IW3"><Border Background="#102322" Padding="14"><StackPanel><TextBlock Text="iw3 + современные модели DA3" FontSize="18" FontWeight="SemiBold" Foreground="#75DFC3"/><TextBlock Text="Оригинальные RowFlow / MLBW / Video Inpaint; выбор depth от Small до Giant 1.1. DLSS 5 — дополнительно." Foreground="#A7CDC2" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border></TabItem>
           </TabControl>
 
@@ -144,10 +145,14 @@ $Xaml = @'
                 <Border BorderBrush="#3A315B" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,7,0,0"><StackPanel>
                   <TextBlock Style="{StaticResource FineHelp}" Text="Стереорендер отвечает за геометрию второго ракурса, стабилизация — за поведение глубины во времени, а параллакс — за силу воспринимаемого объёма. Меняйте по одному параметру и проверяйте короткий фрагмент с волосами, руками, тонкими предметами и движением камеры."/>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
-                    <StackPanel><TextBlock Text="Метод стереорендера"/><ComboBox x:Name="VRStereoMethodCombo"><ComboBoxItem Content="GAPW · качество / Atlas" Tag="GAPW" ToolTip="Лучший выбор для качества: корректная видимость слоёв, обратная выборка RGB и точная маска раскрытого фона. Обязателен для Temporal Atlas."/><ComboBoxItem Content="Temporal LDI · слои + fill" Tag="TemporalLDI" ToolTip="Многослойная проекция с дальней фоновой пластиной и temporal-fill. База для Moebius/M2SVid; тяжелее и чувствительнее к ошибкам depth."/><ComboBoxItem Content="Layered z-splat · баланс" Tag="Layered" ToolTip="Быстрый многослойный forward-splat с z-buffer и пространственным заполнением. Хороший компромисс без генеративного восстановления."/><ComboBoxItem Content="Inverse warp · максимум FPS" Tag="Inverse" ToolTip="Самый быстрый и экономный вариант. Не моделирует видимость нескольких слоёв, поэтому хуже на силуэтах и раскрытых областях."/></ComboBox></StackPanel>
+                    <StackPanel><TextBlock Text="Метод стереорендера"/><ComboBox x:Name="VRStereoMethodCombo"><ComboBoxItem Content="RowFlow V3 · нейроварп / Atlas" Tag="RowFlowV3" ToolTip="Компактная нейросеть iw3 предсказывает поле горизонтального варпа из общей depth-карты. RGB остаётся в полном 2K/4K; с Atlas геометрическая маска строится из той же depth без второго inference."/><ComboBoxItem Content="GAPW · чистая геометрия / Atlas" Tag="GAPW" ToolTip="Корректная видимость слоёв, обратная выборка RGB и точная маска раскрытого фона. Не требует модели RowFlow."/><ComboBoxItem Content="Temporal LDI · слои + fill" Tag="TemporalLDI" ToolTip="Многослойная проекция с дальней фоновой пластиной и temporal-fill. База для Moebius/M2SVid; тяжелее и чувствительнее к ошибкам depth."/><ComboBoxItem Content="Layered z-splat · баланс" Tag="Layered" ToolTip="Быстрый многослойный forward-splat с z-buffer и пространственным заполнением. Хороший компромисс без генеративного восстановления."/><ComboBoxItem Content="Inverse warp · максимум FPS" Tag="Inverse" ToolTip="Самый быстрый и экономный вариант. Не моделирует видимость нескольких слоёв, поэтому хуже на силуэтах и раскрытых областях."/></ComboBox></StackPanel>
                     <StackPanel Grid.Column="2"><TextBlock Text="Стабилизация depth"/><ComboBox x:Name="VRTemporalModeCombo"><ComboBoxItem Content="Motion-compensated · рекомендуется" Tag="Motion"/><ComboBoxItem Content="EMA · проще" Tag="EMA"/><ComboBoxItem Content="Выключена" Tag="Off"/></ComboBox></StackPanel>
                   </Grid>
                   <Border Background="#121C2A" BorderBrush="#48658A" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,1,0,10"><StackPanel><TextBlock Text="КАК ВЫБРАТЬ МЕТОД СТЕРЕО" Foreground="#8FD6FF" FontWeight="SemiBold"/><TextBlock x:Name="VRStereoMethodInfo" Foreground="#B7C9DE" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border>
+                  <Grid x:Name="VRRowFlowPanel"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                    <StackPanel><TextBlock Text="Внутренняя ширина RowFlow"/><ComboBox x:Name="VRRowFlowWidthCombo"><ComboBoxItem Content="Авто по профилю" Tag="Auto"/><ComboBoxItem Content="512 · максимум скорости" Tag="512"/><ComboBoxItem Content="768 · быстро" Tag="768"/><ComboBoxItem Content="1024 · баланс" Tag="1024"/><ComboBoxItem Content="1536 · качество 4K" Tag="1536"/><ComboBoxItem Content="Native · максимум / тяжело" Tag="Native"/></ComboBox><TextBlock Text="Dilation depth X / Y (как в iw3)" Foreground="#9AABC1"/><Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="8"/><ColumnDefinition/></Grid.ColumnDefinitions><ComboBox x:Name="VRRowFlowEdgeXCombo"><ComboBoxItem Content="X 0" Tag="0"/><ComboBoxItem Content="X 1" Tag="1"/><ComboBoxItem Content="X 2 · рек." Tag="2"/><ComboBoxItem Content="X 3" Tag="3"/><ComboBoxItem Content="X 4" Tag="4"/></ComboBox><ComboBox x:Name="VRRowFlowEdgeYCombo" Grid.Column="2"><ComboBoxItem Content="Y 0" Tag="0"/><ComboBoxItem Content="Y 1 · рек." Tag="1"/><ComboBoxItem Content="Y 2" Tag="2"/><ComboBoxItem Content="Y 3" Tag="3"/><ComboBoxItem Content="Y 4" Tag="4"/></ComboBox></Grid></StackPanel>
+                    <StackPanel Grid.Column="2"><TextBlock Text="Шаги RowFlow V3"/><ComboBox x:Name="VRRowFlowStepsCombo"><ComboBoxItem Content="Авто по силе 3D" Tag="0"/><ComboBoxItem Content="1 · быстро, до 5%" Tag="1"/><ComboBoxItem Content="2 · сильный параллакс" Tag="2"/><ComboBoxItem Content="3 · очень сильный" Tag="3"/><ComboBoxItem Content="4 · экстремальный" Tag="4"/></ComboBox><CheckBox x:Name="VRRowFlowBorderCheck" Content="Сохранять границу экрана" IsChecked="True" ToolTip="Плавно сводит параллакс к нулю у левого и правого края, уменьшая обрезанные объекты в шлеме."/><TextBlock Style="{StaticResource FineHelp}" Text="Уже включено из IW3: обученный диапазон V3, auto-steps, edge dilation и screen-border. Вместо его обычной EMA используются motion-компенсация, scene reset и устойчивый диапазон Studio; foreground/background настраиваются отдельно."/></StackPanel>
+                  </Grid>
                   <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions>
                     <StackPanel><TextBlock Text="Опорный глаз"/><ComboBox x:Name="VREyeAnchorCombo"><ComboBoxItem Content="Симметрично · объём" Tag="Symmetric"/><ComboBoxItem Content="Левый исходный · чище/быстрее" Tag="Left"/><ComboBoxItem Content="Правый исходный · чище/быстрее" Tag="Right"/></ComboBox></StackPanel>
                     <StackPanel Grid.Column="2"><TextBlock Text="Совместимость файла"/><ComboBox x:Name="VRPixelFormatCombo"><ComboBoxItem Content="8-bit 4:2:0 · все шлемы" Tag="Compatible8Bit"/><ComboBoxItem Content="10-bit HEVC · меньше полос" Tag="HEVC10Bit"/></ComboBox></StackPanel>
@@ -375,7 +380,7 @@ $AdditionalNames = @(
     'RecordMotionPresetCombo','RecordMotionBackendCombo','RecordRaftSlider','RecordRaftValue','RecordChunkSlider','RecordChunkValue',
     'VRDepthGammaSlider','VRDepthGammaValue','VROcclusionSlider','VROcclusionValue','VREdgeSlider','VREdgeValue',
     'VRTemporalSlider','VRTemporalValue','VREyeSwapCheck','VRStereoMethodCombo','VRTemporalModeCombo','VRDLSSModeCombo','VRQualityPresetCombo',
-    'VRStereoMethodInfo','VRFineStereoExpander',
+    'VRStereoMethodInfo','VRFineStereoExpander','VRRowFlowPanel','VRRowFlowWidthCombo','VRRowFlowStepsCombo','VRRowFlowEdgeXCombo','VRRowFlowEdgeYCombo','VRRowFlowBorderCheck',
     'VREyeAnchorCombo','VRPixelFormatCombo','VRForegroundSlider','VRForegroundValue',
     'VRBackgroundSlider','VRBackgroundValue','VRZBufferSlider','VRZBufferValue','VRHoleFillSlider','VRHoleFillValue',
     'VRConvergenceModeCombo','VRDisparityCurveCombo','VRLDILayersSlider','VRLDILayersValue',
@@ -603,12 +608,12 @@ function Apply-VrProfile {
                 $VREyeSlider.Value=0.85;$VRConvergenceSlider.Value=0.50;$VRDepthGammaSlider.Value=1.0;$VRForegroundSlider.Value=0.90;$VRBackgroundSlider.Value=0.65;$VRZBufferSlider.Value=4.0;$VROcclusionSlider.Value=0.65;$VRHoleFillSlider.Value=8;$VRLDILayersSlider.Value=4;$VRBackgroundExpansionSlider.Value=10;$VRTemporalFillSlider.Value=0.55;$VRTemporalConfidenceSlider.Value=0.45;$VREdgeProtectionSlider.Value=0.55;$VRDepthTrimSlider.Value=2.0;$VRComfortSlider.Value=0.60;$VRAdaptiveComfortSlider.Value=0.85;$VRMotionSafetySlider.Value=10;$VRSceneCutRampSlider.Value=8;$VRInpaintSharpenSlider.Value=0.20;$VRConvergenceSmoothingSlider.Value=0.86;$VRDepthRangeSmoothingSlider.Value=0.86;$VREdgeSlider.Value=2;$VRTemporalSlider.Value=0.48;$VRDisparitySlider.Value=1.8
             }
             'Maximum' {
-                Select-StringTag $DepthModelCombo 'DA3Large';Select-StringTag $VRStereoMethodCombo 'GAPW';Select-StringTag $VRDLSSModeCombo 'PreAndPerEye';Select-StringTag $VRDisparityCurveCombo 'Cinematic';Select-StringTag $VrLayoutCombo 'FullSBS'
+                Select-StringTag $DepthModelCombo 'DA3Large';Select-StringTag $VRStereoMethodCombo $(if($script:RowFlowReady){'RowFlowV3'}else{'GAPW'});Select-StringTag $VRDLSSModeCombo 'PreAndPerEye';Select-StringTag $VRDisparityCurveCombo 'Cinematic';Select-StringTag $VrLayoutCombo 'FullSBS';Select-StringTag $VRRowFlowWidthCombo 'Auto';Select-StringTag $VRRowFlowStepsCombo '0';$VRRowFlowBorderCheck.IsChecked=$true
                 Select-StringTag $VRGenerativeBackendCombo $(if($script:TemporalAtlasReady){'TemporalAtlas'}else{'Off'});Select-StringTag $VRGenerativeResolutionCombo 'Auto';$VRGenerativeChunkSlider.Value=12;$VRGenerativeOverlapSlider.Value=8;$VRGenerativeHoleSlider.Value=1.0;$VRGenerativeRefineSlider.Value=0.50
                 $VREyeSlider.Value=1.15;$VRConvergenceSlider.Value=0.48;$VRDepthGammaSlider.Value=1.05;$VRForegroundSlider.Value=1.15;$VRBackgroundSlider.Value=0.82;$VRZBufferSlider.Value=7.0;$VROcclusionSlider.Value=0.82;$VRHoleFillSlider.Value=24;$VRLDILayersSlider.Value=10;$VRBackgroundExpansionSlider.Value=32;$VRTemporalFillSlider.Value=0.88;$VRTemporalConfidenceSlider.Value=0.42;$VREdgeProtectionSlider.Value=0.92;$VRDepthTrimSlider.Value=1.0;$VRComfortSlider.Value=0.20;$VRAdaptiveComfortSlider.Value=0.55;$VRMotionSafetySlider.Value=18;$VRSceneCutRampSlider.Value=4;$VRInpaintSharpenSlider.Value=0.55;$VRConvergenceSmoothingSlider.Value=0.94;$VRDepthRangeSmoothingSlider.Value=0.94;$VREdgeSlider.Value=1;$VRTemporalSlider.Value=0.68;$VRDisparitySlider.Value=2.8
             }
             default {
-                Select-StringTag $DepthModelCombo 'VideoDepthSmall';Select-StringTag $VRStereoMethodCombo 'GAPW';Select-StringTag $VRDLSSModeCombo 'PreStereo';Select-StringTag $VRDisparityCurveCombo 'Cinematic';Select-StringTag $VrLayoutCombo 'FullSBS'
+                Select-StringTag $DepthModelCombo 'VideoDepthSmall';Select-StringTag $VRStereoMethodCombo $(if($script:RowFlowReady){'RowFlowV3'}else{'GAPW'});Select-StringTag $VRDLSSModeCombo 'PreStereo';Select-StringTag $VRDisparityCurveCombo 'Cinematic';Select-StringTag $VrLayoutCombo 'FullSBS';Select-StringTag $VRRowFlowWidthCombo 'Auto';Select-StringTag $VRRowFlowStepsCombo '0';$VRRowFlowBorderCheck.IsChecked=$true
                 Select-StringTag $VRGenerativeBackendCombo $(if($script:TemporalAtlasReady){'TemporalAtlas'}else{'Off'});Select-StringTag $VRGenerativeResolutionCombo 'Auto';$VRGenerativeChunkSlider.Value=8;$VRGenerativeOverlapSlider.Value=6;$VRGenerativeHoleSlider.Value=1.0;$VRGenerativeRefineSlider.Value=0.25
                 $VREyeSlider.Value=1.0;$VRConvergenceSlider.Value=0.48;$VRDepthGammaSlider.Value=1.0;$VRForegroundSlider.Value=1.0;$VRBackgroundSlider.Value=0.75;$VRZBufferSlider.Value=5.5;$VROcclusionSlider.Value=0.75;$VRHoleFillSlider.Value=16;$VRLDILayersSlider.Value=6;$VRBackgroundExpansionSlider.Value=20;$VRTemporalFillSlider.Value=0.75;$VRTemporalConfidenceSlider.Value=0.35;$VREdgeProtectionSlider.Value=0.75;$VRDepthTrimSlider.Value=1.5;$VRComfortSlider.Value=0.30;$VRAdaptiveComfortSlider.Value=0.70;$VRMotionSafetySlider.Value=14;$VRSceneCutRampSlider.Value=6;$VRInpaintSharpenSlider.Value=0.35;$VRConvergenceSmoothingSlider.Value=0.88;$VRDepthRangeSmoothingSlider.Value=0.90;$VREdgeSlider.Value=2;$VRTemporalSlider.Value=0.55;$VRDisparitySlider.Value=2.4
             }
@@ -781,6 +786,9 @@ function Update-VRStereoMethodInfo {
     if(-not $VRStereoMethodInfo -or -not $VRStereoMethodCombo.SelectedItem){return}
     $Method=Combo-Tag $VRStereoMethodCombo
     $Description=switch($Method){
+        'RowFlowV3' {
+            'НОВЫЙ ОСНОВНОЙ НЕЙРОВАРП. Официальная компактная RowFlow V3 из iw3 получает уже рассчитанную и стабилизированную depth-карту Studio и предсказывает гладкое горизонтальное поле смещения. Вторая depth-модель не запускается: DLSS5, RowFlow и Temporal Atlas используют один канонический кэш. RGB обрабатывается в полном 2K/4K, а «внутренняя ширина» относится только к лёгкой сетке варпа. С Atlas дополнительно строится цвет-независимая z-маска раскрытого фона из той же depth-карты.'
+        }
         'GAPW' {
             'РЕКОМЕНДАЦИЯ ДЛЯ КАЧЕСТВА. Сначала forward z-splat определяет, какой слой видим, но цвет восстанавливается обратной выборкой из исходного кадра. Поэтому меньше «летящих» пикселей и цветных обломков на волосах, плечах и тонких объектах. Создаёт точную маску реально раскрывшегося фона для Temporal Atlas. Без Atlas оставшиеся дыры заполняются только локальным фоновым seed. Нагрузка выше, чем у Layered и Inverse.'
         }
@@ -796,11 +804,11 @@ function Update-VRStereoMethodInfo {
     }
     $Backend=if($VRGenerativeBackendCombo.SelectedItem){Combo-Tag $VRGenerativeBackendCombo}else{'Off'}
     $Compatibility=if($Backend-eq'TemporalAtlas'){
-        'Сейчас выбран Temporal Atlas: программа автоматически удерживает GAPW, потому что Atlas требует его disocclusion-маски.'
+        'Temporal Atlas совместим с RowFlow V3 и GAPW. С RowFlow ракурсы строит нейросеть, а точную disocclusion-маску даёт дешёвый z-проход; повторного расчёта depth нет.'
     }elseif($Backend-ne'Off'){
         "Сейчас выбран $Backend`: программа автоматически удерживает Temporal LDI как совместимую основу этой модели."
     }else{
-        'Генеративное восстановление выключено: доступны все четыре метода. Для качества начните с GAPW, для скорости — с Inverse, для компромисса без AI — с Layered.'
+        'Генеративное восстановление выключено: доступны пять методов. Для гладкой нейрогеометрии начните с RowFlow V3, для детерминированной геометрии — с GAPW, для скорости — с Inverse.'
     }
     $VRStereoMethodInfo.Text=$Description+"`n`n"+$Compatibility
 }
@@ -813,14 +821,17 @@ function Update-VrUi {
     foreach($Control in @($VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VREyeSwapCheck,$VRStereoMethodCombo,$VRTemporalModeCombo,$VREyeAnchorCombo,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRDLSSModeCombo,$VRQualityPresetCombo,$VRConvergenceModeCombo,$VRDisparityCurveCombo,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRAdaptiveComfortSlider,$VRMotionSafetySlider,$VRSceneCutRampSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider,$VRGenerativeBackendCombo)){$Control.IsEnabled=$DepthStereo}
     $Generative=$DepthStereo -and (Combo-Tag $VRGenerativeBackendCombo)-ne'Off'
     $Atlas=$Generative -and (Combo-Tag $VRGenerativeBackendCombo)-eq'TemporalAtlas'
-    if($Atlas -and (Combo-Tag $VRStereoMethodCombo)-ne'GAPW'){
+    if($Atlas -and (Combo-Tag $VRStereoMethodCombo)-notin @('RowFlowV3','GAPW')){
         Select-StringTag $VRStereoMethodCombo 'GAPW'
         Select-StringTag $VREyeAnchorCombo 'Symmetric'
     }elseif($Generative -and -not $Atlas -and (Combo-Tag $VRStereoMethodCombo)-ne'TemporalLDI'){
         Select-StringTag $VRStereoMethodCombo 'TemporalLDI'
     }
-    $VRStereoMethodCombo.IsEnabled=$DepthStereo -and -not $Generative
+    $VRStereoMethodCombo.IsEnabled=$DepthStereo -and (-not $Generative -or $Atlas)
     Update-VRStereoMethodInfo
+    $RowFlow=$DepthStereo -and (Combo-Tag $VRStereoMethodCombo)-eq'RowFlowV3'
+    $VRRowFlowPanel.Visibility=if($RowFlow){'Visible'}else{'Collapsed'}
+    foreach($Control in @($VRRowFlowWidthCombo,$VRRowFlowStepsCombo,$VRRowFlowEdgeXCombo,$VRRowFlowEdgeYCombo,$VRRowFlowBorderCheck)){$Control.IsEnabled=$RowFlow}
     foreach($Control in @($VRGenerativeResolutionCombo,$VRGenerativeChunkSlider,$VRGenerativeOverlapSlider)){$Control.IsEnabled=$Generative}
     $Hybrid=$Generative -and (Combo-Tag $VRGenerativeBackendCombo)-eq'M2SVidHybrid'
     $Sparse=$Generative -and (Combo-Tag $VRGenerativeBackendCombo)-eq'MoebiusSparse'
@@ -829,16 +840,20 @@ function Update-VrUi {
     $VREyeAnchorCombo.IsEnabled=$DepthStereo -and -not $Generative
     $VRPixelFormatCombo.IsEnabled=$VrMode-ne'Off' -and (Combo-Tag $CodecCombo)-eq'H265'
     if((Combo-Tag $CodecCombo)-eq'H264'){Select-StringTag $VRPixelFormatCombo 'Compatible8Bit'}
-    $LayeredStereo=$DepthStereo -and (Combo-Tag $VRStereoMethodCombo)-in @('GAPW','Layered','TemporalLDI')
+    $RowFlowAtlas=$RowFlow -and $Atlas
+    $LayeredStereo=$DepthStereo -and ((Combo-Tag $VRStereoMethodCombo)-in @('GAPW','Layered','TemporalLDI') -or $RowFlowAtlas)
     $TemporalLdi=$DepthStereo -and (Combo-Tag $VRStereoMethodCombo)-eq'TemporalLDI'
     $Gapw=$DepthStereo -and (Combo-Tag $VRStereoMethodCombo)-eq'GAPW'
     $VRZBufferSlider.IsEnabled=$LayeredStereo
-    $VRHoleFillSlider.IsEnabled=$VRZBufferSlider.IsEnabled
-    foreach($Control in @($VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRInpaintSharpenSlider)){$Control.IsEnabled=$TemporalLdi -or $Gapw}
+    $VRHoleFillSlider.IsEnabled=$DepthStereo -and (Combo-Tag $VRStereoMethodCombo)-in @('Layered','TemporalLDI')
+    $VROcclusionSlider.IsEnabled=$DepthStereo -and (Combo-Tag $VRStereoMethodCombo)-in @('Inverse','Layered','TemporalLDI')
+    $VRLDILayersSlider.IsEnabled=$TemporalLdi -or $Gapw -or $RowFlowAtlas
+    $VRBackgroundExpansionSlider.IsEnabled=$TemporalLdi -or $Gapw
+    $VRInpaintSharpenSlider.IsEnabled=$TemporalLdi -or $Gapw
     foreach($Control in @($VRTemporalFillSlider,$VRTemporalConfidenceSlider)){$Control.IsEnabled=$TemporalLdi}
     $VRConvergenceSmoothingSlider.IsEnabled=$DepthStereo -and (Combo-Tag $VRConvergenceModeCombo)-ne'Manual'
     switch($VrMode){
-        'DepthSBS' { $VrInfo.Text=if($Atlas){'Рекомендуемый 2K/4K-путь: DLSS5 → neural depth → симметричный GAPW → Temporal Atlas. Фон берётся из прошлых и будущих кадров в нативном разрешении; MI-GAN запускается не более чем для 1–2 остаточных ROI на глаз.'}elseif($Sparse){'Экспериментальный путь: DLSS5 → neural depth/motion → Temporal LDI → Moebius по остаточным ROI. Покадровая диффузия медленнее и может быть менее стабильной.'}elseif($Generative){'Тяжёлый эксперимент: M2SVid видит левое видео, правый warp и маску во временном окне. Он требует много VRAM и заметно смягчает 4K-детали.'}else{'Быстрый путь без нейрозаполнения: DLSS5 → depth → GAPW/LDI. Для чистых скрытых областей выберите Temporal Atlas.'} }
+        'DepthSBS' { $VrInfo.Text=if($Atlas){'Рекомендуемый 2K/4K-путь: один neural depth → DLSS5 + RowFlow V3/GAPW → Temporal Atlas. Фон берётся из прошлых и будущих кадров в нативном разрешении; MI-GAN получает только остаток.'}elseif($Sparse){'Экспериментальный путь: один neural depth → DLSS5 + Temporal LDI → Moebius по остаточным ROI. Покадровая диффузия медленнее и может быть менее стабильной.'}elseif($Generative){'Тяжёлый эксперимент: M2SVid видит левое видео, правый warp и маску во временном окне. Он требует много VRAM и заметно смягчает 4K-детали.'}else{'Быстрый путь: одна depth-карта совместно обслуживает DLSS5 и выбранный RowFlow/GAPW/LDI. Для скрытых областей включите Temporal Atlas.'} }
         'CinemaSBS' { $VrInfo.Text='Два одинаковых ракурса left/right для VR-кинотеатра. Это комфортный просмотр плоского видео, а не выдуманная стереоглубина. Full-SBS сохраняет полное разрешение каждого глаза.' }
         'Equirect360' { $VrInfo.Text='Для уже снятого/сшитого панорамного исходника 2:1. Программа проверит геометрию и добавит стандартные spherical-video v2 метаданные.' }
         default { $VrInfo.Text='Обычный плоский файл без VR-компоновки и пространственных метаданных.' }
@@ -881,7 +896,11 @@ function Update-Estimate {
                 'DA3Large' {$Seconds+=6.0;$Seconds*=4.5}
             }
             if((Combo-Tag $VrLayoutCombo)-in @('FullSBS','FullOU')){$Seconds*=1.18}
-            if((Combo-Tag $VRStereoMethodCombo)-eq'Layered'){$Seconds*=1.08}
+            if((Combo-Tag $VRStereoMethodCombo)-eq'RowFlowV3'){
+                $Rw=if((Combo-Tag $VRRowFlowWidthCombo)-eq'Auto'){1024}elseif((Combo-Tag $VRRowFlowWidthCombo)-eq'Native'){$Geometry[0]}else{[int](Combo-Tag $VRRowFlowWidthCombo)}
+                $Rs=if([int](Combo-Tag $VRRowFlowStepsCombo)-gt 0){[int](Combo-Tag $VRRowFlowStepsCombo)}else{1}
+                $Seconds*=1.06+0.04*$Rs*[math]::Pow([math]::Min($Geometry[0],$Rw)/1024.0,1.35)
+            }elseif((Combo-Tag $VRStereoMethodCombo)-eq'Layered'){$Seconds*=1.08}
             elseif((Combo-Tag $VRStereoMethodCombo)-eq'TemporalLDI'){$Seconds*=1.22}
             if((Combo-Tag $VRGenerativeBackendCombo)-ne'Off'){
                 if((Combo-Tag $VRGenerativeBackendCombo)-eq'TemporalAtlas'){
@@ -1096,7 +1115,8 @@ $VRGenerativeResolutionCombo.Add_SelectionChanged({Mark-VrCustom})
 $VRQualityPresetCombo.Add_SelectionChanged({Apply-VrProfile})
 $VrLayoutCombo.Add_SelectionChanged({Mark-VrCustom})
 foreach($S in @($VREyeSlider,$VRConvergenceSlider,$VRDepthGammaSlider,$VROcclusionSlider,$VREdgeSlider,$VRTemporalSlider,$VRDisparitySlider,$VRForegroundSlider,$VRBackgroundSlider,$VRZBufferSlider,$VRHoleFillSlider,$VRLDILayersSlider,$VRBackgroundExpansionSlider,$VRTemporalFillSlider,$VRTemporalConfidenceSlider,$VREdgeProtectionSlider,$VRDepthTrimSlider,$VRComfortSlider,$VRAdaptiveComfortSlider,$VRMotionSafetySlider,$VRSceneCutRampSlider,$VRInpaintSharpenSlider,$VRConvergenceSmoothingSlider,$VRDepthRangeSmoothingSlider,$VRGenerativeHoleSlider,$VRGenerativeRefineSlider,$VRGenerativeChunkSlider,$VRGenerativeOverlapSlider)){$S.Add_ValueChanged({Mark-VrCustom})}
-foreach($C in @($VRStereoMethodCombo,$VRTemporalModeCombo,$VREyeAnchorCombo,$VRDLSSModeCombo,$VRConvergenceModeCombo,$VRDisparityCurveCombo,$DepthModelCombo)){$C.Add_SelectionChanged({Mark-VrCustom})}
+foreach($C in @($VRStereoMethodCombo,$VRRowFlowWidthCombo,$VRRowFlowStepsCombo,$VRRowFlowEdgeXCombo,$VRRowFlowEdgeYCombo,$VRTemporalModeCombo,$VREyeAnchorCombo,$VRDLSSModeCombo,$VRConvergenceModeCombo,$VRDisparityCurveCombo,$DepthModelCombo)){$C.Add_SelectionChanged({Mark-VrCustom})}
+$VRRowFlowBorderCheck.Add_Checked({Mark-VrCustom});$VRRowFlowBorderCheck.Add_Unchecked({Mark-VrCustom})
 $VREyeSwapCheck.Add_Click({Mark-VrCustom})
 $InstallVRModelsButton.Add_Click({
     $Installer=Join-Path $Root 'INSTALL_VR_MODELS.cmd'
@@ -1158,7 +1178,7 @@ $HelpText=[ordered]@{
     VrModeCombo='Depth 3D строит разные ракурсы глаз; Cinema SBS упаковывает плоское видео; 360 подходит только для готового источника 2:1.'
     VrLayoutCombo='Half экономит разрешение контейнера; Full сохраняет полное разрешение каждого глаза. SBS располагает глаза слева/справа, OU — сверху/снизу.'
     DepthModelCombo='DA2 Small быстрее; Video Depth устойчивее во времени; DA3 Small/Base точнее геометрически; DA3 Large — самый тяжёлый и детальный вариант для офлайн VR-записи.'
-    VRQualityPresetCombo='Fast: Half-SBS, DIS и окно 4 кадра. Cinematic: Temporal Atlas с видеоглубиной и окном 8. Maximum: DA3 Large, Full-SBS, окно 12 и отдельный DLSS5-проход для каждого глаза. После ручного изменения выбирается «Вручную».'
+    VRQualityPresetCombo='Fast: Half-SBS, GAPW, DIS и окно 4 кадра. Cinematic: RowFlow V3 (если установлен), Temporal Atlas, Video Depth и окно 8. Maximum: RowFlow V3, DA3 Large, Full-SBS, окно 12 и отдельный DLSS5-проход для каждого глаза. После ручного изменения выбирается «Вручную».'
     VRDLSSModeCombo='«До стерео» — один настоящий проход DLSS5 Feature 18. «До + по глазам» после создания двух ракурсов запускает DLSS5 ещё раз отдельно для левого и правого глаза; это намного медленнее, но детали глаз не смешиваются через шов SBS.'
     VRGenerativeBackendCombo='Temporal Atlas — основной режим: проверяет bidirectional motion, depth и сцены, затем переносит настоящие 2K/4K-пиксели из соседних кадров. MI-GAN дорисовывает только остаток. Moebius и M2SVid оставлены как тяжёлые эксперименты.'
     VRGenerativeResolutionCombo='Разрешение служебной сетки motion/depth. RGB переносится из нативного 2K/4K-кадра без уменьшения. 512–640 — лучший баланс; 768 полезно для тонких контуров в Maximum.'
@@ -1167,7 +1187,12 @@ $HelpText=[ordered]@{
     VRGenerativeChunkSlider='Радиус просмотра назад и вперёд в кадрах. 8 — хороший баланс, 12 — качество. Используются разреженные расстояния 1/2/4/8/12, поэтому время растёт умеренно.'
     VRGenerativeOverlapSlider='Для Temporal Atlas — число итераций RAFT. 4 быстро, 6 качественно, 8 для Maximum. Для Moebius единица равна 32 пикселям перекрытия ROI.'
     InstallVRModelsButton='Скачивает компактную MI-GAN для локального заполнения остаточных областей. RAFT уже входит в основной пакет. Незавершённая загрузка возобновляется.'
-    VRStereoMethodCombo='Выбирает способ геометрически построить второй ракурс, а не depth-модель. GAPW — качество и обязательная база Atlas; Temporal LDI — многослойное восстановление для Moebius/M2SVid; Layered — баланс без AI; Inverse — скорость с более слабыми краями. Под списком показано полное сравнение текущего варианта.'
+    VRStereoMethodCombo='Выбирает способ построения ракурсов, но не запускает новую depth-модель. RowFlow V3 — компактный нейроварп из iw3 поверх общей depth-карты; GAPW — чистая геометрия; Temporal LDI — база Moebius/M2SVid; Inverse — скорость. Под списком показано полное сравнение.'
+    VRRowFlowWidthCombo='Разрешение только внутреннего поля смещения RowFlow. RGB не уменьшается и остаётся 2K/4K. 1024 обычно достаточно для 1440p, 1536 — разумный максимум для 4K; Native тяжелее и полезен лишь для очень тонких вертикальных границ.'
+    VRRowFlowStepsCombo='RowFlow обучен на ограниченной силе одного деформирующего шага. Авто делит сильный параллакс на несколько последовательных проходов, чтобы не выйти из обученного диапазона. Ручное уменьшение быстрее, но на экстремальном 3D может ломать геометрию.'
+    VRRowFlowEdgeXCombo='Оригинальная edge dilation IW3 по горизонтали. Она сокращает ненадёжную кайму foreground-depth перед варпом и уменьшает двойные силуэты. 2 — безопасная отправная точка; слишком высокое значение съедает тонкие объекты.'
+    VRRowFlowEdgeYCombo='Оригинальная edge dilation IW3 по вертикали. Обычно достаточно 1: это чистит волосы и плечи, не деформируя горизонтальные линии. Для аниме и субтитров сравните 0 и 1.'
+    VRRowFlowBorderCheck='Плавно уменьшает параллакс у вертикальных границ кадра. Это сохраняет объекты, которые иначе обрезались бы краем экрана; выключайте только если нужен полный параллакс до самого края.'
     VRTemporalModeCombo='Motion-compensated переносит предыдущую глубину по optical flow перед смешиванием и не приклеивает объём к экрану. EMA дешевле, но может плыть; Off полезен для диагностики.'
     VRConvergenceModeCombo='По главному объекту удерживает нулевой параллакс около центрального персонажа. Comfort выбирает устойчивый средний диапазон. Manual использует только ползунок плоскости фокуса.'
     VRDisparityCurveCombo='Cinematic усиливает хорошо читаемые средние планы; Comfort мягко ограничивает экстремальный параллакс; Linear переносит depth без художественного ремаппинга.'
@@ -1182,9 +1207,9 @@ $HelpText=[ordered]@{
     VRZBufferSlider='Насколько строго ближний слой перекрывает дальний при layered splat. Больше сохраняет чёткие силуэты, но может открыть больше дыр.'
     VREdgeSlider='Смягчает резкие границы карты глубины, уменьшая рваные края при построении второго ракурса.'
     VROcclusionSlider='Заполняет области, открывшиеся после построения второго ракурса. Больше — меньше дыр, но слабее настоящий стереоэффект на краях.'
-    VRHoleFillSlider='Радиус поиска соседнего видимого слоя для дыр после смещения. Увеличивайте для сильного 3D; слишком большое значение может растянуть фон.'
+    VRHoleFillSlider='Радиус локального заполнения дыр для Layered/Temporal LDI. RowFlow делает обратную нейровыборку, а RowFlow + Atlas заполняет раскрытый фон из соседних кадров, поэтому там этот регулятор отключён.'
     VRLDILayersSlider='Число дискретных уровней приоритета layered-depth image. Больше лучше разделяет близкие перекрывающиеся поверхности, но повышает чувствительность к ошибкам depth.'
-    VRBackgroundExpansionSlider='Строит отдельную дальнюю цветовую пластину за границами переднего плана. Она используется только в областях, реально раскрывшихся при сдвиге камеры.'
+    VRBackgroundExpansionSlider='Строит отдельную дальнюю цветовую пластину для GAPW/Temporal LDI. В RowFlow она не подменяет цвет: для настоящего скрытого фона включите Temporal Atlas.'
     VRTemporalFillSlider='Доля скрытого фона, переносимая из предыдущего кадра по motion vectors. Убирает мерцание дорисованных краёв; требует Motion temporal.'
     VRTemporalConfidenceSlider='Запрещает temporal-fill там, где optical flow ненадёжен. Больше — меньше шлейфов, но чаще используется пространственное заполнение.'
     VREdgeProtectionSlider='Gradient-aware разделение глубины на силуэтах. Убирает резиновые края волос, рук и персонажей без размытия всего кадра.'
@@ -1193,7 +1218,7 @@ $HelpText=[ordered]@{
     VRAdaptiveComfortSlider='Автоматически немного уменьшает параллакс при быстром движении, слабых motion vectors и сразу после монтажной склейки, затем медленно возвращает полный объём. Убирает рывки глубины без постоянного ослабления 3D.'
     VRMotionSafetySlider='Движение в пикселях guide-карты, после которого адаптивный контроллер начинает заметно снижать параллакс. Больше сохраняет сильный 3D даже в динамичных сценах.'
     VRSceneCutRampSlider='Число кадров плавного восстановления стереосилы после склейки. Предотвращает мгновенный скачок плоскости глубины; 0 отключает плавный вход.'
-    VRInpaintSharpenSlider='Возвращает локальную резкость только дорисованным disocclusion-областям, не перешарпливая исходный глаз.'
+    VRInpaintSharpenSlider='Возвращает локальную резкость заполненным областям GAPW/Temporal LDI. В RowFlow + Atlas резкость и смешивание контролирует сам Temporal Atlas.'
     VRConvergenceSmoothingSlider='Инерция автоматической плоскости фокуса. Больше устраняет прыжки глубины между кадрами; меньше быстрее следует за новым главным объектом.'
     VRDepthRangeSmoothingSlider='Удерживает одинаковый ближний/дальний диапазон depth во времени и подавляет дыхание объёма.'
     VRTemporalSlider='Стабилизирует нейроглубину во времени перед построением глаз. Убирает дрожание объёма, но слишком большое значение замедляет реакцию.'
@@ -1673,6 +1698,8 @@ $RunButton.Add_Click({
                 '-VRTemporalSmoothing',([string]::Format($Invariant,'{0:0.###}',[double]$VRTemporalSlider.Value)),
                 '-VRMaxDisparityPercent',([string]::Format($Invariant,'{0:0.###}',[double]$VRDisparitySlider.Value)),
                 '-VRStereoMethod',(Combo-Tag $VRStereoMethodCombo),'-VRDLSSMode',(Combo-Tag $VRDLSSModeCombo),'-VREyeAnchor',(Combo-Tag $VREyeAnchorCombo),
+                '-VRRowFlowWidth',(Combo-Tag $VRRowFlowWidthCombo),'-VRRowFlowSteps',[int](Combo-Tag $VRRowFlowStepsCombo),
+                '-VRRowFlowEdgeX',[int](Combo-Tag $VRRowFlowEdgeXCombo),'-VRRowFlowEdgeY',[int](Combo-Tag $VRRowFlowEdgeYCombo),
                 '-VRGenerativeBackend',(Combo-Tag $VRGenerativeBackendCombo),'-VRGenerativeResolution',(Combo-Tag $VRGenerativeResolutionCombo),
                 '-VRGenerativeChunkFrames',[int]$VRGenerativeChunkSlider.Value,'-VRGenerativeOverlapFrames',[int]$VRGenerativeOverlapSlider.Value,
                 '-VRGenerativeHoleStrength',([string]::Format($Invariant,'{0:0.###}',[double]$VRGenerativeHoleSlider.Value)),
@@ -1716,6 +1743,7 @@ $RunButton.Add_Click({
                 )
             }
             if ($VREyeSwapCheck.IsChecked) { $Args += '-VREyeSwap' }
+            if ($VRRowFlowBorderCheck.IsChecked) { $Args += '-VRRowFlowPreserveBorder' }
             if ($LivePreviewCheck.IsChecked) { $Args += '-LivePreview' }
             if ($ComparisonCheck.IsChecked) { $Args += '-CreateComparison' }
             if ($KeepTempCheck.IsChecked) { $Args += '-KeepTemporaryFiles' }
@@ -1810,7 +1838,11 @@ $PerformanceCombo.SelectedIndex=2
 $VrModeCombo.SelectedIndex=0
 $VrLayoutCombo.SelectedIndex=0
 $VrTargetFpsCombo.SelectedIndex=0
-$VRStereoMethodCombo.SelectedIndex=0
+$VRStereoMethodCombo.SelectedIndex=if($script:RowFlowReady){0}else{1}
+$VRRowFlowWidthCombo.SelectedIndex=0
+$VRRowFlowStepsCombo.SelectedIndex=0
+$VRRowFlowEdgeXCombo.SelectedIndex=2
+$VRRowFlowEdgeYCombo.SelectedIndex=1
 $VRTemporalModeCombo.SelectedIndex=0
 $VREyeAnchorCombo.SelectedIndex=0
 $VRPixelFormatCombo.SelectedIndex=0
@@ -1828,6 +1860,9 @@ foreach ($Item in $DepthModelCombo.Items) {
         $Item.Content = [string]$Item.Content + ' · не установлен'
         $Item.ToolTip = "Не хватает файлов модели. Установка: $($DepthStatus.Installer). Проверка повторяется при запуске."
     }
+}
+if(-not $script:RowFlowReady){
+    foreach($Item in $VRStereoMethodCombo.Items){if([string]$Item.Tag-eq'RowFlowV3'){$Item.Content=[string]$Item.Content+' · не установлен';$Item.ToolTip='Установите официальный компактный RowFlow V3 командой INSTALL_IW3.cmd в папке программы.'}}
 }
 $FrameGenerationCombo.SelectedIndex=0
 $RealtimeTargetFpsCombo.SelectedIndex=3
@@ -1862,5 +1897,9 @@ Update-WorkspaceUi
 Update-VrUi
 Update-ExpertUi
 Refresh-StageList
-if($ValidateUi){$Timer.Stop();Write-Output 'STUDIO_UI_VALIDATED';return}
-$Window.ShowDialog() | Out-Null
+if($ValidateUi){
+    $Timer.Stop()
+    Write-Output 'STUDIO_UI_VALIDATED'
+}else{
+    $Window.ShowDialog() | Out-Null
+}

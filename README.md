@@ -1,4 +1,21 @@
-# DLSS5 Video Studio 22.2.1
+# DLSS5 Video Studio 22.3
+
+22.3 integrates the pinned official **IW3 RowFlow V3** model into Studio's main
+VR pipeline. DLSS5, RowFlow and Temporal Atlas consume one canonical stabilized
+depth/motion cache; RowFlow never invokes IW3's depth estimator a second time.
+The integration preserves the full-resolution RGB eye and exposes only the
+lightweight warp-grid width. IW3's trained divergence range, automatic multi-step
+warp, exact depth-edge dilation and screen-border protection are retained. Studio's
+motion-compensated depth, shot reset, robust range normalization, subject/comfort
+convergence and separate foreground/background controls remain active. Temporal
+Atlas can use RowFlow's clean RGB warp plus a color-free z-visibility mask from
+the same depth cache, so neighbouring frames and MI-GAN are reserved for truly
+unseen areas.
+
+The main VR mode does not apply IW3 DepthAA blindly: the available upstream
+checkpoint is tied to DA3 Mono, while Studio's shared cache may come from DA2,
+Video Depth Anything or several DA3 variants. This avoids a model mismatch that
+can damage silhouettes instead of improving them.
 
 22.2.1 fixes IW3 ultrawide 4K export: presets fit a per-eye bounding box instead
 of forcing video height. The UI displays eye/container dimensions; preflight

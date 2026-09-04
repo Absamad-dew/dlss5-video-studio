@@ -39,6 +39,13 @@ class VrDepthWorkerTests(unittest.TestCase):
             self.assertAlmostEqual(abs(left - right), 1.0)
         self.assertEqual(vr.eye_shift_factors("left"), (0.0, -1.0))
 
+    def test_rowflow_auto_steps_stays_inside_v3_training_range(self) -> None:
+        self.assertEqual(vr.rowflow_auto_steps(4.9, "symmetric"), 1)
+        self.assertEqual(vr.rowflow_auto_steps(6.0, "symmetric"), 2)
+        # An anchored source eye puts the complete baseline into one warp.
+        self.assertEqual(vr.rowflow_auto_steps(4.0, "left"), 2)
+        self.assertEqual(vr.rowflow_auto_steps(12.0, "right"), 6)
+
     def test_robust_depth_range_rejects_outliers(self) -> None:
         depth = torch.linspace(0.2, 0.8, 400).reshape(1, 1, 20, 20)
         depth[..., 0, 0] = -10.0

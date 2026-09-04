@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import struct
 import subprocess
 import sys
@@ -24,6 +25,60 @@ MOTION_MAGIC = b"D5MV0003"
 MOTION_DTYPE = np.dtype(
     [("dx", "<f2"), ("dy", "<f2"), ("valid", "u1"), ("confidence", "u1")]
 )
+IW3_COMMIT = "d23721f1b5f0a4c92c3ee1be013180bf298730c5"
+ROWFLOW_CHECKPOINT = "iw3_row_flow_v3_20250627.pth"
+
+
+def load_rowflow_v3(root: Path):
+    """Load the pinned iw3 RowFlow model without invoking iw3 depth inference.
+
+    Studio owns decoding, canonical depth, temporal alignment and encoding.  Only
+    the compact RowFlow stereo warp is imported from the pinned nunif install.
+    This is deliberately a model-only adapter: running ``iw3_main`` here would
+    decode the video and calculate depth for a second time.
+    """
+    root = root.resolve()
+    code = root / "third_party" / "nunif"
+    status_path = root / "models" / "iw3" / "install.json"
+    checkpoint = (
+        root
+        / "models"
+        / "iw3"
+        / "pretrained_models"
+        / "hub"
+        / "checkpoints"
+        / ROWFLOW_CHECKPOINT
+    )
+    if not (code / "iw3" / "backward_warp.py").is_file() or not status_path.is_file():
+        raise RuntimeError(
+            "RowFlow V3 is not installed. Run INSTALL_IW3.cmd in the program folder."
+        )
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    if status.get("commit") != IW3_COMMIT:
+        raise RuntimeError("RowFlow V3 engine version mismatch. Run INSTALL_IW3.cmd again.")
+    if not checkpoint.is_file() or checkpoint.stat().st_size <= 0:
+        raise RuntimeError(
+            f"RowFlow V3 checkpoint is missing: {checkpoint}. Run INSTALL_IW3.cmd."
+        )
+    sys.path[:0] = [str(root / "models" / "iw3" / "site-packages"), str(code)]
+    os.environ["NUNIF_HOME"] = str(root / "models")
+    os.environ["TORCH_HOME"] = str(root / "models" / "iw3" / "torch")
+    os.environ["HF_HOME"] = str(root / "models" / "iw3" / "huggingface")
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    # Importing the model package registers RowFlowV3 with nunif.load_model.
+    import iw3.models  # noqa: F401
+    from iw3.backward_warp import apply_divergence_nn_LR
+    from iw3.dilation import dilate_edge
+    from iw3.stereo_model_factory import create_stereo_model
+
+    model = create_stereo_model("row_flow_v3", divergence=5.0, device_id=0)
+    return model, apply_divergence_nn_LR, dilate_edge
+
+
+def rowflow_auto_steps(divergence_percent: float, eye_anchor: str) -> int:
+    """Mirror iw3 V3's trained-range policy for our dynamic stereo strength."""
+    model_divergence = divergence_percent * (1.0 if eye_anchor == "symmetric" else 2.0)
+    return 1 if model_divergence <= 5.0 else max(2, math.ceil(model_divergence / 4.0))
 
 
 def depth_frames(paths: list[Path]) -> Iterator[tuple[np.ndarray, int, int]]:
@@ -585,9 +640,7 @@ def gradient_aware_parallax_warp(
     shoulders and thin geometry in a forward RGB splat. Missing target pixels
     receive local background from the reveal side only.
     """
-    source_disparity = disparity_px[None, None].float()
-    target_disparity, target_valid, collisions = forward_splat(
-        source_disparity,
+    target_disparity, target_valid, holes_fraction, context, compose = stereo_visibility_masks(
         depth,
         disparity_px,
         splat_x,
@@ -595,9 +648,7 @@ def gradient_aware_parallax_warp(
         sign,
         z_strength,
         ldi_layers,
-        return_uncertain=True,
     )
-    holes = ~target_valid
     prefer_right = sign < 0.0
     fill_indices = directional_nearest_indices(target_valid, prefer_right)
     filled_disparity = torch.gather(target_disparity, -1, fill_indices)
@@ -614,16 +665,6 @@ def gradient_aware_parallax_warp(
         padding_mode="border",
         align_corners=True,
     )
-    # The exported masks are smooth bands derived from true uncovered pixels;
-    # collisions are context only and are never pasted over the foreground.
-    dense = F.avg_pool2d(holes.float(), kernel_size=3, stride=1, padding=1) >= 0.22
-    dilated = F.max_pool2d(dense.float(), kernel_size=(5, 3), stride=1, padding=(2, 1))
-    joined = (
-        F.avg_pool2d(dilated, kernel_size=(5, 3), stride=1, padding=(2, 1)) >= 0.52
-    )
-    context = F.max_pool2d(joined.float(), kernel_size=(5, 9), stride=1, padding=(2, 4)) > 0
-    context |= collisions & F.max_pool2d(joined.float(), 7, stride=1, padding=3).bool()
-    compose = joined & context
     # This is only a deterministic seed. Temporal Atlas replaces these pixels
     # with real background observations from other frames before any neural
     # residual repair. Keeping the seed one-sided avoids pulling foreground
@@ -640,12 +681,53 @@ def gradient_aware_parallax_warp(
         blurred = F.avg_pool2d(result, 3, stride=1, padding=1)
         enhanced = (result + (result - blurred) * (0.35 * sharpen_amount)).clamp_(0.0, 1.0)
         result = torch.where(compose, enhanced, result)
+    return result.to(frame.dtype), holes_fraction, context, compose, ~compose
+
+
+def stereo_visibility_masks(
+    depth: torch.Tensor,
+    disparity_px: torch.Tensor,
+    splat_x: torch.Tensor,
+    splat_rows: torch.Tensor,
+    sign: float,
+    z_strength: float,
+    ldi_layers: int,
+) -> tuple[torch.Tensor, torch.Tensor, float, torch.Tensor, torch.Tensor]:
+    """Resolve target visibility once for GAPW, RowFlow and Temporal Atlas.
+
+    RowFlow is a backward neural warp and therefore does not expose true
+    disocclusions.  A colour-free z-splat of the same canonical depth gives
+    Atlas an accurate mask without another RGB warp or another depth model.
+    """
+    source_disparity = disparity_px[None, None].float()
+    target_disparity, target_valid, collisions = forward_splat(
+        source_disparity,
+        depth,
+        disparity_px,
+        splat_x,
+        splat_rows,
+        sign,
+        z_strength,
+        ldi_layers,
+        return_uncertain=True,
+    )
+    holes = ~target_valid
+    # The exported masks are smooth bands derived from true uncovered pixels;
+    # collisions are context only and are never pasted over the foreground.
+    dense = F.avg_pool2d(holes.float(), kernel_size=3, stride=1, padding=1) >= 0.22
+    dilated = F.max_pool2d(dense.float(), kernel_size=(5, 3), stride=1, padding=(2, 1))
+    joined = (
+        F.avg_pool2d(dilated, kernel_size=(5, 3), stride=1, padding=(2, 1)) >= 0.52
+    )
+    context = F.max_pool2d(joined.float(), kernel_size=(5, 9), stride=1, padding=(2, 4)) > 0
+    context |= collisions & F.max_pool2d(joined.float(), 7, stride=1, padding=3).bool()
+    compose = joined & context
     return (
-        result.to(frame.dtype),
+        target_disparity,
+        target_valid,
         float(holes.float().mean().item()),
         context,
         compose,
-        ~compose,
     )
 
 
@@ -749,6 +831,7 @@ def encode_options(codec: str, pixel_format: str, quality: int) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path)
     parser.add_argument("--ffmpeg", required=True, type=Path)
     parser.add_argument("--input-video", required=True, type=Path)
     parser.add_argument("--depth-directory", required=True, type=Path)
@@ -766,9 +849,15 @@ def parse_args() -> argparse.Namespace:
         "--layout", choices=["half-sbs", "full-sbs", "half-ou", "full-ou"], default="half-sbs"
     )
     parser.add_argument(
-        "--stereo-method", choices=["inverse", "layered", "temporal-ldi", "gapw"],
+        "--stereo-method",
+        choices=["inverse", "layered", "temporal-ldi", "gapw", "rowflow-v3"],
         default="temporal-ldi",
     )
+    parser.add_argument("--rowflow-width", type=int, default=0)
+    parser.add_argument("--rowflow-steps", type=int, default=0)
+    parser.add_argument("--rowflow-edge-x", type=int, default=0)
+    parser.add_argument("--rowflow-edge-y", type=int, default=0)
+    parser.add_argument("--rowflow-preserve-border", action="store_true")
     parser.add_argument("--eye-anchor", choices=["symmetric", "left", "right"], default="symmetric")
     parser.add_argument("--temporal-mode", choices=["off", "ema", "motion"], default="motion")
     parser.add_argument(
@@ -814,6 +903,18 @@ def main() -> int:
         raise RuntimeError("depth 3D VR requires CUDA")
     if args.codec == "h264" and args.pixel_format != "yuv420p":
         raise ValueError("H.264 VR output supports only yuv420p")
+    if min(args.rowflow_width, args.rowflow_steps, args.rowflow_edge_x, args.rowflow_edge_y) < 0:
+        raise ValueError("RowFlow width/steps/edge dilation cannot be negative")
+    rowflow_model = None
+    rowflow_apply = None
+    rowflow_dilate_edge = None
+    rowflow_load_seconds = 0.0
+    if args.stereo_method == "rowflow-v3":
+        if args.root is None:
+            raise ValueError("RowFlow V3 requires --root")
+        load_started = time.perf_counter()
+        rowflow_model, rowflow_apply, rowflow_dilate_edge = load_rowflow_v3(args.root)
+        rowflow_load_seconds = time.perf_counter() - load_started
     depth_paths = sorted(args.depth_directory.glob("chunk-*.depth"))
     if not depth_paths:
         raise FileNotFoundError(f"no depth chunks in {args.depth_directory}")
@@ -987,6 +1088,8 @@ def main() -> int:
     convergence_sum = 0.0
     adaptive_scale_sum = 0.0
     motion_pixels_sum = 0.0
+    rowflow_infer_seconds = 0.0
+    rowflow_steps_sum = 0
     previous_depth: torch.Tensor | None = None
     motion_grid_cache: dict[tuple[int, int], torch.Tensor] = {}
     history_grid_cache: dict[tuple[int, int, int, int], torch.Tensor] = {}
@@ -998,6 +1101,14 @@ def main() -> int:
     previous_convergence: float | None = None
     previous_adaptive_scale: float | None = None
     frames_since_scene_cut = max(0, args.scene_cut_ramp_frames)
+    needs_visibility_masks = any(
+        process is not None
+        for process in (
+            right_mask_process,
+            right_compose_mask_process,
+            left_compose_mask_process,
+        )
+    )
     try:
         with torch.inference_mode():
             for index, (depth_np, _, _) in enumerate(depth_frames(depth_paths)):
@@ -1053,6 +1164,18 @@ def main() -> int:
                     frame = F.interpolate(frame, size=(eye_height, eye_width), mode="bilinear", align_corners=False)
                     depth = F.interpolate(depth, size=(eye_height, eye_width), mode="bilinear", align_corners=False)
                 depth = gradient_aware_depth(depth, args.edge_protection)
+                if (
+                    args.stereo_method == "rowflow-v3"
+                    and (args.rowflow_edge_x > 0 or args.rowflow_edge_y > 0)
+                ):
+                    assert rowflow_dilate_edge is not None
+                    # Exact iw3 depth-edge operation. It contracts unreliable
+                    # foreground fringes before RowFlow predicts its sampling
+                    # field, which is especially useful for hair and subtitles.
+                    depth = -rowflow_dilate_edge(
+                        -depth.float(), (args.rowflow_edge_x, args.rowflow_edge_y)
+                    )
+                    depth.clamp_(0.0, 1.0)
 
                 delta = shape_disparity_delta(
                     depth[0, 0] - convergence,
@@ -1091,6 +1214,70 @@ def main() -> int:
                 motion_pixels_sum += motion_pixels
                 left_shift, right_shift = eye_shift_factors(args.eye_anchor)
 
+                rowflow_views: tuple[torch.Tensor, torch.Tensor] | None = None
+                rowflow_start_event: torch.cuda.Event | None = None
+                rowflow_end_event: torch.cuda.Event | None = None
+                if args.stereo_method == "rowflow-v3":
+                    assert rowflow_model is not None and rowflow_apply is not None
+                    # Feed the learned warp our already stabilized canonical
+                    # depth.  Artistic curve and independent foreground/
+                    # background controls are encoded into the depth values;
+                    # adaptive comfort remains a cheap per-frame divergence.
+                    scale_pixels = max(
+                        1.0e-6,
+                        limit * max(0.1, min(3.0, args.eye_separation)) * adaptive_scale,
+                    )
+                    rowflow_depth = (convergence + disparity[None, None] / scale_pixels).clamp_(
+                        0.0, 1.0
+                    )
+                    requested_width = args.rowflow_width or eye_width
+                    model_width = max(96, min(eye_width, requested_width))
+                    if rowflow_depth.shape[-1] != model_width:
+                        model_height = max(2, round(eye_height * model_width / eye_width))
+                        rowflow_depth = F.interpolate(
+                            rowflow_depth,
+                            size=(model_height, model_width),
+                            mode="bilinear",
+                            align_corners=True,
+                            antialias=True,
+                        ).clamp_(0.0, 1.0)
+                    divergence_percent = (
+                        min(5.0, max(0.5, args.max_disparity_percent))
+                        * max(0.1, min(3.0, args.eye_separation))
+                        * adaptive_scale
+                    )
+                    steps = args.rowflow_steps or rowflow_auto_steps(
+                        divergence_percent, args.eye_anchor
+                    )
+                    steps = max(1, min(12, steps))
+                    synthetic_view = {
+                        "symmetric": "both",
+                        "left": "right",
+                        "right": "left",
+                    }[args.eye_anchor]
+                    # CUDA calls are asynchronous. Events keep the RowFlow
+                    # telemetry honest without adding a second synchronization
+                    # point or slowing the frame pipeline.
+                    rowflow_start_event = torch.cuda.Event(enable_timing=True)
+                    rowflow_end_event = torch.cuda.Event(enable_timing=True)
+                    rowflow_start_event.record()
+                    rowflow_views = rowflow_apply(
+                        rowflow_model,
+                        # The pinned iw3 sampler builds a float32 grid after
+                        # its AMP model call; its public path expects RGB in
+                        # float32 as well. Keep that exact contract here.
+                        frame.float(),
+                        rowflow_depth,
+                        divergence_percent,
+                        convergence,
+                        steps,
+                        synthetic_view=synthetic_view,
+                        preserve_screen_border=args.rowflow_preserve_border,
+                        enable_amp=True,
+                    )
+                    rowflow_end_event.record()
+                    rowflow_steps_sum += steps
+
                 def render_eye(
                     shift: float,
                 ) -> tuple[torch.Tensor, float, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1099,6 +1286,26 @@ def main() -> int:
                             (1, 1, eye_height, eye_width), device=device, dtype=torch.bool
                         )
                         return frame, 0.0, ~valid, ~valid, valid
+                    if args.stereo_method == "rowflow-v3":
+                        assert rowflow_views is not None
+                        rendered = rowflow_views[0] if shift > 0 else rowflow_views[1]
+                        if not needs_visibility_masks:
+                            valid = torch.ones(
+                                (1, 1, eye_height, eye_width),
+                                device=device,
+                                dtype=torch.bool,
+                            )
+                            return rendered, 0.0, ~valid, ~valid, valid
+                        _, valid, holes_fraction, context, compose = stereo_visibility_masks(
+                            depth,
+                            disparity,
+                            splat_x,
+                            splat_rows,
+                            shift,
+                            args.z_buffer_strength,
+                            args.ldi_layers,
+                        )
+                        return rendered, holes_fraction, context, compose, valid & ~compose
                     if args.stereo_method == "gapw":
                         return gradient_aware_parallax_warp(
                             frame,
@@ -1226,6 +1433,10 @@ def main() -> int:
                 )
                 output_staging.copy_(stereo_u8, non_blocking=True)
                 torch.cuda.current_stream().synchronize()
+                if rowflow_start_event is not None and rowflow_end_event is not None:
+                    rowflow_infer_seconds += (
+                        rowflow_start_event.elapsed_time(rowflow_end_event) / 1000.0
+                    )
                 encoder_process.stdin.write(output_staging_view)
                 if right_seed_process is not None and right_seed_process.stdin is not None:
                     right_seed_process.stdin.write(right_seed_staging_view)
@@ -1255,6 +1466,16 @@ def main() -> int:
                                 "adaptive_stereo_scale": adaptive_scale_sum / processed,
                                 "motion_pixels_p75": motion_pixels_sum / processed,
                                 "method": args.stereo_method,
+                                "canonical_depth_pipeline_passes": 1,
+                                "depth_model_reinvocations": 0,
+                                "rowflow_width": (
+                                    min(eye_width, args.rowflow_width or eye_width)
+                                    if args.stereo_method == "rowflow-v3" else None
+                                ),
+                                "rowflow_mean_steps": (
+                                    rowflow_steps_sum / processed
+                                    if args.stereo_method == "rowflow-v3" else None
+                                ),
                                 "temporal": "motion" if use_motion else args.temporal_mode,
                             }, separators=(",", ":"),
                         ), flush=True,
@@ -1324,6 +1545,27 @@ def main() -> int:
                 "mean_adaptive_stereo_scale": adaptive_scale_sum / max(processed, 1),
                 "mean_motion_pixels_p75": motion_pixels_sum / max(processed, 1),
                 "method": args.stereo_method,
+                "canonical_depth_pipeline_passes": 1,
+                "depth_model_reinvocations": 0,
+                "depth_source": "shared-dlss5-guide-cache",
+                "rowflow_model_load_s": (
+                    rowflow_load_seconds if args.stereo_method == "rowflow-v3" else None
+                ),
+                "rowflow_infer_s": (
+                    rowflow_infer_seconds if args.stereo_method == "rowflow-v3" else None
+                ),
+                "rowflow_fps": (
+                    processed / max(rowflow_infer_seconds, 1.0e-6)
+                    if args.stereo_method == "rowflow-v3" else None
+                ),
+                "rowflow_width": (
+                    min(eye_width, args.rowflow_width or eye_width)
+                    if args.stereo_method == "rowflow-v3" else None
+                ),
+                "rowflow_mean_steps": (
+                    rowflow_steps_sum / max(processed, 1)
+                    if args.stereo_method == "rowflow-v3" else None
+                ),
                 "temporal": "motion" if use_motion else args.temporal_mode,
                 "pixel_format": args.pixel_format, "output": str(args.output_video),
                 "right_seed_output": str(args.right_seed_output) if args.right_seed_output else None,

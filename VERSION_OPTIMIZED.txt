@@ -1,2 +1,2 @@
-22.2.3-ui-guidance
-Always-visible explanations for every settings section, focus/hover help for detailed controls, comparative VR stereo-method guidance and per-method IW3 descriptions. Resilient model downloads, geometry, five pinned DA3 models and optional DLSS5 retained.
+22.3.0-rowflow-shared-depth
+RowFlow V3 is integrated into the main VR pipeline without a second depth inference. DLSS5, stereo warp and Temporal Atlas share one stabilized depth/motion cache. IW3 auto warp steps, exact edge dilation and screen-border preservation are combined with Studio motion compensation, scene resets, robust depth range and adaptive comfort.

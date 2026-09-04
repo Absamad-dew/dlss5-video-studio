@@ -4,6 +4,9 @@ $ErrorActionPreference='Stop'
 if(-not $StudioRoot){$StudioRoot=Split-Path -Parent $PSScriptRoot}
 . (Join-Path $StudioRoot 'app/studio.ps1') -ValidateUi
 function Assert($Condition,[string]$Message){if(-not $Condition){throw $Message}}
+# Source checkouts intentionally exclude the large Temporal Atlas payload. The
+# UI regression exercises compatibility/enabling logic, not model installation.
+function Test-VrGenerativeBackendInstalled([string]$Backend){return $true}
 $ExpertCheck.IsChecked=$false
 $WorkspaceTabs.SelectedIndex=2
 Update-WorkspaceUi
@@ -12,6 +15,7 @@ Assert ($NeuralGroup.IsEnabled) 'VR DLSS controls are disabled'
 $VrModeCombo.SelectedIndex=1
 Select-StringTag $VRGenerativeBackendCombo 'Off'
 $StereoExpectations=[ordered]@{
+    RowFlowV3=@('НОВЫЙ ОСНОВНОЙ НЕЙРОВАРП','один канонический кэш')
     GAPW=@('РЕКОМЕНДАЦИЯ ДЛЯ КАЧЕСТВА','Temporal Atlas')
     TemporalLDI=@('МНОГОСЛОЙНЫЙ КЛАССИЧЕСКИЙ ПУТЬ','Moebius')
     Layered=@('БАЛАНС БЕЗ ГЕНЕРАТИВНОЙ МОДЕЛИ','z-buffer')
@@ -24,6 +28,17 @@ foreach($Method in $StereoExpectations.Keys){
     Assert (-not [string]::IsNullOrWhiteSpace([string]$VRStereoMethodCombo.SelectedItem.ToolTip)) ("Stereo option tooltip missing: $Method")
 }
 Select-StringTag $VRStereoMethodCombo 'GAPW'
+Select-StringTag $VRGenerativeBackendCombo 'TemporalAtlas'
+Select-StringTag $VRStereoMethodCombo 'RowFlowV3';Update-VrUi
+Assert ((Combo-Tag $VRStereoMethodCombo)-eq'RowFlowV3') 'Temporal Atlas rejected RowFlow V3 hybrid geometry'
+Assert ($VRStereoMethodCombo.IsEnabled) 'Temporal Atlas hides RowFlow/GAPW choice'
+Assert ($VRRowFlowPanel.Visibility-eq'Visible') 'RowFlow controls are hidden'
+Assert ($VRZBufferSlider.IsEnabled -and $VRLDILayersSlider.IsEnabled) 'RowFlow Atlas visibility controls are disabled'
+$VRGenerativeBackendCombo.SelectedIndex=0;Update-VrUi
+Assert (-not $VRZBufferSlider.IsEnabled) 'RowFlow without Atlas exposes unused z-mask control'
+Assert (-not $VRHoleFillSlider.IsEnabled) 'RowFlow exposes unused spatial hole-fill control'
+Assert (-not $VRBackgroundExpansionSlider.IsEnabled) 'RowFlow exposes unused GAPW background plate control'
+Select-StringTag $VRGenerativeBackendCombo 'Off'
 $IntensitySlider.Value=.45;$StructureSlider.Value=1.35;$SkinSlider.Value=.25
 $Ini=Get-Ini
 Assert ($Ini.Contains('NRIntensity=0.45')) 'Intensity not forwarded to DLSS'

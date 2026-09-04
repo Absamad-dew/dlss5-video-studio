@@ -26,7 +26,12 @@ param(
     [ValidateRange(0.0,24.0)] [double] $VREdgeFeather = 2.0,
     [ValidateRange(0.0,0.95)] [double] $VRTemporalSmoothing = 0.55,
     [ValidateRange(0.5,5.0)] [double] $VRMaxDisparityPercent = 2.4,
-    [ValidateSet('Inverse','Layered','TemporalLDI','GAPW')] [string] $VRStereoMethod = 'GAPW',
+    [ValidateSet('Inverse','Layered','TemporalLDI','GAPW','RowFlowV3')] [string] $VRStereoMethod = 'GAPW',
+    [ValidateSet('Auto','512','768','1024','1536','Native')] [string] $VRRowFlowWidth = 'Auto',
+    [ValidateRange(0,12)] [int] $VRRowFlowSteps = 0,
+    [ValidateRange(0,4)] [int] $VRRowFlowEdgeX = 2,
+    [ValidateRange(0,4)] [int] $VRRowFlowEdgeY = 1,
+    [switch] $VRRowFlowPreserveBorder,
     [ValidateSet('PreStereo','PreAndPerEye')] [string] $VRDLSSMode = 'PreStereo',
     [ValidateSet('Off','TemporalAtlas','MoebiusSparse','M2SVidHybrid','M2SVidFull')] [string] $VRGenerativeBackend = 'Off',
     [ValidateSet('Auto','384','512','640','768','1024','1536')] [string] $VRGenerativeResolution = 'Auto',
@@ -151,6 +156,9 @@ $UpscalerThirdParty = Join-Path $Root 'third_party'
 $RaftWeights = Join-Path $Root 'models\motion\raft_small_C_T_V2-01064c6d.pth'
 $SpatialMediaTool = Join-Path $Tools 'spatialmedia\__main__.py'
 $VRDepthWorker = Join-Path $Tools 'vr_depth\vr_depth_worker.py'
+$RowFlowCode = Join-Path $Root 'third_party\nunif\iw3\backward_warp.py'
+$RowFlowInstallStatus = Join-Path $Root 'models\iw3\install.json'
+$RowFlowCheckpoint = Join-Path $Root 'models\iw3\pretrained_models\hub\checkpoints\iw3_row_flow_v3_20250627.pth'
 $TemporalAtlasWorker = Join-Path $Tools 'vr_generative\temporal_atlas_worker.py'
 $MiganModel = Join-Path $Root 'models\vr\migan\migan_pipeline_v2.onnx'
 $M2SVidWorker = Join-Path $Tools 'vr_generative\m2svid_worker.py'
@@ -534,6 +542,9 @@ if (($PreviewOnly -and $RealtimeMotionBackend -eq 'raft') -or
 }
 if ($VRMode -ne 'Off') { $RequiredFiles += @($UpscalerPython,$SpatialMediaTool) }
 if ($VRMode -eq 'DepthSBS') { $RequiredFiles += $VRDepthWorker }
+if ($VRMode -eq 'DepthSBS' -and $VRStereoMethod -eq 'RowFlowV3') {
+    $RequiredFiles += @($RowFlowCode,$RowFlowInstallStatus,$RowFlowCheckpoint)
+}
 if ($VRMode -eq 'DepthSBS' -and $VRGenerativeBackend -eq 'TemporalAtlas') {
     $RequiredFiles += @($TemporalAtlasWorker,$RaftWeights,$MiganModel)
 }
@@ -730,6 +741,23 @@ if ($UseExternalUpscaler) {
     $OutputWidth = $UpscalerInputWidth * 4
     $OutputHeight = $UpscalerInputHeight * 4
 }
+$ResolvedRowFlowWidth = if ($VRRowFlowWidth -eq 'Native') {
+    $OutputWidth
+} elseif ($VRRowFlowWidth -ne 'Auto') {
+    [int]$VRRowFlowWidth
+} else {
+    # RowFlow predicts only a horizontal sampling field. RGB remains at the
+    # full eye resolution, so a bounded internal depth grid gives nearly all
+    # edge quality at 2K/4K without paying full-raster neural-warp cost.
+    switch ($PerformanceProfile) {
+        'UltraFast' { 512 }
+        'Fast' { 768 }
+        'Heavy' { 1536 }
+        'Maximum' { [math]::Min(2048,$OutputWidth) }
+        default { 1024 }
+    }
+}
+$ResolvedRowFlowWidth = [math]::Max(96,[math]::Min($OutputWidth,$ResolvedRowFlowWidth))
 $RenderScale = [math]::Min(1.0, [math]::Min($OutputWidth / [double]$SourceWidth, $OutputHeight / [double]$SourceHeight))
 if ($UseExternalUpscaler) {
     $RenderWidth = $OutputWidth
@@ -1100,6 +1128,15 @@ $Plan = [ordered]@{
     vr_temporal_smoothing=if($VRMode-eq'DepthSBS'){$VRTemporalSmoothing}else{$null}
     vr_max_disparity_percent=if($VRMode-eq'DepthSBS'){$VRMaxDisparityPercent}else{$null}
     vr_stereo_method=if($VRMode-eq'DepthSBS'){$VRStereoMethod}else{$null}
+    vr_rowflow_width=if($VRMode-eq'DepthSBS' -and $VRStereoMethod-eq'RowFlowV3'){$ResolvedRowFlowWidth}else{$null}
+    vr_rowflow_steps=if($VRMode-eq'DepthSBS' -and $VRStereoMethod-eq'RowFlowV3'){if($VRRowFlowSteps-gt 0){$VRRowFlowSteps}else{'auto'}}else{$null}
+    vr_rowflow_edge_dilation=if($VRMode-eq'DepthSBS' -and $VRStereoMethod-eq'RowFlowV3'){@($VRRowFlowEdgeX,$VRRowFlowEdgeY)}else{$null}
+    vr_rowflow_preserve_border=if($VRMode-eq'DepthSBS' -and $VRStereoMethod-eq'RowFlowV3'){[bool]$VRRowFlowPreserveBorder}else{$null}
+    canonical_depth_pipeline_passes=1
+    depth_model_reinvocations=0
+    depth_consumers=if($VRMode-eq'DepthSBS'){
+        if($VRGenerativeBackend-eq'TemporalAtlas'){@('DLSS5','VR stereo','Temporal Atlas')}else{@('DLSS5','VR stereo')}
+    }else{@('DLSS5')}
     vr_eye_anchor=if($VRMode-eq'DepthSBS'){$VREyeAnchor}else{$null}
     vr_temporal_mode=if($VRMode-eq'DepthSBS'){$VRTemporalMode}else{$null}
     vr_convergence_mode=if($VRMode-eq'DepthSBS'){$VRConvergenceMode}else{$null}
@@ -1819,9 +1856,9 @@ try {
             $VrLeftComposeMask = Join-Path $Work 'vr-left-compose-mask.mkv'
             $CodecNameVr = if ($Codec -eq 'H265') { 'h265' } else { 'h264' }
             $VrDepthPixelFormat = if($Codec-eq'H265' -and $VRPixelFormat-eq'HEVC10Bit'){'p010le'}else{'yuv420p'}
-            $VrStereoMethodName = if($VRStereoMethod-eq'TemporalLDI'){'temporal-ldi'}else{$VRStereoMethod.ToLowerInvariant()}
+            $VrStereoMethodName = switch($VRStereoMethod){'TemporalLDI'{'temporal-ldi'}'RowFlowV3'{'rowflow-v3'}default{$VRStereoMethod.ToLowerInvariant()}}
             $VrDepthArgs = @(
-                '-s','-B',$VRDepthWorker,'--ffmpeg',$Ffmpeg,'--input-video',$FlatOutput,
+                '-s','-B',$VRDepthWorker,'--root',$Root,'--ffmpeg',$Ffmpeg,'--input-video',$FlatOutput,
                 '--depth-directory',$ChunkDirectory,'--motion-directory',$ChunkDirectory,'--output-video',$VrDepthVideoOnly,
                 '--width',$OutputWidth,'--height',$OutputHeight,'--frames',$TotalFrames,'--fps',$Fps,
                 '--layout',$VrWorkerLayout,
@@ -1833,6 +1870,8 @@ try {
                 '--temporal-smoothing',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRTemporalSmoothing)),
                 '--max-disparity-percent',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRMaxDisparityPercent)),
                 '--stereo-method',$VrStereoMethodName,
+                '--rowflow-width',$ResolvedRowFlowWidth,'--rowflow-steps',$VRRowFlowSteps,
+                '--rowflow-edge-x',$VRRowFlowEdgeX,'--rowflow-edge-y',$VRRowFlowEdgeY,
                 '--eye-anchor',$VrWorkerEyeAnchor,
                 '--temporal-mode',$VRTemporalMode.ToLowerInvariant(),
                 '--convergence-mode',$VRConvergenceMode.ToLowerInvariant(),
@@ -1856,6 +1895,7 @@ try {
                 '--pixel-format',$VrDepthPixelFormat,
                 '--codec',$CodecNameVr,'--quality',$Quality
             )
+            if ($VRRowFlowPreserveBorder) { $VrDepthArgs += '--rowflow-preserve-border' }
             if ($UseTemporalAtlas) {
                 $VrDepthArgs += @('--right-compose-mask-output',$VrRightComposeMask,'--left-compose-mask-output',$VrLeftComposeMask)
             } elseif ($UseGenerativeVr) {
@@ -1928,7 +1968,7 @@ try {
                         backend='TemporalAtlas';flow_backend=$AtlasFlowBackend;flow_max_side=$AtlasFlowMaxSide
                         lookaround_frames=$AtlasLookaround;raft_updates=$AtlasRaftUpdates
                         max_neural_regions=$AtlasMaxNeuralRegions
-                        source_geometry='GAPW';eye_anchor='Symmetric';layout=$VRSbsLayout;output=$VrDepthVideoOnly
+                        source_geometry=$VRStereoMethod;eye_anchor='Symmetric';layout=$VRSbsLayout;output=$VrDepthVideoOnly
                     }|ConvertTo-Json -Compress))
                 } else {
                     $GeneratedRightEye = Join-Path $Work 'vr-generative-right-eye.mkv'
@@ -2145,6 +2185,13 @@ try {
         vr_temporal_smoothing = if($VRMode-eq'DepthSBS'){$VRTemporalSmoothing}else{$null}
         vr_max_disparity_percent = if($VRMode-eq'DepthSBS'){$VRMaxDisparityPercent}else{$null}
         vr_stereo_method = if($VRMode-eq'DepthSBS'){$VRStereoMethod}else{$null}
+        vr_rowflow_width = if($VRMode-eq'DepthSBS' -and $VRStereoMethod-eq'RowFlowV3'){$ResolvedRowFlowWidth}else{$null}
+        vr_rowflow_steps = if($VRMode-eq'DepthSBS' -and $VRStereoMethod-eq'RowFlowV3'){if($VRRowFlowSteps-gt 0){$VRRowFlowSteps}else{'auto'}}else{$null}
+        vr_rowflow_edge_dilation = if($VRMode-eq'DepthSBS' -and $VRStereoMethod-eq'RowFlowV3'){@($VRRowFlowEdgeX,$VRRowFlowEdgeY)}else{$null}
+        vr_rowflow_preserve_border = if($VRMode-eq'DepthSBS' -and $VRStereoMethod-eq'RowFlowV3'){[bool]$VRRowFlowPreserveBorder}else{$null}
+        canonical_depth_pipeline_passes = 1
+        depth_model_reinvocations = 0
+        vr_depth_reused_from_dlss5 = $VRMode-eq'DepthSBS'
         vr_eye_anchor = if($VRMode-eq'DepthSBS'){$VREyeAnchor}else{$null}
         vr_temporal_mode = if($VRMode-eq'DepthSBS'){$VRTemporalMode}else{$null}
         vr_convergence_mode = if($VRMode-eq'DepthSBS'){$VRConvergenceMode}else{$null}
