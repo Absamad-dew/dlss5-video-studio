@@ -1,5 +1,7 @@
 # DLSS5 Video Studio 22.3
 
+Complete project documentation: [Russian guide](PROJECT_DOCUMENTATION_RU.md).
+
 22.3 integrates the pinned official **IW3 RowFlow V3** model into Studio's main
 VR pipeline. DLSS5, RowFlow and Temporal Atlas consume one canonical stabilized
 depth/motion cache; RowFlow never invokes IW3's depth estimator a second time.

@@ -231,6 +231,7 @@ Copy-Item -LiteralPath `
     -Destination (Join-Path $Target 'app') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'dist\DLSS5 Video Studio.exe') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'README_OPTIMIZED_RU.md') -Destination (Join-Path $Target 'README_RU.md') -Force
+Copy-Item -LiteralPath (Join-Path $Build 'PROJECT_DOCUMENTATION_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'OPTIMIZATION_V22_RU.md'),(Join-Path $Build 'THIRD_PARTY_NOTICES.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'REALTIME_DEPTH_FIX_V22_0_1_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'IW3_VR_V22_1_RU.md') -Destination $Target -Force
