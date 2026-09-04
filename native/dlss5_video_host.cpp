@@ -1320,6 +1320,34 @@ static void SuspendStreamlineFrameGeneration(const char *reason)
     g_streamline_last_present_count = 1;
 }
 
+static bool ShutdownStreamline()
+{
+    if (!g_streamline_initialized) return true;
+    // DLSS-G owns asynchronous presentation work. Returning from main without
+    // slShutdown left nvngx_dlssg unloading under the process loader lock
+    // (0xc0000409), even after HOST_STREAM_DONE. Retain tagged textures and
+    // DXGI/D3D12 objects until Streamline has stopped its workers.
+    SuspendStreamlineFrameGeneration("shutdown");
+    if (h.queue != nullptr && h.fence != nullptr)
+    {
+        const UINT64 value = ++h.fence_value;
+        if (FAILED(h.queue->Signal(h.fence, value)) || !WaitFenceValue(h.fence, value, 10000))
+            return false;
+    }
+    if (h.pump_queue != nullptr && g_pump_fence != nullptr)
+    {
+        const UINT64 value = ++g_pump_val;
+        if (FAILED(h.pump_queue->Signal(g_pump_fence, value)) || !WaitFenceValue(g_pump_fence, value, 10000))
+            return false;
+    }
+    const sl::Result result = slShutdown();
+    Log("[streamline] slShutdown -> %d", static_cast<int>(result));
+    g_streamline_initialized = false;
+    g_streamline_fg_requested = false;
+    g_streamline_fg_activate_after_present = false;
+    return result == sl::Result::eOk;
+}
+
 static bool PrepareStreamlineFrame(ID3D12Resource *hudless, ID3D12Resource *depth,
                                    ID3D12Resource *motion, UINT render_width, UINT render_height,
                                    UINT output_width, UINT output_height, bool reset,
@@ -4389,6 +4417,8 @@ static int RunBatch(const BatchOptions &o)
                 streamline_max_presented_per_render);
         }
 
+        if (!ShutdownStreamline()) throw std::runtime_error("Streamline shutdown did not complete");
+
         for (int i = 0; i < kPipeline; ++i)
         {
             if (color_up[i].persistent_map != nullptr) color_up[i].buffer->Unmap(0, nullptr);
@@ -4764,6 +4794,12 @@ int main(int argc, char **argv)
     if (!InitNgx()) { Log("[host] NGX unavailable"); return 1; }
 
     if (test) return RunTest();
-    if (batch.enabled) return RunBatch(batch);
+    if (batch.enabled)
+    {
+        const int result = RunBatch(batch);
+        // Also unwind initialized Streamline after cancellation/error paths.
+        const bool shutdown_ok = ShutdownStreamline();
+        return result != 0 ? result : (shutdown_ok ? 0 : 1);
+    }
     return Serve(pid);
 }

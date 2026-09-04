@@ -1,2 +1,2 @@
-22.0.0-direct-nvenc
-GPU-resident D3D12 NVENC for recording with automatic compatibility fallback; explicit BT.709 input metadata; startup-only upload memory released in realtime and recording.
+22.0.1-depth-realtime-fix
+Restore Video Depth Small weights and streaming code; preflight selected depth before network/audio; repair single-model installer arguments; shut down Streamline before releasing frame-generation resources.

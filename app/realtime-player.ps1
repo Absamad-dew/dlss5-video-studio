@@ -8,7 +8,7 @@ param(
     [ValidateSet('UltraFast','Fast','Medium','Heavy','Maximum')] [string] $PerformanceProfile = 'Medium',
     [ValidateSet('Auto','Standard','HighVram')] [string] $HardwareProfile = 'Auto',
     [ValidateSet('Auto','Native','Quality','Balanced','Performance')] [string] $RenderPreset = 'Auto',
-    [ValidateSet('DA2Small','VideoDepthSmall','DA3Small','DA3Base')] [string] $DepthModelProfile = 'DA2Small',
+    [ValidateSet('DA2Small','VideoDepthSmall','DA3Small','DA3Base','DA3Large')] [string] $DepthModelProfile = 'DA2Small',
     [ValidateSet('None','NanoVSR','AnimeSR','FlashVSR','DLoRAL')] [string] $Upscaler = 'None',
     [ValidateSet('Auto','Realtime','Balanced','Quality','Max')] [string] $UpscalerVariant = 'Auto',
     [ValidateRange(0.0,1.0)] [double] $UpscalerStrength = 1.0,
@@ -43,6 +43,8 @@ $Utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $Utf8NoBom
 $OutputEncoding = $Utf8NoBom
 $Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+Import-Module (Join-Path $PSScriptRoot 'depth-models.psm1') -Force
+Assert-DepthModelReady -Root $Root -Profile $DepthModelProfile
 $Ffprobe = Join-Path $Root 'tools\ffprobe.exe'
 $Ffplay = Join-Path $Root 'tools\ffplay.exe'
 $YtDlp = Join-Path $Root 'tools\yt-dlp.exe'

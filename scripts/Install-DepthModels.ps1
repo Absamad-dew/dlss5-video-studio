@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string] $PortableRoot = 'D:\DLSS5_VIDEO_STUDIO_PORTABLE_REALTIME_V11',
+    [string] $PortableRoot = (Split-Path -Parent $PSScriptRoot),
     [ValidateSet('All','VideoSmall','DA3Small','DA3Base','DA3Large')] [string] $Selection = 'All'
 )
 
@@ -13,12 +13,12 @@ if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) { throw "Portable Python is missing: $Python" }
 if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) { throw "Installer is missing: $Installer" }
-$Models = switch ($Selection) {
+[string[]] $Models = switch ($Selection) {
     'VideoSmall' { @('video-small') }
     'DA3Small' { @('da3-small') }
     'DA3Base' { @('da3-base') }
     'DA3Large' { @('da3-large') }
     default { @('video-small','da3-small','da3-base') }
 }
-& $Python -B $Installer --target-root (Join-Path $Root 'models\depth') --models @Models
+& $Python -s -B $Installer --target-root (Join-Path $Root 'models\depth') --models @Models
 if ($LASTEXITCODE -ne 0) { throw "Depth model installation failed with exit code $LASTEXITCODE" }

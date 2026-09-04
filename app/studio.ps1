@@ -4,6 +4,7 @@ Add-Type -AssemblyName System.Windows.Forms
 $ErrorActionPreference = 'Stop'
 $ScriptDirectory = if ($StudioScriptBase) { [string]$StudioScriptBase } else { [string]$PSScriptRoot }
 $Root = [IO.Path]::GetFullPath((Join-Path $ScriptDirectory '..'))
+Import-Module (Join-Path $ScriptDirectory 'depth-models.psm1') -Force
 $Runner = Join-Path $ScriptDirectory 'process-video.ps1'
 $RealtimeRunner = Join-Path $ScriptDirectory 'realtime-player.ps1'
 $Ffprobe = Join-Path $Root 'tools\ffprobe.exe'
@@ -26,7 +27,7 @@ $Invariant = [Globalization.CultureInfo]::InvariantCulture
 $Xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DLSS5 Video Studio 22 · GPU-direct NVENC" Width="1500" Height="960"
+        Title="DLSS5 Video Studio 22.0.1 · GPU-direct NVENC" Width="1500" Height="960"
         MinWidth="1120" MinHeight="720" WindowStartupLocation="CenterScreen"
         Background="#090D14" Foreground="#DCE7F5" FontFamily="Segoe UI">
   <Window.Resources>
@@ -1410,6 +1411,10 @@ $RunButton.Add_Click({
         if ($script:Process) { throw 'Обработка уже выполняется.' }
         $WorkspaceMode=Get-WorkspaceMode
         $Realtime = $WorkspaceMode -eq 'Realtime'
+        $DepthStatus = Get-DepthModelStatus -Root $Root -Profile (Combo-Tag $DepthModelCombo)
+        if (-not $DepthStatus.Ready) {
+            throw "Модель глубины $($DepthStatus.Profile) установлена не полностью. Запустите $($DepthStatus.Installer) в папке программы или выберите установленную модель. Не хватает: $($DepthStatus.Missing -join ', ')"
+        }
         $IsOnlineSource = $InputBox.Text -match '^https?://'
         if ([string]::IsNullOrWhiteSpace($InputBox.Text)) { throw 'Выберите видеофайл или вставьте ссылку.' }
         if (-not $IsOnlineSource -and -not (Test-Path -LiteralPath $InputBox.Text -PathType Leaf)) { throw 'Выберите существующий входной видеофайл.' }
@@ -1655,6 +1660,13 @@ $VRDisparityCurveCombo.SelectedIndex=0
 $HardwareCombo.SelectedIndex=0
 $RenderPresetCombo.SelectedIndex=0
 $DepthModelCombo.SelectedIndex=0
+foreach ($Item in $DepthModelCombo.Items) {
+    $DepthStatus = Get-DepthModelStatus -Root $Root -Profile ([string]$Item.Tag)
+    if (-not $DepthStatus.Ready) {
+        $Item.Content = [string]$Item.Content + ' · не установлен'
+        $Item.ToolTip = "Не хватает файлов модели. Установка: $($DepthStatus.Installer). Проверка повторяется при запуске."
+    }
+}
 $FrameGenerationCombo.SelectedIndex=0
 $RealtimeTargetFpsCombo.SelectedIndex=3
 $RealtimeFpsCombo.SelectedIndex=0

@@ -6,6 +6,15 @@ The repository contains source code and dependency installers. It intentionally 
 
 ## Version 22 highlights
 
+22.0.1 fixes Medium/Maximum realtime startup when Video Depth Anything Small
+was selected but its checkpoint/runtime was missing. `INSTALL_VIDEO_DEPTH.cmd`
+installs the pinned, SHA-256-verified checkpoint and streaming source together.
+The UI and both runners check model files before network resolution/audio start;
+uninstalled choices are labelled instead of being silently replaced. DLSS-G now
+shuts down explicitly before its tagged textures are released, fixing a reproduced
+`nvngx_dlssg.dll` crash after the last presented frame. See
+`REALTIME_DEPTH_FIX_V22_0_1_RU.md` for local test coverage and limitations.
+
 Recording now uses GPU-resident D3D12 NVENC with explicit resource fences and an initialization-time compatibility fallback. The old FFmpeg path now receives correct input BT.709 metadata, avoiding a hidden CPU YUV→RGB→YUV conversion. Startup-only full-size upload allocations are released in both recording and realtime (about 183 MiB at 1440p / 411 MiB at 4K).
 
 A controlled laptop native-stage benchmark measured 24.393→29.981 FPS (+22.9%). This excludes guide generation and source decoding. Pixel/timestamp parity is tested by encoding the exact same captured GPU frames with both backends. See [V22 validation and limitations](OPTIMIZATION_V22_RU.md). Older constant-color transport benchmarks below are not representative video-quality evidence.

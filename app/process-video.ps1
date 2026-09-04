@@ -106,6 +106,8 @@ $Utf8NoBom = New-Object Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $Utf8NoBom
 $OutputEncoding = $Utf8NoBom
 $Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+Import-Module (Join-Path $PSScriptRoot 'depth-models.psm1') -Force
+Assert-DepthModelReady -Root $Root -Profile $DepthModelProfile
 $Engine = Join-Path $Root 'engine'
 $Tools = Join-Path $Root 'tools'
 $Ffmpeg = Join-Path $Tools 'ffmpeg.exe'
@@ -1685,7 +1687,7 @@ try {
     $HostProcess.StandardInput.Close()
     Wait-ProtocolLine $HostProcess 'HOST_STREAM_DONE ' 'DLSS5 host'
     $HostProcess.WaitForExit()
-    if ($HostProcess.ExitCode -ne 0) { throw "DLSS5 host failed: $($HostProcess.StandardError.ReadToEnd())" }
+    if ($HostProcess.ExitCode -ne 0) { throw "DLSS5 host failed (exit $($HostProcess.ExitCode)): $($HostProcess.StandardError.ReadToEnd())" }
 
     # The primary guide/DLSS/NVENC pipeline is drained. Return the controller to
     # its original CPU set before concat, audio mux, optional VSR and VR tools;

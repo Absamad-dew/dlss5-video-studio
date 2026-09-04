@@ -37,7 +37,7 @@ foreach ($Relative in $Directories) {
 foreach ($Name in @('START.cmd','NVIDIA_RUNTIME_NOTICE.txt','THIRD_PARTY_NOTICES.md')) {
     Copy-Item -LiteralPath (Join-Path $Base $Name) -Destination (Join-Path $Target $Name) -Force
 }
-Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_DA3_LARGE.cmd'),(Join-Path $Build 'INSTALL_M2SVID_EXPERIMENTAL.cmd'),(Join-Path $Build 'INSTALL_MOEBIUS_EXPERIMENTAL.cmd') -Destination $Target -Force
+Copy-Item -LiteralPath (Join-Path $Build 'INSTALL_VIDEO_DEPTH.cmd'),(Join-Path $Build 'INSTALL_DA3_LARGE.cmd'),(Join-Path $Build 'INSTALL_M2SVID_EXPERIMENTAL.cmd'),(Join-Path $Build 'INSTALL_MOEBIUS_EXPERIMENTAL.cmd') -Destination $Target -Force
 Copy-Item -Path (Join-Path $Base 'licenses\*') -Destination (Join-Path $Target 'licenses') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $Build 'licenses\vr\MI-GAN-MIT.txt') -Destination (Join-Path $Target 'licenses\vr') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'licenses\NVENC-header-MIT.txt') -Destination (Join-Path $Target 'licenses') -Force
@@ -46,6 +46,8 @@ if (-not [string]::IsNullOrWhiteSpace($MainModelSource)) {
     $ResolvedModelSource = [IO.Path]::GetFullPath($MainModelSource)
     foreach ($Relative in @(
         'models\depth\da3-small',
+        'models\depth\video_depth_anything_vits.pth',
+        'third_party\video-depth-anything',
         'models\motion\raft_small_C_T_V2-01064c6d.pth',
         'models\vr\migan'
     )) {
@@ -183,11 +185,13 @@ Copy-Item -LiteralPath `
     (Join-Path $Build 'app\process-video.ps1'), `
     (Join-Path $Build 'app\realtime-player.ps1'), `
     (Join-Path $Build 'app\source-resolver.psm1'), `
+    (Join-Path $Build 'app\depth-models.psm1'), `
     (Join-Path $Build 'app\studio.ps1') `
     -Destination (Join-Path $Target 'app') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'dist\DLSS5 Video Studio.exe') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'README_OPTIMIZED_RU.md') -Destination (Join-Path $Target 'README_RU.md') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'OPTIMIZATION_V22_RU.md'),(Join-Path $Build 'THIRD_PARTY_NOTICES.md') -Destination $Target -Force
+Copy-Item -LiteralPath (Join-Path $Build 'REALTIME_DEPTH_FIX_V22_0_1_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'VR_RESEARCH_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'VERSION_OPTIMIZED.txt') -Destination (Join-Path $Target 'VERSION.txt') -Force
 

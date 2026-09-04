@@ -41,6 +41,8 @@ try {
     foreach ($Relative in @(
         'models\depth_anything_v2_small.onnx',
         'models\depth\da3-small',
+        'models\depth\video_depth_anything_vits.pth',
+        'third_party\video-depth-anything',
         'models\motion\raft_small_C_T_V2-01064c6d.pth',
         'models\vr\migan',
         'licenses\DEPTH_ANYTHING_V2_APACHE2.txt',
@@ -61,7 +63,8 @@ DLSS5 VIDEO STUDIO — MAIN MODELS V{VERSION}
 Распакуйте содержимое прямо в корень portable-папки рядом с
 DLSS5 Video Studio.exe. Дополнительную вложенную папку создавать не нужно.
 
-Архив добавляет главные модели: DA2 Small, DA3 Small, RAFT Small и
+Архив добавляет главные модели: DA2 Small, DA3 Small, Video Depth Anything Small
+(вместе с кодом потоковой обработки), RAFT Small и
 компактную MI-GAN для остаточных областей Temporal Atlas. После
 распаковки запустите VERIFY_MAIN_MODELS.cmd.
 Успешная проверка заканчивается строкой MAIN_MODEL_PACK_VERIFY_OK.
@@ -86,7 +89,7 @@ DLSS5 Video Studio.exe. Дополнительную вложенную папк
         schema = 'dlss5-video-studio-main-model-pack/1'
         version = $Version
         extractionRoot = 'DLSS5 Video Studio portable root'
-        includedProfiles = @('DA2Small','DA3Small','RAFTSmall','TemporalAtlasMIGAN')
+        includedProfiles = @('DA2Small','DA3Small','VideoDepthSmall','RAFTSmall','TemporalAtlasMIGAN')
         totalBytes = $TotalBytes
         files = $Files
     }
