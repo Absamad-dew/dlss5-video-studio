@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory)] [string] $InputVideo,
     [string] $OutputVideo,
     [string] $ParentWorkDirectory,
+    [string] $ReplayVrDepthDirectory,
     [Parameter(Mandatory)] [string] $ConfigPath,
     [ValidateSet('H264','H265')] [string] $Codec = 'H265',
     [ValidateRange(0,51)] [int] $Quality = 18,
@@ -27,13 +28,21 @@ param(
     [ValidateRange(0.0,0.95)] [double] $VRTemporalSmoothing = 0.55,
     [ValidateRange(0.5,5.0)] [double] $VRMaxDisparityPercent = 2.4,
     [ValidateSet('Inverse','Layered','TemporalLDI','GAPW','RowFlowV3')] [string] $VRStereoMethod = 'GAPW',
+    [ValidateSet('Native','Legacy')] [string] $VRQualityPipeline = 'Native',
+    [ValidateSet('Auto','Serial')] [string] $VRPipelineScheduling = 'Auto',
+    [ValidateSet('IW3','Studio')] [string] $VRGeometryMode = 'IW3',
+    [ValidateSet('Selected','Any_V3_Mono','Studio_DA3_Small','Studio_DA3_Base','Studio_DA3_Large_11','Studio_DA3_Giant_11')] [string] $VRDepthModel = 'Selected',
+    [ValidateSet(392,518,644,812)] [int] $VRDepthResolution = 518,
+    [ValidateSet('eager','cuda-graph')] [string] $VRDepthExecutor = 'eager',
+    [ValidateSet(0,128,256,512,1024)] [int] $VRFeatureCacheMB = 256,
+    [ValidateSet(192,256)] [int] $VRInpaintHalo = 192,
     [ValidateSet('Auto','512','768','1024','1536','Native')] [string] $VRRowFlowWidth = 'Auto',
     [ValidateRange(0,12)] [int] $VRRowFlowSteps = 0,
     [ValidateRange(0,4)] [int] $VRRowFlowEdgeX = 2,
     [ValidateRange(0,4)] [int] $VRRowFlowEdgeY = 1,
     [switch] $VRRowFlowPreserveBorder,
     [ValidateSet('PreStereo','PreAndPerEye')] [string] $VRDLSSMode = 'PreStereo',
-    [ValidateSet('Off','TemporalAtlas','MoebiusSparse','M2SVidHybrid','M2SVidFull')] [string] $VRGenerativeBackend = 'Off',
+    [ValidateSet('Off','SourceAtlas','TemporalVideo','TemporalAtlas','MoebiusSparse','M2SVidHybrid','M2SVidFull')] [string] $VRGenerativeBackend = 'Off',
     [ValidateSet('Auto','384','512','640','768','1024','1536')] [string] $VRGenerativeResolution = 'Auto',
     [ValidateRange(0,30)] [int] $VRGenerativeChunkFrames = 0,
     [ValidateRange(0,8)] [int] $VRGenerativeOverlapFrames = 2,
@@ -113,6 +122,16 @@ $Utf8NoBom = New-Object Text.UTF8Encoding($false)
 $OutputEncoding = $Utf8NoBom
 $Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Import-Module (Join-Path $PSScriptRoot 'depth-models.psm1') -Force
+$NativeVr = $VRMode -eq 'DepthSBS' -and $VRStereoMethod -eq 'RowFlowV3' -and $VRQualityPipeline -eq 'Native' -and $VRGenerativeBackend -in @('Off','SourceAtlas','TemporalVideo')
+if ($VRMode -eq 'DepthSBS' -and $VRGenerativeBackend -in @('SourceAtlas','TemporalVideo') -and -not $NativeVr) {
+    throw 'SourceAtlas / TemporalVideo require the Native VR pipeline and RowFlow V3 stereo method.'
+}
+$RequestedDepthProfile = $DepthModelProfile
+if ($NativeVr -and $VRDepthModel -ne 'Selected') {
+    # Transport still needs a valid guide configuration; dedicated VR depth is
+    # selected explicitly below. No DA2 inference runs in this branch.
+    $DepthModelProfile = 'DA2Small'
+}
 Assert-DepthModelReady -Root $Root -Profile $DepthModelProfile
 $Engine = Join-Path $Root 'engine'
 $Tools = Join-Path $Root 'tools'
@@ -181,6 +200,7 @@ function Stage([int] $Current, [int] $Total, [string] $Message) {
 }
 
 function Emit-Progress([string] $Phase, [string] $Message, [double] $Percent, [int] $ProcessedFrames, [int] $PhaseFrames, [double] $PhaseElapsedSeconds) {
+    if($NativeStream -and $Phase-eq'DLSS5'){Test-NativeStream;return}
     $Clamped = [math]::Max(0.0,[math]::Min(100.0,$Percent))
     $Elapsed = $PipelineWatch.Elapsed.TotalSeconds
     $Eta = if ($Clamped -gt 0.25 -and $Clamped -lt 100) { [math]::Max(0.0,$Elapsed*(100.0-$Clamped)/$Clamped) } else { $null }
@@ -214,7 +234,26 @@ function Run-Tool([string] $File, [object[]] $Arguments, [string] $Failure) {
     $PreviousErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & $File @Arguments 2>&1 | ForEach-Object { Write-Output ([string]$_) }
+        & $File @Arguments 2>&1 | ForEach-Object {
+            $Line = [string]$_
+            Write-Output $Line
+            if ($NativeVr -and $Line -match '^VR_DEPTH_PROGRESS (?<json>.+)$') {
+                try {
+                    $VrProgress = $Matches.json | ConvertFrom-Json
+                    $Done = [int]$VrProgress.frames; $All = [math]::Max(1,[int]$VrProgress.total)
+                    $Payload = [ordered]@{
+                        phase='Native VR'; message=('Written {0}/{1}; prepared {2}; queued {3}' -f $Done,$All,$VrProgress.prepared_frames,$VrProgress.queue_frames)
+                        percent=[math]::Round(95+2*$Done/$All,3)
+                        processed_frames=$Done; total_frames=$All
+                        elapsed_seconds=[math]::Round($PipelineWatch.Elapsed.TotalSeconds,3)
+                        eta_seconds=$VrProgress.eta_s; phase_fps=$VrProgress.fps
+                    }
+                    Write-Output ('STUDIO_PROGRESS_JSON '+($Payload|ConvertTo-Json -Compress))
+                } catch { Write-Verbose 'Unrecognized VR telemetry line' }
+            } elseif ($NativeVr -and $Line -match '^VR_DEPTH_DONE (?<json>.+)$') {
+                try { $script:NativeVrMetrics=$Matches.json|ConvertFrom-Json } catch {}
+            }
+        }
         $NativeExitCode = $LASTEXITCODE
     }
     finally {
@@ -323,6 +362,9 @@ function Invoke-VrPerEyeDlss([string] $StereoInput, [string] $StereoOutput) {
             '-Upscaler','None','-PipelineOrder','DLSSOnly','-VRMode','Off',
             '-StartSeconds','0','-FrameCount',$TotalFrames,'-GuideWorkerThreads',$GuideWorkerThreads
         )
+        if ($NativeVr) {
+            $ChildArguments += @('-ReplayVrDepthDirectory',(Join-Path $Work ('vr-eye-depth/'+$EyeName)))
+        }
         if ($FineGuideSettings) {
             $ChildArguments += @(
                 '-FineGuideSettings','-GuideWidthOverride',$GuideWidthOverride,
@@ -400,6 +442,57 @@ function Resolve-RealtimeRenderScale([string] $Preset, [string] $ResolvedHardwar
 function Quote-ProcessArgument([string] $Value) {
     if ($Value -notmatch '[\s"]') { return $Value }
     return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Get-NativeStreamArguments {
+    $LayoutName = switch ($VRSbsLayout) { 'FullSBS' {'full-sbs'} 'HalfOU' {'half-ou'} 'FullOU' {'full-ou'} default {'half-sbs'} }
+    $FillName = switch ($VRGenerativeBackend) { 'TemporalVideo' {'temporal-video'} 'SourceAtlas' {'source-atlas'} default {'off'} }
+    $Result = @('-s','-B',$VRDepthWorker,'--root',$Root,'--ffmpeg',$Ffmpeg,'--input-video',$InputVideo,
+        '--depth-directory',$ChunkDirectory,'--output-video',$VideoOnly,'--width',$OutputWidth,'--height',$OutputHeight,
+        '--frames',$TotalFrames,'--fps',$Fps,'--layout',$LayoutName,'--codec',$Codec.ToLowerInvariant(),
+        '--pixel-format',$(if($Codec-eq'H265' -and $VRPixelFormat-eq'HEVC10Bit'){'p010le'}else{'yuv420p'}),
+        '--quality',$Quality,'--stereo-method','rowflow-v3','--rowflow-width',$ResolvedRowFlowWidth,
+        '--rowflow-steps',$VRRowFlowSteps,'--rowflow-edge-x',$VRRowFlowEdgeX,'--rowflow-edge-y',$VRRowFlowEdgeY,
+        '--eye-anchor',$VREyeAnchor.ToLowerInvariant(),'--temporal-mode',$VRTemporalMode.ToLowerInvariant(),
+        '--convergence-mode',$VRConvergenceMode.ToLowerInvariant(),'--disparity-curve',$VRDisparityCurve.ToLowerInvariant(),
+        '--native-depth','--native-geometry',$VRGeometryMode.ToLowerInvariant(),'--native-fill',$FillName,
+        '--native-cache-mb',$VRFeatureCacheMB,'--native-halo',$VRInpaintHalo,
+        '--native-rgb-pipe',$NativeRgbPipe,'--native-controller-pid',$PID,'--native-ready-file',$NativeReadyFile)
+    # One explicit mapping prevents culture-dependent decimal arguments.
+    $Controls = [ordered]@{
+        'eye-separation'='VREyeSeparation';'convergence'='VRConvergence';'depth-gamma'='VRDepthGamma'
+        'edge-feather'='VREdgeFeather';'temporal-smoothing'='VRTemporalSmoothing';'max-disparity-percent'='VRMaxDisparityPercent'
+        'convergence-smoothing'='VRConvergenceSmoothing';'depth-range-smoothing'='VRDepthRangeSmoothing'
+        'edge-protection'='VREdgeProtection';'comfort-strength'='VRComfortStrength'
+        'foreground-strength'='VRForegroundStrength';'background-strength'='VRBackgroundStrength'
+        'z-buffer-strength'='VRZBufferStrength';'ldi-layers'='VRLDILayers';'native-strength'='VRGenerativeHoleStrength'
+    }
+    foreach($Pair in $Controls.GetEnumerator()) {
+        $Result += @(('--'+$Pair.Key),[string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',(Get-Variable -Name $Pair.Value -ValueOnly)))
+    }
+    if($VRRowFlowPreserveBorder){$Result+='--rowflow-preserve-border'}
+    if($VREyeSwap){$Result+='--eye-swap'}
+    return $Result
+}
+
+function Test-NativeStream {
+    if($NativeVrProcess -and $NativeVrProcess.HasExited -and $NativeVrProcess.ExitCode-ne 0){
+        $Detail = if(Test-Path -LiteralPath $NativeErrLog){(Get-Content -LiteralPath $NativeErrLog -Tail 30)-join [Environment]::NewLine}else{''}
+        throw "Native VR stream failed ($($NativeVrProcess.ExitCode)): $Detail"
+    }
+    if($NativeStream -and $NativeVrProcess -and ([DateTime]::UtcNow-$script:NativeLastPoll).TotalSeconds-ge .5){
+        $script:NativeLastPoll=[DateTime]::UtcNow
+        $StatusPath=[IO.Path]::ChangeExtension($NativeReadyFile,'.json')
+        if(Test-Path -LiteralPath $StatusPath){
+            try{$Status=Get-Content -LiteralPath $StatusPath -Raw|ConvertFrom-Json}catch{return}
+            if($Status.frames-ne$script:NativeLastFrames -or $Status.prepared_frames-ne$script:NativeLastPrepared){
+                $script:NativeLastFrames=$Status.frames; $script:NativeLastPrepared=$Status.prepared_frames
+                Emit-Progress 'Native VR' "Stereo $($Status.frames)/$TotalFrames; prepared $($Status.prepared_frames), queue $($Status.queue_frames)" (5+85*$Status.frames/[double]$TotalFrames) $Status.frames $TotalFrames $Status.elapsed_s
+            }
+        }
+        $Heartbeat=if(Test-Path -LiteralPath $StatusPath){(Get-Item -LiteralPath $StatusPath).LastWriteTimeUtc}else{$NativeVrProcess.StartTime.ToUniversalTime()}
+        if(([DateTime]::UtcNow-$Heartbeat).TotalSeconds-gt 240){throw 'Native VR made no progress for 240 seconds; stopping owned pipeline. See native-stream logs.'}
+    }
 }
 
 function Start-ProtocolProcess([string] $File, [string[]] $Arguments, [string] $WorkingDirectory) {
@@ -489,6 +582,7 @@ function Wait-HostChunkSubmitted($Process, $AcknowledgementCounter, [long] $Expe
         return
     }
     while ($AcknowledgementCounter.ReadInt64(0) -lt $ExpectedCount) {
+        Test-NativeStream
         if ($Process.HasExited) {
             if ($AcknowledgementCounter.ReadInt64(0) -ge $ExpectedCount) { return }
             $Details = $Process.StandardError.ReadToEnd().Trim()
@@ -542,6 +636,24 @@ if (($PreviewOnly -and $RealtimeMotionBackend -eq 'raft') -or
 }
 if ($VRMode -ne 'Off') { $RequiredFiles += @($UpscalerPython,$SpatialMediaTool) }
 if ($VRMode -eq 'DepthSBS') { $RequiredFiles += $VRDepthWorker }
+if ($NativeVr) {
+    $RequiredFiles += @($UpscalerPython,$GuideGeneratorScript,
+        (Join-Path $Root 'tools/guidegen/vr_shared_depth.py'),
+        (Join-Path $Root 'tools/vr_depth/vr_quality_worker.py'),
+        (Join-Path $Root 'tools/vr_depth/vr_reconstruction.py'))
+    if ($VRGenerativeBackend -eq 'TemporalVideo') {
+        $RequiredFiles += (Join-Path $Root 'models/iw3/pretrained_models/hub/checkpoints/iw3_light_video_inpaint_v1_20250919.pth')
+    }
+    if ($VRDepthModel -ne 'Selected') {
+        $VrCatalog = Get-Content -LiteralPath (Join-Path $Root 'app/iw3-da3-models.json') -Raw | ConvertFrom-Json
+        $VrModelEntry = $VrCatalog.models | Where-Object { $_.id -eq $VRDepthModel } | Select-Object -First 1
+        if (-not $VrModelEntry) { throw "Native VR model is not in the installed catalog: $VRDepthModel" }
+        $VrWeight = Join-Path $Root $VrModelEntry.path
+        if (-not (Test-Path -LiteralPath $VrWeight) -or (Get-Item -LiteralPath $VrWeight).Length -ne $VrModelEntry.bytes) {
+            throw "Native VR depth is not installed: $VRDepthModel. Run scripts/Install-Iw3Da3.ps1 -Model $VRDepthModel"
+        }
+    }
+}
 if ($VRMode -eq 'DepthSBS' -and $VRStereoMethod -eq 'RowFlowV3') {
     $RequiredFiles += @($RowFlowCode,$RowFlowInstallStatus,$RowFlowCheckpoint)
 }
@@ -956,7 +1068,16 @@ $VrEncoded = Join-Path $Work 'vr-encoded.mp4'
 # This avoids RGB chunk files, repeated FFmpeg startup and a second RGB->YUV
 # conversion. VSR-after-DLSS still needs independently addressable chunks as
 # the intermediate hand-off format.
-$DirectEncode = -not $IsPreviewOnly -and -not $VsrAfterDlss
+$NativeStream = $NativeVr -and $VRPipelineScheduling-eq'Auto' -and -not $IsPreviewOnly -and
+    -not $UseExternalUpscaler -and -not $LivePreview -and -not $CreateComparison -and
+    -not $KeepTemporaryFiles -and $VRDLSSMode-eq'PreStereo' -and
+    $VRDepthModel-in @('Selected','Any_V3_Mono','Studio_DA3_Small','Studio_DA3_Base')
+$NativeRgbPipe = '\\.\pipe\StudioNativeVR-'+[guid]::NewGuid().ToString('N')
+$NativeReadyFile = Join-Path $Work 'native-stream.ready'
+$NativeOutLog = Join-Path $(if($LogDirectory){$LogDirectory}else{$Work}) 'native-stream.stdout.log'
+$NativeErrLog = Join-Path $(if($LogDirectory){$LogDirectory}else{$Work}) 'native-stream.stderr.log'
+$DirectEncode = -not $IsPreviewOnly -and -not $VsrAfterDlss -and -not $NativeStream
+if($NativeVr){Write-Output "VR_SCHEDULING requested=$VRPipelineScheduling streaming=$NativeStream lossless_intermediate=$NativeStream"}
 if (-not $IsPreviewOnly) {
     New-Item -ItemType Directory -Force -Path $EncodedChunkDirectory | Out-Null
     if ($VsrAfterDlss) { New-Item -ItemType Directory -Force -Path $HostEncodedChunkDirectory | Out-Null }
@@ -1053,6 +1174,9 @@ $CodecName = if ($Codec -eq 'H265') { 'h265' } else { 'h264' }
 $PreviousPath = $env:PATH
 $env:PATH = $Tools + ';' + $env:PATH
 $GuideProcess = $null
+$NativeVrProcess = $null
+$script:NativeLastPoll=[DateTime]::MinValue
+$script:NativeLastFrames=-1; $script:NativeLastPrepared=-1
 $HostProcess = $null
 $UpscalerProcess = $null
 $PipelineWatch = [Diagnostics.Stopwatch]::StartNew()
@@ -1102,13 +1226,24 @@ $ContainerHeight = if ($VRMode -in @('CinemaSBS','DepthSBS') -and $VRSbsLayout -
 if ($VRMode -ne 'Off' -and $Codec -eq 'H264' -and ($ContainerWidth -gt 4096 -or $ContainerHeight -gt 4096)) {
     throw "H.264 NVENC cannot reliably encode the requested $($ContainerWidth)x$($ContainerHeight) VR container. Select H.265 or a Half-SBS/Half-OU layout."
 }
+if ($NativeVr -or $ReplayVrDepthDirectory) { $DepthInterval=1; $DepthMinInterval=1 }
+$EffectiveDepthModel = if ($NativeVr -and $VRDepthModel-ne'Selected') { $VRDepthModel } else { $DepthModelProfile }
 $Plan = [ordered]@{
     source_geometry=@($SourceWidth,$SourceHeight); output_geometry=@($OutputWidth,$OutputHeight)
     render_geometry=@($DlssInputWidth,$DlssInputHeight); hardware_profile=$ResolvedHardwareProfile
     rgb_transport_geometry=@($RgbTransportWidth,$RgbTransportHeight)
     frame_transport_format=$FrameTransportFormat
     realtime_render_preset=if($IsPreviewOnly){$ResolvedRealtimeRenderPreset}else{$null}
-    depth_model_profile=$DepthModelProfile
+    depth_model_profile=$EffectiveDepthModel
+    vr_quality_pipeline=if($NativeVr){'Native'}else{'Legacy'}
+    vr_geometry_mode=if($NativeVr){$VRGeometryMode}else{$null}
+    vr_depth_resolution=if($NativeVr -and $VRDepthModel-ne'Selected'){$VRDepthResolution}else{$null}
+    vr_depth_executor=if($NativeVr){$VRDepthExecutor}else{$null}
+    vr_raw_depth_cache=$NativeVr
+    vr_streaming=[bool]$NativeStream
+    vr_scheduling_requested=$VRPipelineScheduling
+    vr_feature_cache_mb=if($NativeVr){$VRFeatureCacheMB}else{$null}
+    vr_inpaint_halo=if($NativeVr){$VRInpaintHalo}else{$null}
     depth_backend_policy=$DepthBackendPolicy
     container_geometry=@($ContainerWidth,$ContainerHeight); source_fps=$SourceRate; fps=$Fps
     duration_seconds=$Duration; total_frames=$TotalFrames; pipeline_order=$PipelineOrder
@@ -1256,6 +1391,11 @@ try {
         if (Test-Path -LiteralPath $Old) { Move-Item -LiteralPath $Old -Destination ($Old + '.previous') -Force }
     }
 
+    if ($NativeVr) {
+        $DepthInterval = 1; $DepthMinInterval = 1
+        Write-Output "VR_NATIVE_DEPTH model=$VRDepthModel resolution=$VRDepthResolution executor=$VRDepthExecutor interval=1 raw_float32=true"
+    }
+    if ($ReplayVrDepthDirectory) { $DepthInterval = 1; $DepthMinInterval = 1 }
     $GuideArgs = @(
         '--server','--width',$DlssInputWidth,'--height',$DlssInputHeight,
         '--input-width',$RgbTransportWidth,'--input-height',$RgbTransportHeight,'--input-format',$FrameTransportFormat,'--depth-model',$DepthModel,
@@ -1271,7 +1411,13 @@ try {
         '--adaptive-motion',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$AdaptiveMotion)),
         '--temporal-depth',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$TemporalDepth))
     )
+    if ($NativeVr) {
+        $GuideArgs += @('--vr-canonical-depth','--vr-root',$Root,'--vr-depth-model',$VRDepthModel,
+            '--vr-depth-resolution',$VRDepthResolution,'--vr-depth-executor',$VRDepthExecutor)
+        if($NativeStream){$GuideArgs+='--vr-stream-depth'}
+    }
     if ($DepthCodeRoot) { $GuideArgs += @('--depth-code-root',$DepthCodeRoot) }
+    if ($ReplayVrDepthDirectory) { $GuideArgs += @('--vr-replay-depth',$ReplayVrDepthDirectory) }
     if ($SelectedMotionBackend -eq 'raft') {
         $RaftBatchSize = if ($ResolvedHardwareProfile -eq 'HighVram') { 8 } else { 4 }
         $GuideArgs += @('--raft-weights',$RaftWeights,'--raft-updates',$SelectedRaftUpdates,'--raft-batch-size',$RaftBatchSize)
@@ -1319,6 +1465,7 @@ try {
             }
         }
     }
+    elseif ($NativeStream) { $HostArgs += @('--output',$NativeRgbPipe) }
     elseif ($DirectEncode) {
         $HostArgs += @('--encode-mp4',$VideoOnly)
         # GPU-resident NV12 -> NVENC: only the compressed stream crosses to
@@ -1341,6 +1488,17 @@ try {
     # shadow bundled DirectML and silently move depth inference to the CPU.
     # Keeping the old frozen exe here also
     # made offline mode reject newer motion/depth controls.
+    if($NativeStream){
+        $NativeArguments = (Get-NativeStreamArguments | ForEach-Object {Quote-ProcessArgument ([string]$_)}) -join ' '
+        $NativeVrProcess = Start-Process -FilePath $UpscalerPython -ArgumentList $NativeArguments -WorkingDirectory $Root -WindowStyle Hidden -PassThru -RedirectStandardOutput $NativeOutLog -RedirectStandardError $NativeErrLog
+        $null=$NativeVrProcess.Handle # retain the exit-code handle after the worker exits
+        $NativeStartup = [Diagnostics.Stopwatch]::StartNew()
+        while(-not(Test-Path -LiteralPath $NativeReadyFile)){
+            Test-NativeStream
+            if($NativeVrProcess.HasExited -or $NativeStartup.Elapsed.TotalSeconds-gt 180){throw 'Native VR stream did not become ready; see native-stream logs'}
+            Start-Sleep -Milliseconds 100
+        }
+    }
     $GuideProcess = Start-ProtocolProcess $UpscalerPython (@('-s','-B',$GuideGeneratorScript)+$GuideArgs) $Root
     # FFmpeg is spawned by this process and inherits its class. Keep the guide
     # engine on its own cores in recording as well, so decode/depth cannot be
@@ -1804,8 +1962,17 @@ try {
 
     if (-not $IsPreviewOnly) {
         Stage 6 8 'Joining encoded chunks and restoring source audio'
-        Emit-Progress 'Assembly' 'Joining neural-rendered chunks' 91 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
-        if (-not $DirectEncode) { Join-EncodedChunks $EncodedChunkDirectory $VideoOnly $Chunks 'chunks-final.txt' }
+        if(-not $NativeStream){Emit-Progress 'Assembly' 'Joining neural-rendered chunks' 91 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds}
+        if($NativeStream){
+            while(-not $NativeVrProcess.HasExited){
+                Test-NativeStream
+                Start-Sleep -Milliseconds 100
+            }
+            $NativeVrProcess.WaitForExit(); Test-NativeStream
+            Get-Content -LiteralPath $NativeOutLog | Write-Output
+            $script:NativeVrMetrics = Get-Content -LiteralPath ([IO.Path]::ChangeExtension($VideoOnly,'.vr.json')) -Raw | ConvertFrom-Json
+            Emit-Progress 'Assembly' 'Stereo complete; restoring source audio' 91 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
+        } elseif (-not $DirectEncode) { Join-EncodedChunks $EncodedChunkDirectory $VideoOnly $Chunks 'chunks-final.txt' }
         $StartText = [string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.######}',$StartSeconds)
         $MuxArguments = @('-y','-v','error') + $AudioNetworkInputOptions + @(
             '-ss',$StartText,'-i',$InputAudioVideo,'-i',$VideoOnly,
@@ -1839,9 +2006,10 @@ try {
         } elseif ($VRMode -eq 'DepthSBS') {
             Stage 7 8 'Creating depth-warped stereoscopic 3D VR views'
             Emit-Progress '3D VR' 'Synthesizing distinct left/right views from neural depth' 95 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
+            if($NativeStream){ $VrDepthVideoOnly=$VideoOnly } else {
             $VrDepthVideoOnly = Join-Path $Work 'vr-depth-video-only.mp4'
             $LayoutName = switch ($VRSbsLayout) { 'FullSBS' {'full-sbs'} 'HalfOU' {'half-ou'} 'FullOU' {'full-ou'} default {'half-sbs'} }
-            $UseGenerativeVr = $VRGenerativeBackend -ne 'Off'
+            $UseGenerativeVr = $VRGenerativeBackend -ne 'Off' -and -not $NativeVr
             $UseTemporalAtlas = $VRGenerativeBackend -eq 'TemporalAtlas'
             # Generative backends must see an undistorted, full-resolution
             # left anchor and right-eye reprojection. Final headset packing
@@ -1895,6 +2063,13 @@ try {
                 '--pixel-format',$VrDepthPixelFormat,
                 '--codec',$CodecNameVr,'--quality',$Quality
             )
+            if ($NativeVr) {
+                $FillName = switch ($VRGenerativeBackend) { 'TemporalVideo' {'temporal-video'} 'SourceAtlas' {'source-atlas'} default {'off'} }
+                $VrDepthArgs += @('--native-depth','--native-geometry',$VRGeometryMode.ToLowerInvariant(),
+                    '--native-fill',$FillName,'--native-cache-mb',$VRFeatureCacheMB,'--native-halo',$VRInpaintHalo,
+                    '--native-strength',([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0:0.###}',$VRGenerativeHoleStrength)))
+                if ($VRDLSSMode -eq 'PreAndPerEye') { $VrDepthArgs += @('--native-eye-depth',(Join-Path $Work 'vr-eye-depth')) }
+            }
             if ($VRRowFlowPreserveBorder) { $VrDepthArgs += '--rowflow-preserve-border' }
             if ($UseTemporalAtlas) {
                 $VrDepthArgs += @('--right-compose-mask-output',$VrRightComposeMask,'--left-compose-mask-output',$VrLeftComposeMask)
@@ -2053,6 +2228,7 @@ try {
                     }|ConvertTo-Json -Compress))
                 }
             }
+            } # serial Native / Legacy stereo path
             if ($VRDLSSMode -eq 'PreAndPerEye') {
                 Emit-Progress '3D VR + DLSS5' 'Running a real DLSS5 refinement pass for each eye' 97 $TotalFrames $TotalFrames $PipelineWatch.Elapsed.TotalSeconds
                 $VrPerEyeDlss = Join-Path $Work 'vr-depth-per-eye-dlss.mp4'
@@ -2140,6 +2316,10 @@ try {
     if ($TemporalAtlasFps -gt 0 -and $SteadyFps -gt 0) {
         $SteadyFps = 1.0 / (1.0 / $SteadyFps + 1.0 / $TemporalAtlasFps)
     }
+    $NativeVrFps=if($script:NativeVrMetrics){[double]$script:NativeVrMetrics.fps}else{0.0}
+    if($NativeStream){$SteadyFps=0.0} # overlapping stages: report measured wall FPS, no reciprocal estimate
+    elseif($NativeVrFps-gt 0 -and $SteadyFps-gt 0){$SteadyFps=1.0/(1.0/$SteadyFps+1.0/$NativeVrFps)}
+    if($NativeVr -and $VRDLSSMode-eq'PreAndPerEye'){$SteadyFps=0.0} # no unmeasured per-eye estimate
     $WallFps = if ($ProcessingElapsedSeconds -gt 0) { $TotalFrames / $ProcessingElapsedSeconds } else { 0.0 }
     $DisplayFps = if ($PreviewFpsMatch.Success) { [double]::Parse($PreviewFpsMatch.Groups['fps'].Value, [Globalization.CultureInfo]::InvariantCulture) } else { 0.0 }
     $Result = [ordered]@{
@@ -2218,7 +2398,15 @@ try {
         vr_eye_swap = if($VRMode-eq'DepthSBS'){[bool]$VREyeSwap}else{$null}
         output_mode = $Mode
         depth_backend = $DepthProvider
-        depth_model_profile = $DepthModelProfile
+        depth_model_profile = $EffectiveDepthModel
+        vr_quality_pipeline = if($NativeVr){'Native'}else{'Legacy'}
+        vr_geometry_mode = if($NativeVr){$VRGeometryMode}else{$null}
+        vr_depth_resolution = if($NativeVr -and $VRDepthModel-ne'Selected'){$VRDepthResolution}else{$null}
+        vr_depth_executor = if($NativeVr){$VRDepthExecutor}else{$null}
+        vr_native_metrics = $script:NativeVrMetrics
+        vr_streaming = [bool]$NativeStream
+        vr_scheduling_requested = $VRPipelineScheduling
+        vr_projected_depth_replay = $NativeVr -and $VRDLSSMode-eq'PreAndPerEye'
         guide_width = $GuideWidth
         depth_interval = $DepthInterval
         depth_min_interval = $DepthMinInterval
@@ -2266,7 +2454,7 @@ try {
         fast_start = -not $UseExternalUpscaler
         continuous_nvenc = [bool]$DirectEncode
         gpu_nv12_encode = [bool]($DirectEncode -and $GpuNv12Match.Success -and $GpuNv12Match.Groups['enabled'].Value -eq '1')
-        asynchronous_chunk_nvenc = [bool](-not $IsPreviewOnly -and -not $DirectEncode)
+        asynchronous_chunk_nvenc = [bool](-not $IsPreviewOnly -and -not $DirectEncode -and -not $NativeStream)
         chunk_ack_transport = 'shared-monotonic-counter'
         recording_inflight_chunks = if(-not $IsPreviewOnly){[int]$RecordingInflightChunks}else{$null}
         hardware_cpu_partition = if($PipelineAffinityPartition){[ordered]@{
@@ -2336,7 +2524,7 @@ try {
     try { (Get-Process -Id $PID).PriorityClass = $PreviousControllerPriority } catch {}
     try { (Get-Process -Id $PID).ProcessorAffinity = [intptr]$PreviousControllerAffinity } catch {}
     $env:PATH = $PreviousPath
-    foreach ($Process in @($GuideProcess,$UpscalerProcess,$HostProcess)) {
+    foreach ($Process in @($GuideProcess,$UpscalerProcess,$HostProcess,$NativeVrProcess)) {
         if ($Process -and -not $Process.HasExited) {
             try { & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null } catch {}
         }

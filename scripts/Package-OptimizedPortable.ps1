@@ -171,7 +171,13 @@ foreach ($Name in @('sl.interposer.dll','sl.common.dll','sl.dlss_g.dll','sl.refl
 Copy-Item -LiteralPath (Join-Path $Build 'dist\engine\dlss5-video-host.exe') -Destination (Join-Path $Target 'engine') -Force
 Copy-Item -Path (Join-Path $Build 'dist\guidegen\*') -Destination (Join-Path $Target 'tools\guidegen') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\guidegen.py') -Destination (Join-Path $Target 'tools\guidegen') -Force
+foreach ($Name in @('vr_shared_depth.py','vr_cuda_graph.py','vr_depth_execution.py')) {
+    Copy-Item -LiteralPath (Join-Path $Build "python\$Name") -Destination (Join-Path $Target 'tools\guidegen') -Force
+}
 Copy-Item -LiteralPath (Join-Path $Build 'python\vr_depth_worker.py') -Destination (Join-Path $Target 'tools\vr_depth') -Force
+foreach ($Name in @('vr_shared_depth.py','vr_quality_worker.py','vr_reconstruction.py','vr_atlas.py','vr_stream.py')) {
+    Copy-Item -LiteralPath (Join-Path $Build "python\$Name") -Destination (Join-Path $Target 'tools\vr_depth') -Force
+}
 Copy-Item -LiteralPath (Join-Path $Build 'python\m2svid_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\moebius_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'python\temporal_atlas_worker.py') -Destination (Join-Path $Target 'tools\vr_generative') -Force
@@ -180,7 +186,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Target 'tools/iw3')|Out-Nu
 foreach($Name in @('iw3_worker.py','iw3_model_assets.py','install_iw3.py','iw3-lock.json','iw3_da3.py','iw3_da3_install.py')){
     Copy-Item -LiteralPath (Join-Path $Build "python/$Name") -Destination (Join-Path $Target "tools/iw3/$Name") -Force
 }
-foreach($Name in @('iw3-ui.ps1','process-iw3.ps1','iw3-settings.json','iw3-da3-models.json')){
+foreach($Name in @('iw3-ui.ps1','process-iw3.ps1','iw3-settings.json','iw3-da3-models.json','studio-workspace.ps1','studio-theme.xaml','studio-shell.xaml')){
     Copy-Item -LiteralPath (Join-Path $Build "app/$Name") -Destination (Join-Path $Target "app/$Name") -Force
 }
 Copy-Item -LiteralPath (Join-Path $Build 'scripts/Install-Iw3.ps1') -Destination (Join-Path $Target 'scripts') -Force
@@ -232,6 +238,7 @@ Copy-Item -LiteralPath `
 Copy-Item -LiteralPath (Join-Path $Build 'dist\DLSS5 Video Studio.exe') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'README_OPTIMIZED_RU.md') -Destination (Join-Path $Target 'README_RU.md') -Force
 Copy-Item -LiteralPath (Join-Path $Build 'PROJECT_DOCUMENTATION_RU.md') -Destination $Target -Force
+Copy-Item -LiteralPath (Join-Path $Build 'INTERFACE_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'OPTIMIZATION_V22_RU.md'),(Join-Path $Build 'THIRD_PARTY_NOTICES.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'REALTIME_DEPTH_FIX_V22_0_1_RU.md') -Destination $Target -Force
 Copy-Item -LiteralPath (Join-Path $Build 'IW3_VR_V22_1_RU.md') -Destination $Target -Force

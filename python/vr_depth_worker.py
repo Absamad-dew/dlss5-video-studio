@@ -894,6 +894,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codec", choices=["h264", "h265"], default="h265")
     parser.add_argument("--pixel-format", choices=["yuv420p", "p010le"], default="yuv420p")
     parser.add_argument("--quality", type=int, default=18)
+    parser.add_argument('--native-depth', action='store_true')
+    parser.add_argument('--native-geometry', choices=['iw3','studio'], default='iw3')
+    parser.add_argument('--native-fill', choices=['off','source-atlas','temporal-video'], default='off')
+    parser.add_argument('--native-cache-mb', type=int, choices=[0,128,256,512,1024], default=256)
+    parser.add_argument('--native-halo', type=int, choices=[192,256], default=192)
+    parser.add_argument('--native-strength', type=float, default=1.0)
+    parser.add_argument('--native-eye-depth', type=Path)
+    parser.add_argument('--native-atlas-executor', choices=['gpu-sparse','reference'], default='gpu-sparse')
+    parser.add_argument('--native-rgb-pipe')
+    parser.add_argument('--native-controller-pid', type=int, default=0)
+    parser.add_argument('--native-ready-file', type=Path)
+    parser.add_argument('--native-keep-depth', action='store_true')
     return parser.parse_args()
 
 
@@ -903,6 +915,13 @@ def main() -> int:
         raise RuntimeError("depth 3D VR requires CUDA")
     if args.codec == "h264" and args.pixel_format != "yuv420p":
         raise ValueError("H.264 VR output supports only yuv420p")
+    if args.native_depth:
+        if args.stereo_method != 'rowflow-v3':
+            raise ValueError('Native shared-depth reconstruction currently requires RowFlow V3')
+        if not 0 <= args.native_strength <= 1:
+            raise ValueError('Native inpaint strength must be 0..1')
+        from vr_quality_worker import run
+        return run(args)
     if min(args.rowflow_width, args.rowflow_steps, args.rowflow_edge_x, args.rowflow_edge_y) < 0:
         raise ValueError("RowFlow width/steps/edge dilation cannot be negative")
     rowflow_model = None

@@ -274,12 +274,15 @@ class DepthRuntime:
         return np.asarray(self.session.run(None, {self.input_name: tensor})[0]).squeeze().astype(np.float32)
 
     def infer_frame(self, frame: np.ndarray, output_width: int, output_height: int) -> np.ndarray:
+        return normalize_depth_map(self.infer_raw_frame(frame), output_width, output_height)
+
+    def infer_raw_frame(self, frame: np.ndarray) -> np.ndarray:
         image = cv2.resize(frame, (518, 518), interpolation=cv2.INTER_CUBIC).astype(np.float32) / 255.0
         image = (image - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array(
             [0.229, 0.224, 0.225], dtype=np.float32
         )
         tensor = np.transpose(image, (2, 0, 1))[None].astype(self.input_dtype, copy=False)
-        return normalize_depth_map(self.infer(tensor), output_width, output_height)
+        return self.infer(tensor)
 
 
 class VideoDepthRuntime:
@@ -305,16 +308,20 @@ class VideoDepthRuntime:
         self.model = self.model.cuda().eval()
 
     def infer_frame(self, frame: np.ndarray, output_width: int, output_height: int) -> np.ndarray:
+        return normalize_depth_map(self.infer_raw_frame(frame), output_width, output_height)
+
+    def infer_raw_frame(self, frame: np.ndarray) -> np.ndarray:
         prediction = self.model.infer_video_depth_one(
             frame, input_size=392, device="cuda", fp32=False
         )
-        return normalize_depth_map(prediction, output_width, output_height)
+        return prediction
 
 
 class DepthAnything3Runtime:
     """Depth Anything 3 runtime with depth, confidence and camera-pose capable weights."""
 
     provider = "torch-depth-anything-3-cuda"
+    is_distance = True
 
     def __init__(self, model: Path, code_root: Path) -> None:
         source_root = code_root / "src"
@@ -330,13 +337,23 @@ class DepthAnything3Runtime:
         self.model = DepthAnything3.from_pretrained(str(model.resolve())).cuda().eval()
 
     def infer_frame(self, frame: np.ndarray, output_width: int, output_height: int) -> np.ndarray:
+        return normalize_depth_map(self.infer_raw_frame(frame), output_width, output_height)
+
+    def infer_raw_frame(self, frame: np.ndarray) -> np.ndarray:
         prediction = self.model.inference(
             [frame], process_res=392, process_res_method="upper_bound_resize"
         )
-        return normalize_depth_map(np.asarray(prediction.depth)[0], output_width, output_height)
+        return np.asarray(prediction.depth)[0]
 
 
 def create_depth_runtime(args: argparse.Namespace):
+    if getattr(args,'vr_replay_depth',None):
+        from vr_shared_depth import ReplayDepthRuntime
+        return ReplayDepthRuntime(args.vr_replay_depth)
+    if getattr(args, 'vr_depth_model', 'Selected') != 'Selected':
+        from vr_shared_depth import StudioDA3Runtime
+        return StudioDA3Runtime(args.vr_root, args.vr_depth_model, args.vr_depth_resolution,
+                                args.vr_depth_executor)
     if args.depth_engine == "video-depth-small":
         if args.depth_code_root is None:
             raise ValueError("video-depth-small requires --depth-code-root")
@@ -755,6 +772,14 @@ def generate_chunk(
     depth_prefetch_hits = 0
     write_s = 0.0
     commit_s = 0.0
+    raw_writer = None
+    if getattr(args, 'vr_canonical_depth', False):
+        from vr_shared_depth import RawDepthWriter
+        if is_shared_reference(depth_output):
+            raise ValueError('VR raw depth requires a bounded file cache')
+        raw_writer = RawDepthWriter(
+            Path(depth_output).with_suffix('.vrd'), frames_count, chunk_global_start,
+            planned_total=None if getattr(args, 'vr_stream_depth', False) else (getattr(args, 'total_frames', 0) or None))
 
     guide_grays = [
         frame_to_guide_gray(
@@ -924,6 +949,9 @@ def generate_chunk(
                     depth_prefetch_hits += int(prefetched)
                     depth_prefetch_discarded += discarded
                     depth_frames += 1
+                    if raw_writer is not None:
+                        raw_writer.write(depth, scene_cut or state.global_frame == 0)
+                        depth = depth.guide
                     if adaptive_due and not periodic_due and not scene_cut:
                         adaptive_frames += 1
                     state.frames_since_depth = 0
@@ -947,6 +975,9 @@ def generate_chunk(
                     depth_prefetch_discarded += discarded
                     depth_frames += 1
                     state.frames_since_depth = 0
+                    if raw_writer is not None:
+                        raw_writer.write(depth, scene_cut or state.global_frame == 0)
+                        depth = depth.guide
 
                 depth = guided_depth(gray, depth)
 
@@ -972,7 +1003,11 @@ def generate_chunk(
         if depth_partial is not None and depth_final is not None:
             os.replace(depth_partial, depth_final)
         commit_s += time.perf_counter() - commit_started
+        if raw_writer is not None:
+            raw_writer.close(True)
     except BaseException:
+        if raw_writer is not None:
+            raw_writer.close(False)
         for reference, partial in ((motion_output, motion_partial), (depth_output, depth_partial)):
             if is_shared_reference(reference) and shared_inputs is not None:
                 mapping = shared_inputs.pop(str(reference), None)
@@ -1020,6 +1055,14 @@ def generate_chunk(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", action="store_true")
+    parser.add_argument('--vr-canonical-depth', action='store_true')
+    parser.add_argument('--vr-stream-depth', action='store_true')
+    parser.add_argument('--vr-replay-depth', type=Path)
+    parser.add_argument('--vr-root', type=Path)
+    parser.add_argument('--vr-depth-model', default='Selected', choices=['Selected', 'Any_V3_Mono',
+        'Studio_DA3_Small', 'Studio_DA3_Base', 'Studio_DA3_Large_11', 'Studio_DA3_Giant_11'])
+    parser.add_argument('--vr-depth-resolution', type=int, choices=[392, 518, 644, 812], default=518)
+    parser.add_argument('--vr-depth-executor', choices=['eager', 'cuda-graph'], default='eager')
     parser.add_argument("--input", type=Path)
     parser.add_argument("--width", required=True, type=int)
     parser.add_argument("--height", required=True, type=int)
@@ -1471,11 +1514,24 @@ def run_server(args: argparse.Namespace, runtime: DepthRuntime) -> int:
 
 def main() -> int:
     args = parse_args()
+    if args.vr_replay_depth:
+        if args.vr_canonical_depth or args.vr_depth_model != 'Selected':
+            raise ValueError('Depth replay cannot be combined with fresh canonical inference')
+        args.depth_interval = args.depth_min_interval = 1
     validate_args(args)
     if args.opencv_threads:
         cv2.setNumThreads(args.opencv_threads)
     print("GUIDE_STAGE loading depth runtime", flush=True)
     runtime = create_depth_runtime(args)
+    if args.vr_canonical_depth:
+        if args.vr_depth_model == 'Selected':
+            from vr_shared_depth import SharedDepthRuntime
+            runtime = SharedDepthRuntime(runtime)
+        # Every source frame has one raw prediction. NGX may still apply its own
+        # guide filtering; the stereo consumer never receives that filtered map.
+        args.depth_interval = args.depth_min_interval = 1
+    elif args.vr_depth_model != 'Selected':
+        raise ValueError('Dedicated VR depth model requires --vr-canonical-depth')
     if args.server:
         return run_server(args, runtime)
     assert args.input is not None and args.frames is not None

@@ -2,6 +2,24 @@
 
 Complete project documentation: [Russian guide](PROJECT_DOCUMENTATION_RU.md).
 
+## Latest source updates
+
+- A redesigned four-workspace interface with optional **Simple mode**, five global
+  quality/speed presets, two-way basic settings, searchable sections, and corrected
+  field/button sizing. Profiles apply explicitly; switching views does not reset
+  processing settings. See the [interface guide](INTERFACE_RU.md).
+- Studio's native VR pipeline shares raw depth, uses bounded streaming and cached
+  multi-frame background reconstruction, and exposes optional execution paths.
+  The separate reference IW3 workspace is retained. See [native VR architecture
+  and controls](NATIVE_VR_RU.md), [validation and limitations](NATIVE_VR_QA_RU.md),
+  and the [IW3 performance audit](IW3_ACCELERATION_AUDIT_RU.md).
+- The launcher loads bundled PowerShell modules with a process-local policy;
+  system policy and managed Group Policy are not changed. Update scripts preserve
+  user settings, create backups and verify checksums.
+
+These are source updates, not a new prebuilt release. Models, proprietary binaries,
+video samples and local QA outputs remain excluded from the repository.
+
 22.3 integrates the pinned official **IW3 RowFlow V3** model into Studio's main
 VR pipeline. DLSS5, RowFlow and Temporal Atlas consume one canonical stabilized
 depth/motion cache; RowFlow never invokes IW3's depth estimator a second time.

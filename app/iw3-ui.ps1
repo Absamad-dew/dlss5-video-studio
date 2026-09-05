@@ -15,7 +15,7 @@ $Iw3Intro.TextWrapping='Wrap';$Iw3Intro.Margin='0,0,0,12'
 [void]$Iw3Content.Children.Add($Iw3Intro)
 $script:Iw3GeometryInfo=[Windows.Controls.TextBlock]::new()
 $Iw3GeometryInfo.TextWrapping='Wrap';$Iw3GeometryInfo.Margin='0,0,0,12'
-$Iw3GeometryInfo.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#78D9FF')
+$Iw3GeometryInfo.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#BDC7D4')
 [void]$Iw3Content.Children.Add($Iw3GeometryInfo)
 $Iw3DepthTop=[Windows.Controls.StackPanel]::new()
 [void]$Iw3Content.Children.Add($Iw3DepthTop)
@@ -73,22 +73,24 @@ $Da3Preset.Add_Click({
 [void]$Da3Buttons.Children.Add($Da3Preset)
 [void]$Iw3Content.Children.Add($Da3Buttons)
 $script:Iw3Da3Status=[Windows.Controls.TextBlock]::new();$Iw3Da3Status.TextWrapping='Wrap';$Iw3Da3Status.Margin='0,4,0,12'
-$Iw3Da3Status.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#75DFC3')
+$Iw3Da3Status.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#D4D6DC')
 [void]$Iw3Content.Children.Add($Iw3Da3Status)
 $Iw3Sections=@{}
+$Iw3SectionTabs=[Windows.Controls.TabControl]::new()
+[void]$Iw3Content.Children.Add($Iw3SectionTabs)
 foreach($Field in $Iw3Schema.fields){
     if(-not $Iw3Sections.ContainsKey($Field.group)){
-        $Section=[Windows.Controls.Expander]::new();$Section.Header=$Field.group
-        $Section.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#DCE7F5')
-        $Section.IsExpanded=$Field.group -in @('Стерео','Глубина и стабильность','Наши дополнения')
+        $Section=[Windows.Controls.TabItem]::new();$Section.Header=$Field.group
+        $Section.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#D4D6DC')
         $Section.Margin='0,8,0,8'
         $Stack=[Windows.Controls.StackPanel]::new();$Stack.Margin='8,8,8,4'
         $Section.Content=$Stack;$Iw3Sections[$Field.group]=$Stack
-        [void]$Iw3Content.Children.Add($Section)
+        [void]$Iw3SectionTabs.Items.Add($Section)
     }
     $Stack=if($Field.key -eq 'depth_model'){$Iw3DepthTop}else{$Iw3Sections[$Field.group]}
+    $Number=$null
     $Label=[Windows.Controls.TextBlock]::new();$Label.Text=$Field.label;$Label.Margin='0,6,0,2'
-    $Label.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#DCE7F5')
+    $Label.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#D4D6DC')
     $Label.ToolTip=$Field.help;[void]$Stack.Children.Add($Label)
     switch($Field.type){
         'choice' {
@@ -101,7 +103,7 @@ foreach($Field in $Iw3Schema.fields){
             $Control=[Windows.Controls.Slider]::new();$Control.Minimum=$Field.min;$Control.Maximum=$Field.max
             $Control.TickFrequency=$Field.step;$Control.IsSnapToTickEnabled=$true
             $Number=[Windows.Controls.TextBlock]::new();$Number.HorizontalAlignment='Right'
-            $Number.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#75DFC3')
+            $Number.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#D4D6DC')
             $Binding=[Windows.Data.Binding]::new('Value');$Binding.Source=$Control;$Binding.StringFormat='{0:0.##}'
             [void]$Number.SetBinding([Windows.Controls.TextBlock]::TextProperty,$Binding)
             [void]$Stack.Children.Add($Number)
@@ -111,9 +113,24 @@ foreach($Field in $Iw3Schema.fields){
     [Windows.Automation.AutomationProperties]::SetName($Control,$Field.label)
     $Iw3Controls[$Field.key]=$Control
     [void]$Stack.Children.Add($Control)
+    if($Number){
+        # Keep labels, controls and values aligned without altering the schema.
+        $Row=[Windows.Controls.Grid]::new();$Row.Tag='SettingRow';$Row.Margin='0,3,0,5'
+        foreach($Width in @(1.15,1.6,62)){
+            $Column=[Windows.Controls.ColumnDefinition]::new()
+            $Column.Width=if($Width-eq 62){[Windows.GridLength]::new(62)}else{[Windows.GridLength]::new($Width,[Windows.GridUnitType]::Star)}
+            [void]$Row.ColumnDefinitions.Add($Column)
+        }
+        foreach($Item in @($Label,$Control,$Number)){[void]$Stack.Children.Remove($Item);[void]$Row.Children.Add($Item);$Item.VerticalAlignment='Center'}
+        $Label.Margin='0,0,12,0';$Control.Margin='0,0,14,0';$Number.FontFamily='Consolas'
+        [Windows.Controls.Grid]::SetColumn($Control,1);[Windows.Controls.Grid]::SetColumn($Number,2)
+        [void]$Stack.Children.Add($Row)
+    }elseif($Field.type-eq'bool'){
+        [void]$Stack.Children.Remove($Label) # Checkbox already carries the label.
+    }
     $Help=[Windows.Controls.TextBlock]::new();$Help.Text=$Field.help;$Help.TextWrapping='Wrap';$Help.FontSize=11;$Help.Opacity=.72;$Help.Margin='0,0,0,8'
     if($Field.key -eq 'depth_model'){$Help.Text='DA3: выберите модель и установите кнопкой ниже. Параметры depth и стабильности — в одноимённом разделе.'}
-    $Help.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#BACCE2')
+    $Help.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#ADB1BA')
     [void]$Stack.Children.Add($Help)
     $Iw3HelpBlocks[$Field.key]=$Help
 }
@@ -187,13 +204,13 @@ function Get-Iw3Geometry([int]$Width,[int]$Height,$Settings,[string]$Mode,[strin
 function Show-Iw3Geometry($Plan){
     $Iw3GeometryInfo.Text="Исходник $($Plan.source_geometry[0])×$($Plan.source_geometry[1]) → ракурс $($Plan.eye_geometry[0])×$($Plan.eye_geometry[1]) → файл $($Plan.output_geometry[0])×$($Plan.output_geometry[1]) ($($Plan.layout), $($Plan.codec)).`n4K — рамка 3840×2160 на глаз с сохранением пропорций; для портретного видео рамка поворачивается. Source — исходный размер."
     if(-not $Plan.valid){$Iw3GeometryInfo.Text+="`n"+($Plan.errors -join "`n")}
-    $Iw3GeometryInfo.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString($(if($Plan.valid){'#78D9FF'}else{'#FF9D96'}))
+    $Iw3GeometryInfo.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString($(if($Plan.valid){'#BDC7D4'}else{'#FF9D96'}))
 }
 function Update-Iw3Geometry {
     if(-not $Iw3GeometryInfo -or -not $Iw3Controls.ContainsKey('target_fps') -or -not $Iw3Controls['target_fps'].SelectedItem){return}
     if(-not $script:SourceInfo -or $script:SourceInfo.input -ne $InputBox.Text){
         $Iw3GeometryInfo.Text='Расчёт: исходник → каждый глаз → готовый файл. Для ссылки точный размер проверяется сразу после открытия потока, до DLSS и загрузки модели. 4K вписывается в 3840×2160 на глаз без обрезки.'
-        $Iw3GeometryInfo.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#78D9FF');return
+        $Iw3GeometryInfo.Foreground=[Windows.Media.BrushConverter]::new().ConvertFromString('#BDC7D4');return
     }
     if(-not $ModeCombo.SelectedItem -or -not $CodecCombo.SelectedItem){return}
     Show-Iw3Geometry (Get-Iw3Geometry $SourceInfo.width $SourceInfo.height (Get-Iw3Settings) (Combo-Tag $ModeCombo) (Combo-Tag $CodecCombo))
@@ -204,14 +221,15 @@ function Update-Iw3Ui {
     if($Active){
         $NeuralGroup.IsEnabled=(Combo-Tag $Iw3Controls['dlss_mode'])-ne'Off'
         $PerformanceCombo.IsEnabled=$NeuralGroup.IsEnabled
-        $NeuralGroup.Header='DLSS 5 · НАСТРОЙКИ ДОПОЛНИТЕЛЬНОГО ПРОХОДА ПЕРЕД IW3'
+        $NeuralGroup.Header='DLSS 5 · дополнительный проход перед IW3'
     }
     $Method=Combo-Tag $Iw3Controls['method']
     $MethodField=@($Iw3Schema.fields|Where-Object key -eq 'method')|Select-Object -First 1
     $MethodOption=@($MethodField.options|Where-Object value -eq $Method)|Select-Object -First 1
     if($Iw3HelpBlocks.ContainsKey('method') -and $MethodOption -and $MethodOption.help){
         $Iw3HelpBlocks['method'].Text=$MethodField.help+"`n`nВЫБРАНО: "+$MethodOption.help
-        $Iw3Controls['method'].ToolTip=$Iw3HelpBlocks['method'].Text
+        if($Iw3Controls['method'].ToolTip -is [Windows.Controls.ToolTip]){$Iw3Controls['method'].ToolTip.Content=$Iw3HelpBlocks['method'].Text}
+        else{$Iw3Controls['method'].ToolTip=$Iw3HelpBlocks['method'].Text}
     }
     foreach($Key in @('mask_inner_dilation','mask_outer_dilation','inpaint_max_width')){if($Iw3Controls.ContainsKey($Key)){$Iw3Controls[$Key].IsEnabled=$Method.EndsWith('inpaint')}}
     if($Iw3Controls.ContainsKey('warp_steps')){$Iw3Controls['warp_steps'].IsEnabled=$Method.StartsWith('row_flow')}

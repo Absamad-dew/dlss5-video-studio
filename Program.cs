@@ -87,12 +87,14 @@ internal static class Program
     }
 
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
         BindChildrenToStudioLifetime();
         string root = AppContext.BaseDirectory;
         string scriptPath = Path.Combine(root, "app", "studio.ps1");
         string errorLog = Path.Combine(root, "studio.error.log");
+        bool validateUi = args.Length == 1 && args[0] == "--validate-ui";
+        string validationLog = Path.Combine(root, "studio.validation.log");
         try
         {
             if (!File.Exists(scriptPath))
@@ -100,7 +102,14 @@ internal static class Program
             Directory.SetCurrentDirectory(root);
             string script = File.ReadAllText(scriptPath, new UTF8Encoding(false, true));
             if (File.Exists(errorLog)) File.Delete(errorLog);
-            using (Runspace runspace = RunspaceFactory.CreateRunspace())
+            if (validateUi && File.Exists(validationLog)) File.Delete(validationLog);
+            // Match the process-local policy used by our worker launchers. The EXE
+            // hosts PowerShell itself, so powershell.exe command-line flags do not
+            // apply here. Do not change CurrentUser/LocalMachine or replace the
+            // authorization manager: administrator Group Policy still takes priority.
+            InitialSessionState initialState = InitialSessionState.CreateDefault();
+            initialState.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Bypass;
+            using (Runspace runspace = RunspaceFactory.CreateRunspace(initialState))
             using (PowerShell shell = PowerShell.Create())
             {
                 runspace.ApartmentState = System.Threading.ApartmentState.STA;
@@ -109,18 +118,24 @@ internal static class Program
                 runspace.SessionStateProxy.SetVariable("StudioScriptBase", Path.GetDirectoryName(scriptPath));
                 shell.Runspace = runspace;
                 shell.AddScript(script);
-                shell.Invoke();
+                if (validateUi) shell.AddParameter("ValidateUi", true);
+                var output = shell.Invoke();
                 if (shell.HadErrors)
                 {
                     string message = string.Join(Environment.NewLine, shell.Streams.Error.Select(e => e.ToString()));
                     throw new InvalidOperationException(message);
                 }
+                if (validateUi)
+                    File.WriteAllText(validationLog,
+                        string.Join(Environment.NewLine, output.Select(item => item.ToString())), Encoding.UTF8);
             }
             return 0;
         }
         catch (Exception error)
         {
             File.WriteAllText(errorLog, error.ToString(), Encoding.UTF8);
+            // Automated startup checks must fail promptly, not block on a modal.
+            if (validateUi) return 1;
             MessageBox.Show(
                 error.Message + Environment.NewLine + Environment.NewLine + "Log: " + errorLog,
                 "DLSS5 Video Studio",

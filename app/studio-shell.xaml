@@ -1,0 +1,131 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Title="DLSS5 Video Studio" Width="1480" Height="920" MinWidth="1040" MinHeight="680" WindowStartupLocation="CenterScreen"
+ Background="#232427" Foreground="#E0E1E5" FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True" SnapsToDevicePixels="True">
+ <Window.Resources><ResourceDictionary/></Window.Resources>
+ <Grid Background="{Binding Background, RelativeSource={RelativeSource AncestorType=Window}}">
+  <Grid.ColumnDefinitions><ColumnDefinition Width="196"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+  <Border Background="#1B1C1F" BorderBrush="#36383E" BorderThickness="0,0,1,0" Padding="12,20,12,14">
+   <DockPanel>
+    <StackPanel DockPanel.Dock="Top">
+     <TextBlock Text="Video Studio" FontSize="20" FontWeight="SemiBold" Foreground="#ECEDEF" Margin="9,0,0,0"/>
+     <TextBlock Text="Видео и стерео 3D" FontSize="11" Foreground="#9499A3" Margin="10,4,0,22"/>
+     <TabControl x:Name="WorkspaceTabs" Style="{StaticResource ModeNavigation}" Margin="0,0,0,19">
+      <TabItem Header="Реалтайм" Tag="Realtime"/><TabItem Header="Запись видео" Tag="Recording"/>
+      <TabItem Header="Studio VR" Tag="VR"/><TabItem Header="IW3 / 3D" Tag="IW3"/>
+     </TabControl>
+     <Border Height="1" Background="#36383E" Margin="8,0,8,16"/>
+     <CheckBox x:Name="SimpleModeCheck" Content="Простой режим" Margin="12,0,4,16" ToolTip="Оставить только источник и основные настройки. Параметры обработки не сбрасываются."/>
+     <TextBlock Text="Настройки режима" FontSize="11" Foreground="#9499A3" Margin="12,0,0,8"/>
+    </StackPanel>
+    <StackPanel DockPanel.Dock="Bottom" Margin="8,16,4,0">
+     <TextBlock x:Name="RuntimeStatus" Text="Готов к работе" FontSize="11" Foreground="#ADB3BD"/>
+     <TextBlock Text="Ctrl+K — найти настройку&#10;Esc — остановить обработку" FontSize="11" Foreground="#9499A3" Margin="0,12,0,0"/>
+    </StackPanel>
+    <ListBox x:Name="SectionNav" FontSize="12"/>
+   </DockPanel>
+  </Border>
+  <Grid Grid.Column="1" Margin="24,18,20,12">
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+   <Grid Margin="0,0,0,18">
+    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+    <StackPanel><TextBlock x:Name="WorkspaceTitle" Text="Реалтайм" FontSize="23" FontWeight="SemiBold"/><TextBlock x:Name="WorkspaceSubtitle" Text="Просмотр с обработкой на GPU" Foreground="#ADB1BA" FontSize="12" Margin="0,5,16,0"/></StackPanel>
+    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+     <Button x:Name="PreviewPaneButton" Content="Просмотр" ToolTip="Открыть или скрыть встроенный просмотр готового файла"/>
+     <Button x:Name="JournalButton" Content="Журнал" ToolTip="Прогресс, предупреждения и сообщения обработки"/>
+    </StackPanel>
+   </Grid>
+   <Grid Grid.Row="1" Margin="0,0,0,14">
+    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="14"/><ColumnDefinition Width="255"/></Grid.ColumnDefinitions>
+    <Border CornerRadius="3" Background="#292B30" Padding="10,4"><DockPanel><Button x:Name="SourceShortcut" DockPanel.Dock="Right" Content="Источник" Padding="10,4" MinHeight="28" Margin="8,0,0,0"/><TextBlock x:Name="SourceSummary" Text="Добавьте видео или ссылку, чтобы начать" Foreground="#BDC1CA" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/></DockPanel></Border>
+    <Grid Grid.Column="2"><TextBox x:Name="SettingsSearch" Margin="0" VerticalContentAlignment="Center" ToolTip="Поиск параметров по названию и описанию (Ctrl+K)" AutomationProperties.Name="Поиск настроек"/><TextBlock x:Name="SearchWatermark" Text="Поиск настроек   Ctrl+K" Foreground="#989DA6" Margin="13,0" VerticalAlignment="Center" IsHitTestVisible="False"/></Grid>
+   </Grid>
+   <Grid x:Name="MainWorkspaceGrid" Grid.Row="2">
+    <Grid.ColumnDefinitions><ColumnDefinition x:Name="SettingsColumn" Width="*" MinWidth="550"/><ColumnDefinition x:Name="PreviewGapColumn" Width="0"/><ColumnDefinition x:Name="PreviewColumn" Width="0"/></Grid.ColumnDefinitions>
+    <Grid>
+     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+     <Border x:Name="SearchResultsPane" Visibility="Collapsed" Background="#292B30" CornerRadius="3" Padding="9" Margin="0,0,0,12">
+      <StackPanel><TextBlock x:Name="SearchHint" Text="Найти параметр" Foreground="#7298C4" Margin="7,2,0,6"/><ListBox x:Name="SearchResults" MaxHeight="210"/></StackPanel>
+     </Border>
+     <ScrollViewer x:Name="SettingsScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+      <StackPanel x:Name="PagesHost" HorizontalAlignment="Stretch">
+       <StackPanel x:Name="PageSource" Tag="Source"/>
+       <StackPanel x:Name="PageSimple" Tag="Simple">
+        <GroupBox Header="Общий профиль">
+         <StackPanel>
+          <TextBlock Text="Один набор для всего режима. Выберите баланс скорости и качества, затем примените его." Margin="0,0,0,14"/>
+          <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+           <ComboBox x:Name="SimpleProfileCombo" Margin="0" Height="32" AutomationProperties.Name="Общий профиль">
+            <ComboBoxItem Content="Ультрабыстрый" Tag="UltraFast"/><ComboBoxItem Content="Быстрый" Tag="Fast"/><ComboBoxItem Content="Средний" Tag="Medium"/><ComboBoxItem Content="Тяжёлый" Tag="Heavy"/><ComboBoxItem Content="Максимальный" Tag="Maximum"/>
+           </ComboBox>
+           <Button x:Name="ApplySimpleProfile" Grid.Column="1" Content="Применить профиль" Margin="8,0,0,0" Height="32" Padding="12,4"/>
+          </Grid>
+          <TextBlock x:Name="SimpleProfileDescription" Margin="0,12,0,8" Foreground="#ADB1BA"/>
+          <Border Background="#292B30" CornerRadius="3" Padding="12"><TextBlock x:Name="SimpleProfileStatus" Text="Настройки не изменены. Применение профиля заменит ручные параметры качества в этом режиме."/></Border>
+         </StackPanel>
+        </GroupBox>
+        <GroupBox Header="Основные настройки">
+         <StackPanel>
+          <TextBlock Text="Разрешение результата"/><ComboBox x:Name="SimpleResolutionCombo" AutomationProperties.Name="Разрешение результата"/>
+          <StackPanel x:Name="SimpleCodecPanel"><TextBlock Text="Кодек записи"/><ComboBox x:Name="SimpleCodecCombo" AutomationProperties.Name="Кодек записи"/></StackPanel>
+          <StackPanel x:Name="SimplePlayerPanel">
+           <TextBlock Text="Целевые кадры в секунду"/><ComboBox x:Name="SimpleFpsCombo"/>
+           <TextBlock Text="Генерация кадров"/><ComboBox x:Name="SimpleFrameGenCombo"/>
+           <DockPanel Margin="0,4,0,0"><TextBlock x:Name="SimpleBufferValue" DockPanel.Dock="Right"/><TextBlock Text="Буфер готового видео"/></DockPanel>
+           <Slider x:Name="SimpleBufferSlider" Minimum="3" Maximum="30" TickFrequency="1" IsSnapToTickEnabled="True" ToolTip="Запас уже обработанного видео в секундах. Больший запас сглаживает сложные сцены, но увеличивает ожидание и расход памяти."/>
+          </StackPanel>
+          <StackPanel x:Name="SimpleStereoPanel">
+           <TextBlock Text="Компоновка для шлема"/><ComboBox x:Name="SimpleLayoutCombo"/>
+           <DockPanel Margin="0,4,0,0"><TextBlock x:Name="SimpleStereoValue" DockPanel.Dock="Right"/><TextBlock x:Name="SimpleStereoLabel" Text="Сила 3D"/></DockPanel>
+           <Slider x:Name="SimpleStereoSlider" ToolTip="Больше — сильнее объём, но сложнее края объектов и выше нагрузка на глаза. Начните с умеренного значения."/>
+           <TextBlock Text="DLSS 5 в 3D"/><ComboBox x:Name="SimpleDlssCombo"/>
+          </StackPanel>
+          <Button x:Name="SimpleDetailsButton" Content="Подробные настройки →" HorizontalAlignment="Left" Margin="0,12,0,0" ToolTip="Открыть все разделы. Текущие значения сохранятся."/>
+         </StackPanel>
+        </GroupBox>
+       </StackPanel>
+       <StackPanel x:Name="PageOutput" Tag="Output"/>
+       <StackPanel x:Name="PagePlayer" Tag="Player"/>
+       <StackPanel x:Name="PageStereo" Tag="Stereo"/>
+       <StackPanel x:Name="PageDepth" Tag="Depth"/>
+       <StackPanel x:Name="PageFill" Tag="Fill"/>
+       <StackPanel x:Name="PageComfort" Tag="Comfort"/>
+       <StackPanel x:Name="PageIW3" Tag="IW3"/>
+       <StackPanel x:Name="PageNeural" Tag="Neural"/>
+       <StackPanel x:Name="PageUpscale" Tag="Upscale"/>
+       <StackPanel x:Name="PageMotion" Tag="Motion"/>
+       <GroupBox x:Name="HelpCard" Header="Что делает этот параметр" Visibility="Collapsed"><TextBlock x:Name="ContextHelpText" Text="Выберите настройку — здесь появится подробное пояснение." Foreground="#AABDD2"/></GroupBox>
+      </StackPanel>
+     </ScrollViewer>
+    </Grid>
+    <GridSplitter x:Name="PreviewSplitter" Grid.Column="1" Width="5" HorizontalAlignment="Center" Background="#35465A" Visibility="Collapsed"/>
+    <Border x:Name="PreviewPane" Grid.Column="2" Visibility="Collapsed" Background="#191A1D" BorderBrush="#3B3D43" BorderThickness="1" CornerRadius="3" Padding="14">
+     <Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <TabControl x:Name="ReviewTabs">
+       <TabItem Header="Просмотр"><Grid><MediaElement x:Name="Preview" LoadedBehavior="Manual" UnloadedBehavior="Manual" Stretch="Uniform"/>
+        <StackPanel x:Name="Placeholder" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="20">
+         <TextBlock Text="▷" FontSize="56" Foreground="#7298C4" HorizontalAlignment="Center"/><TextBlock Text="Ваш результат" FontSize="18" HorizontalAlignment="Center" Margin="0,12,0,8"/>
+         <TextBlock Text="Готовое видео появится здесь.&#10;Реалтайм открывается в отдельном GPU-плеере." Foreground="#91A7BE" TextAlignment="Center"/>
+        </StackPanel>
+       </Grid></TabItem>
+       <TabItem Header="Журнал"><TextBox x:Name="LogBox" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12" Background="#191A1D" Foreground="#B9CCDF" BorderThickness="0" Margin="0"/></TabItem>
+      </TabControl>
+      <StackPanel Grid.Row="1" Margin="0,12,0,0">
+       <Slider x:Name="PreviewSeek" Minimum="0" Maximum="1" IsEnabled="False" ToolTip="Позиция в готовом видео"/>
+       <TextBlock x:Name="PreviewTime" Text="00:00 / 00:00" Foreground="#97ADC4" HorizontalAlignment="Center" Margin="0,0,0,8"/>
+       <WrapPanel HorizontalAlignment="Center"><Button x:Name="PlayButton" Content="▷ / Ⅱ" IsEnabled="False" ToolTip="Пауза или продолжение просмотра"/><Button x:Name="OpenVideo" Content="Открыть" IsEnabled="False" ToolTip="Открыть готовый файл во внешнем плеере"/><Button x:Name="OpenFolder" Content="Папка" IsEnabled="False" ToolTip="Показать готовый файл в проводнике"/></WrapPanel>
+      </StackPanel>
+     </Grid>
+    </Border>
+   </Grid>
+   <Border Grid.Row="3" Background="#232427" BorderBrush="#45474E" BorderThickness="0,1,0,0" CornerRadius="0" Padding="0,12,0,0" Margin="0,10,0,0">
+    <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <StackPanel Margin="0,0,14,0"><TextBlock x:Name="StatusText" Text="Готово к работе" FontSize="15" FontWeight="SemiBold"/><TextBlock x:Name="DetailText" Text="Выберите видео — служебные карты создаются автоматически" Foreground="#A7ABB4" FontSize="12" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Margin="0,4,0,0"/></StackPanel>
+     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"><Button x:Name="CancelButton" Content="Остановить" IsEnabled="False" Background="#33353A" BorderBrush="#484B53" ToolTip="Остановить все процессы текущей обработки (Esc)"/><Button x:Name="RunButton" Content="Начать просмотр" Style="{StaticResource PrimaryButton}" MinWidth="165"/></StackPanel>
+     <ProgressBar x:Name="Progress" Grid.Row="1" Grid.ColumnSpan="2" Height="4" Margin="0,12,0,10" Minimum="0" Maximum="100"/>
+     <WrapPanel Grid.Row="2"><TextBlock x:Name="SpeedText" Text="— FPS" Foreground="#D4D6DC" Margin="0,0,18,0"/><TextBlock x:Name="EtaText" Text="Осталось: —" Foreground="#BDC1CA" Margin="0,0,18,0"/><TextBlock x:Name="ElapsedText" Text="Прошло: 00:00" Foreground="#A7ABB4"/><TextBlock x:Name="ProgressHint" Text="" Foreground="#9499A3" Margin="18,0,0,0"/></WrapPanel>
+     <CheckBox x:Name="InlineHelpCheck" Grid.Row="2" Grid.Column="1" Content="Пояснения" IsChecked="False" FontSize="12" Margin="10,0,3,0" ToolTip="Показать подробные объяснения в разделах. Краткие подсказки при наведении доступны всегда."/>
+    </Grid>
+   </Border>
+  </Grid>
+ </Grid>
+</Window>

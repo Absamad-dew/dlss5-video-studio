@@ -18,6 +18,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <commctrl.h>
+#include "player_theme.h"
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <d3dcompiler.h>
@@ -144,6 +145,7 @@ static size_t PackedFrameBytes(const std::string &format, UINT width, UINT heigh
 static char g_log_path[MAX_PATH];
 static bool g_show_window = false;   // visible host window = the user's door to the DLSS 5 panel
 static bool g_preview_mode = false;
+static bool g_player_ui_test = false;
 static bool g_preview_direct = false;
 static bool g_preview_has_frame = false;
 static UINT g_preview_width = 960;
@@ -622,15 +624,15 @@ static void LayoutPreviewControls(HWND window)
 {
     RECT client = {};
     GetClientRect(window, &client);
-    const int count = 10;
-    const int gap = 6;
-    const int button_width = std::clamp((client.right - 16 - (count - 1) * gap) / count, 68L, 104L);
-    const int button_height = 36;
+    const int count = studio_player_ui::rows(window, client.right) == 2 ? 5 : 10;
+    const int gap = studio_player_ui::px(window, 8);
+    const int button_width = std::max(36L, (client.right - 2 * gap - (count - 1) * gap) / count);
+    const int button_height = studio_player_ui::px(window, 38);
     const int total_width = count * button_width + (count - 1) * gap;
     const int left = std::max(8L, (client.right - total_width) / 2L);
-    const int top = std::max(8L, client.bottom - button_height - 12L);
-    const int timeline_top = std::max(8, top - 40);
-    const int time_width = 84;
+    const int top = studio_player_ui::px(window, 52);
+    const int timeline_top = studio_player_ui::px(window, 9);
+    const int time_width = studio_player_ui::px(window, 84);
     if (g_preview_time_current != nullptr)
         SetWindowPos(g_preview_time_current, HWND_TOP, 12, timeline_top + 6, time_width, 24, SWP_NOACTIVATE);
     if (g_preview_time_total != nullptr)
@@ -639,10 +641,10 @@ static void LayoutPreviewControls(HWND window)
     if (g_preview_seekbar != nullptr)
         SetWindowPos(g_preview_seekbar, HWND_TOP, 12 + time_width, timeline_top,
                      std::max(80L, client.right - 2 * (12 + time_width)), 34, SWP_NOACTIVATE);
-    for (int i = 0; i < count; ++i)
+    for (int i = 0; i < 10; ++i)
     {
         if (g_preview_buttons[i] == nullptr) continue;
-        SetWindowPos(g_preview_buttons[i], HWND_TOP, left + i * (button_width + gap), top,
+        SetWindowPos(g_preview_buttons[i], HWND_TOP, left + (i % count) * (button_width + gap), top + (i / count) * (button_height + gap),
                      button_width, button_height, SWP_NOACTIVATE);
         ShowWindow(g_preview_buttons[i], g_preview_controls_visible ? SW_SHOWNOACTIVATE : SW_HIDE);
     }
@@ -657,8 +659,8 @@ static void PositionPreviewControls()
     GetClientRect(h.hwnd, &client);
     POINT origin = { 0, 0 };
     ClientToScreen(h.hwnd, &origin);
-    constexpr int overlay_height = 96;
     const int width = std::max(320L, client.right - client.left);
+    const int overlay_height = studio_player_ui::height(h.hwnd, width);
     const int height = static_cast<int>(std::min<long>(overlay_height, std::max(72L, client.bottom - client.top)));
     SetWindowPos(g_preview_controls_window, HWND_TOP, origin.x,
                  origin.y + std::max(0L, client.bottom - height), width, height,
@@ -763,6 +765,10 @@ static void TogglePreviewFullscreen(bool fullscreen)
 
 static bool WritePreviewControl(const char *command)
 {
+    if (g_player_ui_test) {
+        if (strcmp(command, "CLOSE") == 0) PostMessageW(h.hwnd, WM_CLOSE, 0, 0);
+        return true;
+    }
     if (g_preview_event_file.empty()) return false;
     // Native player events are an append-only queue.  A single shared mailbox
     // lost PLAYING/BUFFER_READY whenever two events arrived inside the
@@ -838,11 +844,12 @@ static void CreatePreviewControls(HWND parent)
     const int ids[] = { IDC_SEEK_BACK_BIG, IDC_SEEK_BACK, IDC_PAUSE, IDC_SEEK_FORWARD,
                         IDC_SEEK_FORWARD_BIG, IDC_MUTE, IDC_FULLSCREEN, IDC_TOGGLE_FPS,
                         IDC_HIDE_MENU, IDC_CLOSE_PLAYER };
-    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    static HFONT font = CreateFontW(-studio_player_ui::px(parent, 13), 0, 0, 0, FW_NORMAL,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     for (int i = 0; i < 10; ++i)
     {
         g_preview_buttons[i] = CreateWindowExW(0, L"BUTTON", labels[i],
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             0, 0, 98, 38, g_preview_controls_window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids[i])),
             GetModuleHandleW(nullptr), nullptr);
         if (g_preview_buttons[i] != nullptr)
@@ -862,6 +869,7 @@ static void CreatePreviewControls(HWND parent)
         WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"dlss5feedhost", L"FPS",
         WS_POPUP | WS_CLIPCHILDREN, 0, 0, 600, 82, parent, nullptr,
         GetModuleHandleW(nullptr), nullptr);
+    if (g_preview_seekbar != nullptr) SetWindowTheme(g_preview_seekbar, L"", L"");
     if (g_preview_fps_window != nullptr)
     {
         g_preview_fps_text = CreateWindowExW(0, L"STATIC",
@@ -882,6 +890,22 @@ static LRESULT CALLBACK WndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
     {
         switch (m)
         {
+        case WM_ERASEBKGND:
+            if (w == g_preview_controls_window || w == g_preview_fps_window || g_player_ui_test) {
+                RECT rect = {}; GetClientRect(w, &rect);
+                FillRect(reinterpret_cast<HDC>(wp), &rect, studio_player_ui::background());
+                return 1;
+            }
+            break;
+        case WM_DRAWITEM:
+            if (w == g_preview_controls_window && reinterpret_cast<DRAWITEMSTRUCT *>(lp)->CtlType == ODT_BUTTON) {
+                studio_player_ui::button(*reinterpret_cast<DRAWITEMSTRUCT *>(lp)); return TRUE;
+            }
+            break;
+        case WM_NOTIFY:
+            if (reinterpret_cast<NMHDR *>(lp)->hwndFrom == g_preview_seekbar && reinterpret_cast<NMHDR *>(lp)->code == NM_CUSTOMDRAW)
+                return studio_player_ui::track(*reinterpret_cast<NMCUSTOMDRAW *>(lp));
+            break;
         case WM_SIZE:
             if (w == h.hwnd) { PositionPreviewControls(); PositionPreviewFps(); }
             else if (w == g_preview_controls_window) LayoutPreviewControls(w);
@@ -915,8 +939,8 @@ static LRESULT CALLBACK WndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
             break;
         case WM_CTLCOLORSTATIC:
             SetTextColor(reinterpret_cast<HDC>(wp), RGB(235, 242, 250));
-            SetBkColor(reinterpret_cast<HDC>(wp), RGB(8, 12, 18));
-            return reinterpret_cast<LRESULT>(GetStockObject(BLACK_BRUSH));
+            SetBkColor(reinterpret_cast<HDC>(wp), RGB(30, 31, 34));
+            return reinterpret_cast<LRESULT>(studio_player_ui::background());
         case WM_KEYDOWN:
         {
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -963,6 +987,7 @@ static LRESULT CALLBACK WndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
             }
             break;
         case WM_CLOSE:
+            if (g_player_ui_test) { DestroyWindow(w); PostQuitMessage(0); return 0; }
             WritePreviewControl("CLOSE");
             return 0;
         default: break;
@@ -4698,8 +4723,33 @@ static int Serve(DWORD game_pid)
 
 // ---------------------------------------------------------------------------
 
+// Exercises the actual player controls without loading NGX, models or a GPU
+// context. Kept separate from all processing paths and never reports test FPS.
+static int RunPlayerUiTest(bool compact = false)
+{
+    g_player_ui_test = true; g_preview_mode = true; g_preview_direct = true;
+    g_preview_window_revealed = true; g_preview_media_duration_seconds = 600;
+    INITCOMMONCONTROLSEX controls = { sizeof(controls), ICC_BAR_CLASSES };
+    InitCommonControlsEx(&controls);
+    WNDCLASSW wc = {}; wc.lpfnWndProc = WndProc; wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"dlss5feedhost"; wc.hbrBackground = studio_player_ui::background();
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)); RegisterClassW(&wc);
+    h.hwnd = CreateWindowW(wc.lpszClassName, L"Studio Player · UI test (no video / no GPU)",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, compact ? 720 : 1180, 720, nullptr, nullptr, wc.hInstance, nullptr);
+    if (!h.hwnd) return 1;
+    GetWindowRect(h.hwnd, &g_preview_windowed_rect);
+    CreatePreviewControls(h.hwnd); ShowWindow(h.hwnd, SW_SHOW);
+    SetWindowPos(h.hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    PositionPreviewControls();
+    MSG message;
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--player-ui-test") == 0) return RunPlayerUiTest();
+    if (argc == 2 && strcmp(argv[1], "--player-ui-test-compact") == 0) return RunPlayerUiTest(true);
     GetModuleFileNameA(nullptr, g_log_path, MAX_PATH);
     if (char *s = strrchr(g_log_path, '\\'))
         strcpy_s(s + 1, MAX_PATH - (s + 1 - g_log_path), "dlss5-video-host.log");
