@@ -4,7 +4,7 @@
 
 An independent Windows video-processing system for realtime playback, recording and stereo/VR. Its core engineering work is moving frames between persistent producers, shared memory, GPU queues, hardware encoding and an interactive player—with explicit ownership, bounded buffering and a separate audio timeline.
 
-[Engineering overview](ENGINEERING_OVERVIEW.md) · [Обзор на русском](ENGINEERING_OVERVIEW_RU.md) · [Full Russian documentation](PROJECT_DOCUMENTATION_RU.md) · [Interface guide](INTERFACE_RU.md) · [Engineering history](ENGINEERING_HISTORY.md)
+[Release 22.3.0](https://github.com/Absamad-dew/dlss5-video-studio/releases/tag/v22.3.0) · [Engineering overview](ENGINEERING_OVERVIEW.md) · [Обзор на русском](ENGINEERING_OVERVIEW_RU.md) · [Full Russian documentation](PROJECT_DOCUMENTATION_RU.md) · [Interface guide](INTERFACE_RU.md) · [Engineering history](ENGINEERING_HISTORY.md)
 
 ![Native video dataflow, resource ownership and audio timeline](media/video-dataflow.svg)
 
@@ -58,6 +58,6 @@ build_ui.bat
 
 ## Current source / packaged releases
 
-The source documents version 22.3. Existing [release model packs](https://github.com/Absamad-dew/dlss5-video-studio/releases) supplement prepared portable folders and do not constitute a new prebuilt 22.3 application. Proprietary NVIDIA/ReShade payloads, large model weights, user video and local diagnostics are excluded.
+**[Download 22.3.0](https://github.com/Absamad-dew/dlss5-video-studio/releases/tag/v22.3.0)** for the checked source kit or Windows launcher with source. Video processing requires the separately built native backend and compatible runtime components. See the [build instructions](BUILDING.md) and [release checks](https://github.com/Absamad-dew/dlss5-video-studio/actions/runs/41683317334).
 
 This is an independent project, not an official NVIDIA product. Input video does not contain authoritative engine motion or geometry; estimated guides have content-dependent limitations. Original source is [MIT licensed](LICENSE); SDKs, add-ons and models retain [their own terms](THIRD_PARTY_NOTICES.md). [Detailed limitations and licensing](ENGINEERING_HISTORY.md#important-limitations).
