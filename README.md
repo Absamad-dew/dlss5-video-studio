@@ -8,6 +8,8 @@ An independent Windows video-processing system for realtime playback, recording 
 
 ![Native video dataflow, resource ownership and audio timeline](media/video-dataflow.svg)
 
+**Try the [three-minute demo](DEMO_GUIDE.md):** run the real stereo geometry preflight with standard Python and no GPU/models, follow the frame path, then inspect the [source-linked decision timeline](docs/DECISION_TIMELINE.md). A separate guide covers live playback/recording on a prepared Windows machine; the architecture diagram is not a captured GPU run.
+
 ## Three user workflows
 
 | Workflow | What it produces | Implementation to inspect |

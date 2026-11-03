@@ -1,0 +1,32 @@
+name: CPU geometry and worker contracts
+
+on:
+  push:
+    branches: [main]
+    paths: ['python/iw3_worker.py', 'app/iw3-settings.json', 'tests/test_iw3_worker.py', 'scripts/demo-preflight.py', '.github/workflows/cpu-preflight.yml']
+  pull_request:
+    paths: ['python/iw3_worker.py', 'app/iw3-settings.json', 'tests/test_iw3_worker.py', 'scripts/demo-preflight.py', '.github/workflows/cpu-preflight.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-contracts:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Existing CPU worker contracts, without site packages or model execution
+        run: python -I -S -B -m unittest discover -s tests -p test_iw3_worker.py -v
+      - name: Accept the real ultrawide plan
+        run: python -I -S -B scripts/demo-preflight.py
+      - name: Unsupported stereo geometry must fail before rendering
+        run: python -I -S -B -c "import subprocess,sys; p=subprocess.run([sys.executable,'-I','-S','-B','scripts/demo-preflight.py','--width','5082','--height','2160','--output-mode','Source']); assert p.returncode==2, p.returncode"
