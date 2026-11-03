@@ -75,7 +75,12 @@
   "gpu_execution_verified": false,
   "new_performance_measurement": false,
   "models_downloaded": false,
-  "hosted_ci_result": "pending",
+  "hosted_ci_result": {
+    "conclusion": "success",
+    "source_revision": "89fd98ef6fb8cee1d0f621b1967debad551deb0d",
+    "url": "https://github.com/Absamad-dew/dlss5-video-studio/actions/runs/41682392495",
+    "scope": "Linux/Windows CPU contracts and source packaging; Windows launcher build and offscreen policy regression"
+  },
   "distribution": {
     "source_and_first_party_launcher": "eligible for root review",
     "sdk_linked_native_binaries": "local-only candidate; conditional SDK distribution terms unresolved"
