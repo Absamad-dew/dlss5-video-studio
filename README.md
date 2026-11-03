@@ -43,6 +43,8 @@ The [engineering overview](ENGINEERING_OVERVIEW.md) links directly to stable sou
 
 ## Build and run
 
+[Clean-checkout build guide](BUILDING.md) covers CPU checks, the independently buildable launcher, native SDK preflight, external SDK paths and allowlisted source/developer packaging. Build scripts fail early on missing dependencies and perform no implicit downloads. Source packages and compiled developer builds are distinct from a complete GPU runtime.
+
 The [CPU geometry preflight](scripts/demo-preflight.py) exercises the production settings and stereo-dimension checks without GPU inference. [Instructions](DEMO_GUIDE.md#public-walkthrough-three-minutes) · [Existing tests](tests/test_iw3_worker.py) · [Implementation decisions](docs/DECISION_TIMELINE.md).
 
 This is a source project, not a one-command portable distribution. Prepare **Windows 10/11 x64**, Visual Studio 2022 Build Tools, the required NGX/Streamline SDKs and the dependencies for your chosen guide engine. Build with:

@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-03",
+  "kind": "local-source-build-verification",
+  "baseline_revision": "8a9761d76344725314447d6efbcd315e046b3ae4",
+  "source_fingerprints": {
+    "native/dlss5_video_host.cpp": "ed91916e78aee8ddf3afbddfff03023b613bc48a17aff07f47c763851ad91303",
+    "native/nvenc_d3d12.h": "596960dce34a8246079e1db0ca2ae18e2be66cd84ea0c61b110b4e70ad230a7e",
+    "native/streamline_probe.cpp": "23934414d01569c020863580d98b4509c2f4a35a7758e4c7b94fbb195ee4ac33",
+    "Program.cs": "c78793c861b5f8870d9fb34d760f142c64fc7f7907b09a4149cb24d7b8ece142"
+  },
+  "binary_fingerprints": {
+    "dist/engine/dlss5-video-host.exe": "5c252deafc5134e58d91b807fe6bf6ecf8cbc0b0284fc336f9a5100828faec1e",
+    "dist/streamline/streamline-probe.exe": "ae9d8a8d6cae8f6a41afb9d67a08e01e17bd8f96da5bac9550943d64f9b4a881",
+    "dist/DLSS5 Video Studio.exe": "24a29cea32b6107caf180ba12500239d50f1901d1873ed0d8734897522ddb4c0"
+  },
+  "toolchain": {
+    "os": "Windows x64",
+    "msvc": "19.44.35228.0",
+    "windows_sdk": "10.0.26100.0",
+    "csharp_compiler": "4.8.9221.0",
+    "streamline_sdk": "2.12.0",
+    "nvenc_header": "13.0.19.0"
+  },
+  "checks": [
+    {
+      "target": "native-host",
+      "status": "compiled",
+      "exit_code": 0,
+      "corebroker_id": "e7143d80-c6a0-4b85-bf42-bd8fbf949ccc",
+      "warnings": [
+        "Existing C4996 std::filesystem::u8path deprecation"
+      ]
+    },
+    {
+      "target": "streamline-probe",
+      "status": "compiled-not-executed",
+      "exit_code": 0,
+      "corebroker_id": "66900ae1-97c5-41c1-bd5d-3fcaa85199dd"
+    },
+    {
+      "target": "launcher",
+      "status": "compiled",
+      "exit_code": 0,
+      "corebroker_id": "9e9664cc-ad79-46e2-a250-f37bf9f0a849"
+    },
+    {
+      "target": "offscreen-launcher",
+      "status": "passed",
+      "policy_cases": [
+        "Clean",
+        "Restricted",
+        "RemoteSigned"
+      ],
+      "persistent_policy_changed": false,
+      "corebroker_id": "a06f127e-fbf8-4c83-ba60-3e80db9db384"
+    },
+    {
+      "target": "native-cli-usage",
+      "status": "expected-usage-return",
+      "exit_code": 1,
+      "argument": "--help",
+      "before_graphics_initialization": true,
+      "loader_dialogs_suppressed": true,
+      "per_process_runtime_path_only": true,
+      "vendor_files_copied": false,
+      "corebroker_id": "e0c5f023-f1a2-4fc5-b28b-8d8a23dec784"
+    }
+  ],
+  "corrected_failure": {
+    "stage": "PowerShell 5.1 build preflight",
+    "error": "Generic-list array serialization rejected argument types",
+    "fix": "Use List.ToArray before JSON serialization"
+  },
+  "gpu_execution_verified": false,
+  "new_performance_measurement": false,
+  "models_downloaded": false,
+  "hosted_ci_result": "pending",
+  "distribution": {
+    "source_and_first_party_launcher": "eligible for root review",
+    "sdk_linked_native_binaries": "local-only candidate; conditional SDK distribution terms unresolved"
+  }
+}

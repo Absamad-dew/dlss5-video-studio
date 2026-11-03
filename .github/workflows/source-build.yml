@@ -1,0 +1,54 @@
+name: Source build and CPU contracts
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      native:
+        description: Compile on the owner-provisioned SDK runner; no GPU execution or binary publication
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  cpu:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -I -S -B scripts/demo-preflight.py
+      - run: python -I -S -B -m unittest discover -s tests -p test_iw3_worker.py -v
+      - run: python scripts/package_source_build.py --output dist/ci-source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-kit-${{ matrix.os }}
+          path: |
+            dist/dlss5-video-studio-22.3.0-source-kit.zip
+            dist/dlss5-video-studio-22.3.0-source-kit.zip.sha256
+  launcher:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preflight and compile launcher
+        shell: cmd
+        run: build_ui.bat
+      - name: Offscreen real modules and inherited-policy regression
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test-studio-launcher.ps1
+  native:
+    if: github.event_name == 'workflow_dispatch' && inputs.native && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, studio-native-sdk]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile native host with already provisioned SDKs
+        shell: cmd
+        run: build_native.bat
+      - name: Compile Streamline probe without executing it
+        shell: cmd
+        run: build_streamline_probe.bat

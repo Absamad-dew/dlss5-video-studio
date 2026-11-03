@@ -4,10 +4,11 @@ set "SRC=%~dp0native"
 set "SDK=%~dp0third_party\nvidia_ngx_sdk"
 set "SL=%~dp0third_party\streamline-sdk-v2.12.0"
 set "NVCODEC=%~dp0third_party\nvcodec\include"
-if not exist "%NVCODEC%\ffnvcodec\nvEncodeAPI.h" (
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Install-NvCodecHeaders.ps1"
-  if errorlevel 1 exit /b 1
-)
+if defined DLSS5_NGX_SDK set "SDK=%DLSS5_NGX_SDK%"
+if defined DLSS5_STREAMLINE_SDK set "SL=%DLSS5_STREAMLINE_SDK%"
+if defined DLSS5_NVCODEC_INCLUDE set "NVCODEC=%DLSS5_NVCODEC_INCLUDE%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Test-BuildPrerequisites.ps1" -Target Native
+if errorlevel 1 exit /b 2
 if not defined DLSS5_BUILD_OUT set "DLSS5_BUILD_OUT=%~dp0dist\engine"
 set "OUT=%DLSS5_BUILD_OUT%"
 

@@ -1,5 +1,7 @@
 @echo off
 setlocal
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Test-BuildPrerequisites.ps1" -Target Launcher
+if errorlevel 1 exit /b 2
 set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 set "SMA=C:\Windows\Microsoft.Net\assembly\GAC_MSIL\System.Management.Automation\v4.0_3.0.0.0__31bf3856ad364e35\System.Management.Automation.dll"
 if not defined DLSS5_UI_OUT set "DLSS5_UI_OUT=%~dp0dist\DLSS5 Video Studio.exe"
