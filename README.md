@@ -8,8 +8,6 @@ An independent Windows video-processing system for realtime playback, recording 
 
 ![Native video dataflow, resource ownership and audio timeline](media/video-dataflow.svg)
 
-**Try the [three-minute demo](DEMO_GUIDE.md):** run the real stereo geometry preflight with standard Python and no GPU/models, follow the frame path, then inspect the [source-linked decision timeline](docs/DECISION_TIMELINE.md). A separate guide covers live playback/recording on a prepared Windows machine; the architecture diagram is not a captured GPU run.
-
 ## Three user workflows
 
 | Workflow | What it produces | Implementation to inspect |
@@ -44,6 +42,8 @@ Correctness is checked by encoding **the exact GPU frames captured in the same r
 The [engineering overview](ENGINEERING_OVERVIEW.md) links directly to stable source lines. [Version-by-version history](ENGINEERING_HISTORY.md) preserves the earlier design work; [V22 validation](OPTIMIZATION_V22_RU.md), [startup/shutdown fix](REALTIME_DEPTH_FIX_V22_0_1_RU.md), [native VR architecture](NATIVE_VR_RU.md), [VR QA](NATIVE_VR_QA_RU.md) and [IW3 integration](IW3_VR_V22_1_RU.md) retain the detailed evidence.
 
 ## Build and run
+
+The [CPU geometry preflight](scripts/demo-preflight.py) exercises the production settings and stereo-dimension checks without GPU inference. [Instructions](DEMO_GUIDE.md#public-walkthrough-three-minutes) · [Existing tests](tests/test_iw3_worker.py) · [Implementation decisions](docs/DECISION_TIMELINE.md).
 
 This is a source project, not a one-command portable distribution. Prepare **Windows 10/11 x64**, Visual Studio 2022 Build Tools, the required NGX/Streamline SDKs and the dependencies for your chosen guide engine. Build with:
 
