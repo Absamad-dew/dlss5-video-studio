@@ -1,26 +1,45 @@
-# Video Studio for Windows
+# DLSS5 Video Studio
 
-**An independent video-processing application spanning native GPU work, model orchestration and a desktop product.**
+**C++20 / D3D12 / NVENC · Python workers · WPF/PowerShell desktop application**
 
-DLSS5 Video Studio combines realtime playback, recording and stereoscopic video workspaces. A native D3D12 host consumes estimated motion/depth guides, integrates optional NVIDIA NGX and Streamline/Reflex components, and sends recording frames through a GPU-resident NVENC path.
+An independent Windows video-processing system for realtime playback, recording and stereo/VR. Its core engineering work is moving frames between persistent producers, shared memory, GPU queues, hardware encoding and an interactive player—with explicit ownership, bounded buffering and a separate audio timeline.
 
-[Full Russian documentation](PROJECT_DOCUMENTATION_RU.md) · [Interface guide](INTERFACE_RU.md) · [Version-by-version engineering history](ENGINEERING_HISTORY.md) · [Releases and model packs](https://github.com/Absamad-dew/dlss5-video-studio/releases)
+[Engineering overview](ENGINEERING_OVERVIEW.md) · [Обзор на русском](ENGINEERING_OVERVIEW_RU.md) · [Full Russian documentation](PROJECT_DOCUMENTATION_RU.md) · [Interface guide](INTERFACE_RU.md) · [Engineering history](ENGINEERING_HISTORY.md)
 
-## What to inspect
+![Native video dataflow, resource ownership and audio timeline](media/video-dataflow.svg)
 
-| Engineering area | Implementation and evidence |
-|---|---|
-| Native video transport | Bounded shared-memory and GPU frame rings, resource fences, persistent decoding and asynchronous mapping release. [V22 optimization and A/B checks](OPTIMIZATION_V22_RU.md). |
-| Recording | Direct D3D12→NVENC path with initialization-only fallback and pixel/timestamp checks against encoding the same captured GPU frames. [Validation](OPTIMIZATION_V22_RU.md). |
-| Realtime playback | Buffer telemetry, audio sample-clock alignment, pause/resume and explicit model preflight. [Startup and shutdown fix](REALTIME_DEPTH_FIX_V22_0_1_RU.md). |
-| Stereo/VR | Shared stabilized motion/depth cache, native rendering and a separate pinned IW3 reference workspace. [Architecture](NATIVE_VR_RU.md), [QA and limits](NATIVE_VR_QA_RU.md), [IW3 integration](IW3_VR_V22_1_RU.md). |
-| Product interface | WPF/PowerShell launcher, simple/expert controls, explicit presets, independent workspace settings and dependency diagnostics. [Interface](INTERFACE_RU.md). |
+## Three user workflows
 
-## A measured optimization
+| Workflow | What it produces | Implementation to inspect |
+|---|---|---|
+| **Realtime** | Presented video and audio; optional NVIDIA Frame Generation through Streamline/Reflex | Prepared-frame buffering, source-speed presentation, sample-clock audio pause/recovery, ordered GPU shutdown |
+| **Recording** | H.264/H.265 MP4 with audio | GPU NV12 → D3D12 NVENC for eligible continuous recording; compressed output to FFmpeg muxing |
+| **Stereo / VR** | Full/Half SBS and OU; native Studio and separate pinned IW3 workspace | Shared stabilized motion/depth cache, native rendering and explicit reference/experimental paths |
 
-The retained V22 controlled laptop comparison improved native-stage throughput from **24.393 to 29.981 FPS (+22.9%)**. The test used 120 real 1440p frames, one warmup and three repetitions per path. It excludes guide generation and source decoding; the [measurement note](OPTIMIZATION_V22_RU.md) preserves the full settings and separate end-to-end observations.
+Direct NVENC applies to continuous recording without preview or intermediate chunk encoding. Realtime does not encode a recording, and advanced stereo reconstruction has a separate performance envelope. [Architecture and ownership](ENGINEERING_OVERVIEW.md) explain these boundaries.
 
-Encoder parity is checked using the same captured GPU frames, rather than assuming two separate neural-rendering runs are identical. The repository also retains cases where full-pipeline output differs and identifies synthetic transport fixtures separately.
+## Measured optimization: 24.393 → 29.981 FPS
+
+The retained V22 A/B comparison improved **native-stage median throughput by 22.9%** on RTX 4060 Laptop. It used 120 real 1440p frames, one warmup and three repetitions per path, matched H.265 P1/LL and QP 18, and neutral guides to isolate delivery/encoding.
+
+| Measurement boundary | FFmpeg NVENC, corrected input color tags | Direct D3D12 NVENC |
+|---|---:|---:|
+| Native-stage median | 24.393 FPS | **29.981 FPS** |
+| Native benchmark process, including launch | 7.745 s | **6.963 s** |
+
+Both rows exclude source decoding and guide generation. A **separate complete recording** of 240 frames took 22.86 s / 10.50 FPS with guides, model loading and audio; guides were the reported limiting stage. The stage gain is not an application-wide speedup claim. [Settings, repetitions, later tuning and limitations](OPTIMIZATION_V22_RU.md) remain available.
+
+Correctness is checked by encoding **the exact GPU frames captured in the same run** through both backends, then comparing decoded pixels, PTS/DTS, duration and color metadata. Separate complete NGX runs can differ; the repository retains that evidence and labels synthetic transport fixtures. This is encoder parity evidence, not a general image-quality score.
+
+## Systems decisions visible in the code
+
+| Decision | Why it matters | Public implementation |
+|---|---|---|
+| Separate input acknowledgement from GPU completion | Replenish the producer queue without freeing or overwriting in-flight GPU resources | [Four-slot ring, allocator fences and chunk lifetime](ENGINEERING_OVERVIEW.md#frame-ownership-and-backpressure) |
+| Keep raw recording frames on the GPU through NVENC | Remove normal raw-output readback; retain an explicit diagnostic capture path | [Mapped resources, input/output fences, EOS drain and safe fallback](ENGINEERING_OVERVIEW.md#recording-keep-raw-output-on-the-gpu) |
+| Treat throughput, media time and device startup as different clocks | Avoid audio tempo/restart loops during slow chunks, pause and rebuffering | [Audio sample-clock handling and Streamline shutdown](ENGINEERING_OVERVIEW.md#realtime-throughput-is-not-the-playback-clock) |
+
+The [engineering overview](ENGINEERING_OVERVIEW.md) links directly to stable source lines. [Version-by-version history](ENGINEERING_HISTORY.md) preserves the earlier design work; [V22 validation](OPTIMIZATION_V22_RU.md), [startup/shutdown fix](REALTIME_DEPTH_FIX_V22_0_1_RU.md), [native VR architecture](NATIVE_VR_RU.md), [VR QA](NATIVE_VR_QA_RU.md) and [IW3 integration](IW3_VR_V22_1_RU.md) retain the detailed evidence.
 
 ## Build and run
 
@@ -35,6 +54,6 @@ build_ui.bat
 
 ## Current source / packaged releases
 
-The source documents version 22.3. Existing release model packs supplement prepared portable folders and do not constitute a new prebuilt 22.3 application. Proprietary NVIDIA/ReShade payloads, large model weights, user video and local diagnostics are excluded.
+The source documents version 22.3. Existing [release model packs](https://github.com/Absamad-dew/dlss5-video-studio/releases) supplement prepared portable folders and do not constitute a new prebuilt 22.3 application. Proprietary NVIDIA/ReShade payloads, large model weights, user video and local diagnostics are excluded.
 
-This is an independent project, not an official NVIDIA product. Input video does not contain authoritative engine motion or geometry; estimated guides have content-dependent limitations. Original source is MIT licensed; SDKs, add-ons and models retain their own terms. [Detailed limitations and licensing](ENGINEERING_HISTORY.md#important-limitations).
+This is an independent project, not an official NVIDIA product. Input video does not contain authoritative engine motion or geometry; estimated guides have content-dependent limitations. Original source is [MIT licensed](LICENSE); SDKs, add-ons and models retain [their own terms](THIRD_PARTY_NOTICES.md). [Detailed limitations and licensing](ENGINEERING_HISTORY.md#important-limitations).

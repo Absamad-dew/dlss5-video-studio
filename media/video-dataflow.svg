@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="790" viewBox="0 0 1400 790" role="img" aria-labelledby="title description">
+  <title id="title">Video Studio: native frame dataflow and resource ownership</title>
+  <desc id="description">Persistent decode and Python guides publish named shared-memory chunks. A native C++ D3D12 host copies inputs to a fenced four-frame ring. Playback presents frames; eligible recording converts to GPU NV12 and uses NVENC. Chunk acknowledgements release input mappings, while GPU and encoder completion protect slot reuse. Audio uses a separate sample clock.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#73d9cb"/></marker>
+    <style>
+      text { font-family: 'Segoe UI', Arial, sans-serif; fill: #eaf2f8; }
+      .title { font-size: 40px; font-weight: 700; }
+      .sub { font-size: 22px; fill: #a8bdca; }
+      .label { font-size: 23px; font-weight: 650; }
+      .body { font-size: 20px; fill: #c4d4df; }
+      .small { font-size: 18px; fill: #a8bdca; }
+      .tag { font-size: 18px; font-weight: 700; fill: #73d9cb; letter-spacing: 1px; }
+      .node { fill: #112837; stroke: #355667; stroke-width: 2; }
+      .flow { fill: none; stroke: #73d9cb; stroke-width: 3; marker-end: url(#arrow); }
+      .rule { stroke: #355667; stroke-width: 1; }
+    </style>
+  </defs>
+  <rect width="1400" height="790" rx="22" fill="#081923"/>
+  <text x="40" y="64" class="title">Frame delivery with explicit ownership.</text>
+  <text x="40" y="103" class="sub">Video Studio · native playback and eligible direct recording</text>
+
+  <text x="40" y="158" class="tag">CPU PRODUCERS / CONTROLLER</text>
+  <text x="885" y="158" class="tag">GPU HOST / OUTPUTS</text>
+  <rect x="40" y="182" width="215" height="177" rx="14" class="node"/>
+  <text x="59" y="220" class="label">Persistent decode</text>
+  <text x="59" y="259" class="body">FFmpeg input</text>
+  <text x="59" y="291" class="body">NV12 / RGB</text>
+  <text x="59" y="332" class="small">Source video</text>
+
+  <rect x="300" y="182" width="230" height="177" rx="14" class="node"/>
+  <text x="319" y="220" class="label">Motion + depth</text>
+  <text x="319" y="259" class="body">Python guide worker</text>
+  <text x="319" y="291" class="body">Bounded preparation</text>
+  <text x="319" y="332" class="small">Estimated guides</text>
+
+  <rect x="575" y="182" width="250" height="177" rx="14" class="node"/>
+  <text x="594" y="220" class="label">Shared input chunks</text>
+  <text x="594" y="259" class="body">Named mappings</text>
+  <text x="594" y="291" class="body">Frames + sidecars</text>
+  <text x="594" y="332" class="small">Release after input ACK</text>
+
+  <rect x="870" y="182" width="245" height="177" rx="14" fill="#12382f" stroke="#73d9cb" stroke-width="2"/>
+  <text x="889" y="220" class="label">C++20 / D3D12</text>
+  <text x="889" y="259" class="body">Expand → NGX render</text>
+  <text x="889" y="291" class="body">4 fenced frame slots</text>
+  <text x="889" y="332" class="small">12 command allocators</text>
+
+  <rect x="1160" y="166" width="200" height="99" rx="14" class="node"/>
+  <text x="1176" y="201" class="label">Display</text>
+  <text x="1176" y="234" class="small">Optional FG</text>
+  <rect x="1160" y="295" width="200" height="99" rx="14" class="node"/>
+  <text x="1176" y="330" class="label">NV12 → NVENC</text>
+  <text x="1176" y="363" class="small">Bitstream → CPU</text>
+  <path d="M255 270 H291" class="flow"/>
+  <path d="M530 270 H566" class="flow"/>
+  <path d="M825 270 H861" class="flow"/>
+  <path d="M1115 239 H1137 V215 H1151" class="flow"/>
+  <path d="M1115 302 H1137 V344 H1151" class="flow"/>
+  <text x="40" y="402" class="small">Shared memory avoids intermediate frame files; upload and GPU copies still exist.</text>
+
+  <rect x="40" y="438" width="1320" height="134" rx="14" fill="#0e2633"/>
+  <text x="62" y="476" class="label">Two completion boundaries</text>
+  <path d="M490 457 V552" class="rule"/>
+  <text x="62" y="515" class="body">Input bytes copied into upload ring</text>
+  <text x="62" y="546" class="small">Chunk ACK → producer can retire mappings</text>
+  <text x="518" y="515" class="body">GPU fence / encoder Collect complete</text>
+  <text x="518" y="546" class="small">Only then may the corresponding GPU / encoder slot be reused</text>
+
+  <rect x="40" y="603" width="1320" height="112" rx="14" fill="#20263c"/>
+  <text x="62" y="641" class="label">Audio timeline is separate</text>
+  <text x="62" y="681" class="body">ffplay sample clock + native media time → pause / rebuffer / aligned recovery</text>
+  <text x="1090" y="641" class="small">Throughput ≠ clock</text>
+  <text x="40" y="758" class="small">Stereo / VR has separate workspace paths and reuses Studio's canonical guide cache. See the engineering overview.</text>
+</svg>
