@@ -37,7 +37,18 @@ if($Target-in @('All','Native')){
     }
     Check 'nvenc-header' (Test-Path -LiteralPath (Join-Path $NvCodec 'ffnvcodec/nvEncodeAPI.h')) 'NVENC header 13.0.19.0; explicit Install-NvCodecHeaders.ps1'
     $Header=Join-Path $NvCodec 'ffnvcodec/nvEncodeAPI.h'
-    $HeaderMatches=(Test-Path -LiteralPath $Header) -and (Get-FileHash -LiteralPath $Header -Algorithm SHA256).Hash-eq'4FE4094541EF0F8A13249D97A8692DC5F835A6E9DD42EEADB3E2F7321D54DC7E'
+    # A Windows PowerShell child can inherit PS7 module paths. Hash with .NET
+    # directly rather than depending on the Get-FileHash script cmdlet.
+    $HeaderHash=''
+    if(Test-Path -LiteralPath $Header){
+        $Stream=[IO.File]::OpenRead($Header)
+        try{
+            $Sha=[Security.Cryptography.SHA256]::Create()
+            try{$HeaderHash=[BitConverter]::ToString($Sha.ComputeHash($Stream)).Replace('-','')}
+            finally{$Sha.Dispose()}
+        }finally{$Stream.Dispose()}
+    }
+    $HeaderMatches=$HeaderHash-eq'4FE4094541EF0F8A13249D97A8692DC5F835A6E9DD42EEADB3E2F7321D54DC7E'
     Check 'nvenc-header-sha256' $HeaderMatches 'Pinned public NVENC 13.0.19.0 header digest'
 }
 $Ready=@($Checks | Where-Object {-not $_.ready}).Count-eq 0
